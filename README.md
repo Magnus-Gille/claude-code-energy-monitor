@@ -30,7 +30,7 @@ Or do it manually:
 
 ```bash
 # Download the script
-curl -o ~/.claude/statusline.py https://raw.githubusercontent.com/magnusgille/claude-code-energy-monitor/master/statusline.py
+curl -o ~/.claude/statusline.py https://raw.githubusercontent.com/Magnus-Gille/claude-code-energy-monitor/master/statusline.py
 
 # Make it executable
 chmod +x ~/.claude/statusline.py
