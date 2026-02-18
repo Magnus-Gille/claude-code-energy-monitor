@@ -8,9 +8,10 @@ estimates, not measurements.
 
 Center estimates (mWh per 1k tokens) from Couch (2026), who derived
 them from Epoch AI's GPT-4o analysis and Anthropic's pricing ratios:
-  - Fresh input:  390   (parallel prefill)
-  - Output:       1,950 (autoregressive decode, ~5x input)
-  - Cache read:   39    (skips prefill, ~10x cheaper than fresh input)
+  - Fresh input:   390   (parallel prefill)
+  - Output:        1,950 (autoregressive decode, ~5x input)
+  - Cache read:    39    (skips prefill, ~10x cheaper than fresh input)
+  - Cache write:   490   (prefill + write overhead, ~1.25x fresh input)
 
 We apply 3x uncertainty in each direction (divide/multiply by 3),
 giving a ~10x range from low to high. This brackets:
@@ -64,6 +65,7 @@ QUOTA_TTL = 300  # seconds between API calls
 E_IN_LO, E_IN_HI = 130, 1170          # fresh input
 E_OUT_LO, E_OUT_HI = 650, 5850        # output (decode)
 E_CACHE_LO, E_CACHE_HI = 13, 117      # cached input (cache read)
+E_CW_LO, E_CW_HI = 163, 1470         # cache creation (write)
 
 
 def load(path):
@@ -159,12 +161,13 @@ def fetch_quota():
         return cache.get("q5"), cache.get("q7")
 
 
-def update_daily(sid, inp, out, cu_cache_read):
+def update_daily(sid, inp, out, cu_cache_read, cu_cache_write):
     """Update daily totals with file locking to prevent lost updates.
 
-    cu_cache_read: cache_read_input_tokens from current_usage (per-API-call).
-    We accumulate this across calls by detecting new API calls (total_input increased).
-    Returns (daily_input, daily_output, daily_cached, session_cached).
+    cu_cache_read/cu_cache_write: per-API-call values from current_usage.
+    We accumulate these across calls by detecting new API calls (total_input increased).
+    Returns (daily_input, daily_output, daily_cache_read, daily_cache_write,
+             session_cache_read, session_cache_write).
     """
     today = date.today().isoformat()
 
@@ -183,7 +186,8 @@ def update_daily(sid, inp, out, cu_cache_read):
                     "date": d["date"],
                     "input": d.get("input", 0),
                     "output": d.get("output", 0),
-                    "cached": d.get("cached", 0),
+                    "cache_read": d.get("cached", 0),
+                    "cache_write": d.get("cache_write", 0),
                     "sessions": len(d.get("sessions", {})),
                 })
                 try:
@@ -194,42 +198,49 @@ def update_daily(sid, inp, out, cu_cache_read):
                 except Exception:
                     pass
             d = {"date": today, "sessions": {},
-                 "input": 0, "output": 0, "cached": 0}
+                 "input": 0, "output": 0, "cached": 0, "cache_write": 0}
 
         prev = d.get("sessions", {}).get(sid, {})
 
         # Detect new API call: total_input_tokens increased since last seen.
-        # Only accumulate cache_read on new calls to avoid double-counting
+        # Only accumulate cache values on new calls to avoid double-counting
         # (statusline fires multiple times per call during streaming).
         prev_li = prev.get("li", 0)
         new_call = inp > prev_li
-        prev_cached = prev.get("c", 0)
-        accumulated_cache = prev_cached + cu_cache_read if new_call else prev_cached
+        prev_cr = prev.get("c", 0)
+        prev_cw = prev.get("cw", 0)
+        acc_cr = prev_cr + cu_cache_read if new_call else prev_cr
+        acc_cw = prev_cw + cu_cache_write if new_call else prev_cw
 
         di = max(0, inp - prev.get("i", 0))
         do_ = max(0, out - prev.get("o", 0))
-        dc = max(0, accumulated_cache - prev_cached)
+        d_cr = max(0, acc_cr - prev_cr)
+        d_cw = max(0, acc_cw - prev_cw)
 
         d.setdefault("sessions", {})[sid] = {
-            "i": inp, "o": out, "c": accumulated_cache, "li": inp}
+            "i": inp, "o": out, "c": acc_cr, "cw": acc_cw, "li": inp}
         d["input"] = d.get("input", 0) + di
         d["output"] = d.get("output", 0) + do_
-        d["cached"] = d.get("cached", 0) + dc
+        d["cached"] = d.get("cached", 0) + d_cr
+        d["cache_write"] = d.get("cache_write", 0) + d_cw
 
         save(DAILY_FILE, d)
-        return d["input"], d["output"], d["cached"], accumulated_cache
+        return (d["input"], d["output"], d["cached"], d.get("cache_write", 0),
+                acc_cr, acc_cw)
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
 
 
-def energy_range(fresh_in, cached_in, out):
+def energy_range(fresh_in, cached_in, cache_write_in, out):
     """Compute low/high energy in mWh from token counts."""
     lo = (fresh_in / 1000 * E_IN_LO
           + cached_in / 1000 * E_CACHE_LO
+          + cache_write_in / 1000 * E_CW_LO
           + out / 1000 * E_OUT_LO)
     hi = (fresh_in / 1000 * E_IN_HI
           + cached_in / 1000 * E_CACHE_HI
+          + cache_write_in / 1000 * E_CW_HI
           + out / 1000 * E_OUT_HI)
     return lo, hi
 
@@ -278,16 +289,17 @@ def main():
     # We accumulate it across calls in update_daily.
     current_usage = ctx.get("current_usage") or {}
     cu_cache_read = current_usage.get("cache_read_input_tokens", 0)
+    cu_cache_write = current_usage.get("cache_creation_input_tokens", 0)
 
-    d_in, d_out, d_cached, s_cached = update_daily(
-        sid, s_in, s_out, cu_cache_read)
+    d_in, d_out, d_cr, d_cw, s_cr, s_cw = update_daily(
+        sid, s_in, s_out, cu_cache_read, cu_cache_write)
     # total_input_tokens EXCLUDES cached tokens in Claude Code's API.
     # fresh = total_input (already fresh-only), cached is additive.
     s_fresh = s_in
     d_fresh = d_in
 
-    s_lo, s_hi = energy_range(s_fresh, s_cached, s_out)
-    d_lo, d_hi = energy_range(d_fresh, d_cached, d_out)
+    s_lo, s_hi = energy_range(s_fresh, s_cr, s_cw, s_out)
+    d_lo, d_hi = energy_range(d_fresh, d_cr, d_cw, d_out)
 
     q5, q7 = fetch_quota()
 
@@ -299,8 +311,8 @@ def main():
         if q7 is not None:
             q_str += f" 7d:{q7:.0f}%"
         parts.append(q_str)
-    parts.append(f"S:{fmt_tok(s_in + s_cached + s_out)} {fmt_nrg_range(s_lo, s_hi)}")
-    parts.append(f"D:{fmt_tok(d_in + d_cached + d_out)} {fmt_nrg_range(d_lo, d_hi)}")
+    parts.append(f"S:{fmt_tok(s_in + s_cr + s_cw + s_out)} {fmt_nrg_range(s_lo, s_hi)}")
+    parts.append(f"D:{fmt_tok(d_in + d_cr + d_cw + d_out)} {fmt_nrg_range(d_lo, d_hi)}")
 
     print(" | ".join(parts), end="")
 

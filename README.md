@@ -61,7 +61,7 @@ No cron jobs, no daemons, no manual intervention. You just use Claude Code and t
 All files are created with owner-only permissions (`0600`). Example history entry:
 
 ```json
-{"date": "2026-02-18", "input": 2797805, "output": 693769, "cached": 1901548, "sessions": 12}
+{"date": "2026-02-18", "input": 2797805, "output": 693769, "cache_read": 1901548, "cache_write": 312000, "sessions": 12}
 ```
 
 ## Energy estimation methodology
@@ -79,6 +79,7 @@ The center estimates come from [Simon P. Couch's analysis](https://www.simonpcou
 | Fresh input (prefill) | 130 mWh/1k tokens | 390 | 1,170 mWh/1k tokens |
 | Output (decode) | 650 mWh/1k tokens | 1,950 | 5,850 mWh/1k tokens |
 | Cached input (cache read) | 13 mWh/1k tokens | 39 | 117 mWh/1k tokens |
+| Cache creation (write) | 163 mWh/1k tokens | 490 | 1,470 mWh/1k tokens |
 
 The low and high bounds are 3x below and above the center (i.e. divide/multiply by 3), giving a ~10x range from low to high.
 
@@ -89,6 +90,10 @@ Input tokens are processed in parallel (prefill), while output tokens are genera
 ### Why cached tokens are ~10x cheaper
 
 Claude Code aggressively caches conversation context. When tokens are read from cache, they skip the expensive prefill computation entirely. The 10x ratio mirrors Anthropic's pricing structure (cached input is 90% cheaper than fresh input).
+
+### Why cache creation costs ~1.25x fresh input
+
+When tokens are written to cache for the first time, they require the same prefill computation as fresh input *plus* the overhead of writing to cache storage. Anthropic charges a 25% surcharge for cache creation, which Couch uses as a proxy for the additional energy cost.
 
 ### Validation against published measurements
 
@@ -109,10 +114,19 @@ We don't know:
 
 Inference efficiency is also a rapidly moving target. Google reported a [33x improvement](https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference) in a single year.
 
+### Compute-only vs full datacenter energy
+
+These estimates cover **accelerator compute energy only** — the GPU/TPU work of processing tokens. They do not include the full operational footprint of a datacenter: cooling, networking, CPU/RAM overhead, storage, idle power, and Power Usage Effectiveness (PUE).
+
+Google's [infrastructure measurement blog post](https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference) (August 2025) quantifies this gap: their median Gemini query goes from 0.10 Wh (chip-active only) to 0.24 Wh (full-stack) — a **2.4x multiplier** just from accounting methodology.
+
+This means the real operational energy could be 1.5-3x higher than what this script shows. The uncertainty band already partially absorbs this (our high estimate uses 3x the center), but for a complete picture you should be aware that "compute energy" and "datacenter electricity" are different things.
+
 ## What this does NOT capture
 
+- **Full datacenter overhead.** See above. Our estimates are compute-focused. The real operational footprint is likely 1.5-3x higher.
 - **Training energy.** Training a frontier model costs tens of gigawatt-hours, but that's a one-time cost amortized across millions of users.
-- **Reasoning mode overhead.** Extended thinking / chain-of-thought can use [150-700x more energy](https://huggingface.co/blog/sasha/ai-energy-score-v2) than standard inference. The estimates above are for standard inference only.
+- **Reasoning mode overhead.** Extended thinking / chain-of-thought can use [150-700x more energy](https://huggingface.co/blog/sasha/ai-energy-score-v2) than standard inference. The estimates above are for standard inference only. However, if Claude Code's `total_output_tokens` includes billed thinking tokens (likely), the energy estimate already scales up with reasoning use.
 - **Embodied energy.** Manufacturing GPUs, building datacenters, networking infrastructure.
 - **Your own hardware.** Your laptop and monitor also consume energy while you wait for responses.
 
