@@ -126,7 +126,7 @@ This means the real operational energy could be 1.5-3x higher than what this scr
 
 - **Full datacenter overhead.** See above. Our estimates are compute-focused. The real operational footprint is likely 1.5-3x higher.
 - **Training energy.** Training a frontier model costs tens of gigawatt-hours, but that's a one-time cost amortized across millions of users.
-- **Reasoning mode overhead.** Extended thinking / chain-of-thought can use [150-700x more energy](https://huggingface.co/blog/sasha/ai-energy-score-v2) than standard inference. The estimates above are for standard inference only. However, if Claude Code's `total_output_tokens` includes billed thinking tokens (likely), the energy estimate already scales up with reasoning use.
+- **Reasoning mode overhead.** Extended thinking / chain-of-thought can use [150-700x more energy](https://huggingface.co/blog/sasha/ai-energy-score-v2) than standard inference. The estimates above are for standard inference only. However, investigation suggests that Claude Code's `total_output_tokens` (which the statusbar context reports) **does include thinking tokens** — the statusbar reports ~3x more output tokens than the JSONL conversation logs for well-covered sessions, consistent with Opus's chain-of-thought overhead. If confirmed, the energy estimate already scales with reasoning use. See [FINDINGS.md](FINDINGS.md) for details.
 - **Embodied energy.** Manufacturing GPUs, building datacenters, networking infrastructure.
 - **Your own hardware.** Your laptop and monitor also consume energy while you wait for responses.
 
@@ -144,7 +144,9 @@ To put the numbers in context:
 | Driving an EV 1 km | ~150 Wh |
 | Swedish household daily use (with electric heating) | ~40 kWh |
 
-A heavy day of AI-assisted coding (1-5 kWh) is somewhere between reheating leftovers and driving to the next town.
+A typical day of AI-assisted coding likely falls in the 0.5-5 kWh range. A heavy day on Opus (full workday, many sessions) measured at 3-28 kWh (center ~10 kWh), equivalent to running several extra refrigerators or driving an EV 20-180 km. See [FINDINGS.md](FINDINGS.md) for a detailed analysis of a real usage day.
+
+> **Note:** The "heavy day" measurement revealed that token counts from Claude Code's statusbar context diverge significantly from JSONL log data — by 3-15,000x on input/output tokens, likely due to incomplete JSONL logging and thinking token inclusion. This means tools like [ccusage](https://github.com/ryoppippi/ccusage) that read JSONL data may substantially undercount actual compute. This monitor reads the statusbar context, which appears to be the more complete data source.
 
 ## Platform support
 
@@ -174,6 +176,14 @@ None. The script uses only the Python 3 standard library (`json`, `os`, `sys`, `
 - No telemetry, no third-party services, no analytics.
 
 **Risk:** If someone modifies `~/.claude/statusline.py`, they get code execution in your user context on every Claude Code update. Same threat model as a shell alias or git hook. Keep the file owner-only writable.
+
+## Known issues and open questions
+
+1. **Token counting semantics are unresolved.** The statusbar's `total_input_tokens` may include cache creation tokens, which are also counted separately. If so, the energy formula partially double-counts. A validation harness is needed to resolve this definitively. See [FINDINGS.md](FINDINGS.md).
+
+2. **Model-agnostic constants.** The same energy constants are used for Haiku, Sonnet, and Opus. In practice, Opus likely uses 2-5x more energy per token due to larger model size. This means the estimate may undercount for heavy Opus usage and overcount for Haiku.
+
+3. **Context-length decode scaling.** The energy formula uses a fixed per-output-token constant regardless of context length. With very long cached contexts (25M+ tokens observed in practice), decode cost increases due to larger KV-cache attention. The formula underestimates in exactly these long-context sessions.
 
 ## References
 
