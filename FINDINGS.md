@@ -102,19 +102,55 @@ The energy estimates were stress-tested through a structured 2-round adversarial
 
 Build a token-accounting validation harness that logs raw statusbar payloads per-update alongside JSONL entries, to definitively resolve what each field contains.
 
-## Open questions
+## Validation harness results (2026-02-24)
 
-1. **What exactly does `total_input_tokens` include?** Does it overlap with cache creation tokens? If so, the energy formula double-counts.
-2. **Does `total_output_tokens` include thinking tokens?** The ~3x ratio in well-covered sessions suggests yes, but not definitively proven.
+We built a validation harness (`analyze_tokens.py`) that logs every raw statusbar payload and analyzes the relationship between cumulative totals and per-call `current_usage` fields.
+
+### Q1: Does `total_input_tokens` include `cache_creation_input_tokens`?
+
+**NO. No double-counting.** Confirmed across 31 API calls in 3 concurrent sessions.
+
+Evidence:
+- Many calls show `delta(total_input) = 1` while `cache_creation = 992`, `655`, `287`, etc. If total_input included cache creation, those deltas would be ~1000, not 1.
+- 18/30 usable calls have delta matching `cu.input_tokens` exactly (fresh only). 0/30 match `cu.input + cu.cache_creation` (the double-counting hypothesis).
+- 10 "neither" calls are explained by `cu.input_tokens` being stale at call start (shows previous call's value, typically 1).
+
+`total_input_tokens` = cumulative fresh input tokens only. Cache creation and cache read are separate.
+
+### Q2: Does `total_output_tokens` include thinking tokens?
+
+**YES.** Confirmed by two independent lines of evidence:
+
+1. **Finalized calls show 1.0x ratio** between `delta(total_output)` and `cu.output_tokens`. Since Anthropic API's `usage.output_tokens` includes thinking, both counters include it.
+2. **3x ratio vs JSONL** (from initial investigation): JSONL's `message.output_tokens` excludes thinking, giving a ~3x gap. This implies ~60-70% of output tokens are thinking.
+
+### Bonus: `current_usage.input_tokens` is always 1
+
+Claude Code's statusbar never updates `cu.input_tokens` to the real per-call fresh input count — it stays at 1 (placeholder). Not useful for per-call analysis, but `total_input_tokens` is accurate for cumulative tracking.
+
+### What `current_usage` contains
+
+Four fields observed: `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`. Values update during streaming (output grows incrementally) but `input_tokens` appears stuck at 1.
+
+### Impact on energy formula
+
+**No changes needed.** The current formula correctly treats `total_input_tokens` as fresh-only and adds cache creation separately. The energy estimate is as accurate as the underlying constants allow.
+
+## Remaining open questions
+
+1. ~~**What exactly does `total_input_tokens` include?**~~ **RESOLVED:** Fresh input only, excludes cache.
+2. ~~**Does `total_output_tokens` include thinking tokens?**~~ **RESOLVED:** Yes.
 3. **Why is JSONL coverage so inconsistent?** Some sessions have ~3x ratios, others 15,000x. What determines which API calls get logged?
 4. **Should energy constants differ for thinking vs. visible output?** Thinking may be batched differently or use different hardware paths.
+5. **Model-size energy scaling:** Same constants for Haiku/Sonnet/Opus despite likely 2-5x differences in actual compute.
 
 ## Next steps
 
-1. **Build validation harness:** Log raw statusbar context alongside JSONL entries to resolve the semantics question definitively
-2. **Fix potential double-counting:** Once we know what `total_input_tokens` includes, adjust the energy formula
+1. ~~**Build validation harness**~~ **DONE** (`analyze_tokens.py`, enabled via `ENERGY_DEBUG=1`)
+2. ~~**Fix potential double-counting**~~ **NOT NEEDED** — no double-counting found
 3. **Publish finding:** The JSONL incompleteness affects every CC monitoring tool — this should be shared with the community
 4. **Update README:** Revise the "heavy day" range estimate and add caveats about token counting methodology
+5. **Consider per-model energy constants:** Different multipliers for Haiku/Sonnet/Opus based on estimated model sizes
 
 ## Data
 

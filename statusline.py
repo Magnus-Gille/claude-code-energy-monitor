@@ -59,6 +59,8 @@ DAILY_FILE = CACHE_DIR / "statusline_daily.json"
 HISTORY_FILE = CACHE_DIR / "statusline_history.jsonl"
 QUOTA_CACHE = CACHE_DIR / "statusline_quota_cache.json"
 QUOTA_TTL = 300  # seconds between API calls
+DEBUG_FILE = CACHE_DIR / "statusline_debug.jsonl"
+DEBUG = os.environ.get("ENERGY_DEBUG", "") == "1"
 
 # Energy: mWh per 1k tokens — low / high bounds
 # Center from Couch (2026), +/- 3x uncertainty
@@ -276,6 +278,15 @@ def main():
         data = json.loads(sys.stdin.read())
     except Exception:
         data = {}
+
+    if DEBUG:
+        try:
+            entry = json.dumps({"ts": time.time(), "raw": data})
+            fd = os.open(str(DEBUG_FILE), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            os.write(fd, (entry + "\n").encode())
+            os.close(fd)
+        except Exception:
+            pass
 
     model = data.get("model", {}).get("display_name", "?")
     ctx = data.get("context_window", {})
