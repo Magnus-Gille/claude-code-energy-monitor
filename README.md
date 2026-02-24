@@ -1,6 +1,6 @@
 # Claude Code Energy Monitor
 
-A statusline script for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that shows real-time token usage and estimated energy consumption. It tracks session and daily totals, distinguishes cheap cached tokens from expensive fresh tokens, and logs daily history automatically.
+A statusline script for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that shows real-time token usage and a compute-energy proxy estimate. It tracks session and daily totals, distinguishes cheap cached tokens from expensive fresh tokens, and logs daily history automatically.
 
 ```
 Opus 4.6 | Ctx:47% | 5h:29% 7d:52% | S:124k 7-64Wh | D:2.0M 0.5-4.2kWh
@@ -64,6 +64,75 @@ All files are created with owner-only permissions (`0600`). Example history entr
 {"date": "2026-02-18", "input": 2797805, "output": 693769, "cache_read": 1901548, "cache_write": 312000, "sessions": 12}
 ```
 
+## Results & Claims
+
+This section separates what we can measure with high confidence from what we can only estimate at order-of-magnitude level.
+
+### What we measure (data source)
+
+The script reads Claude Code's **statusbar JSON payload**, piped to stdin on every status update. This payload contains:
+
+- **Cumulative session totals:** `total_input_tokens`, `total_output_tokens` — these grow monotonically across API calls within a session.
+- **Per-call snapshot:** `current_usage.input_tokens`, `current_usage.output_tokens`, `current_usage.cache_read_input_tokens`, `current_usage.cache_creation_input_tokens` — these reflect the most recent API call.
+- **Per-call deltas** are derived by detecting when `total_input_tokens` increases (signaling a new API call) and computing the difference from the previous total.
+
+Daily totals are accumulated across sessions via a locked JSON file. This is the most complete token data source available — more complete than JSONL conversation logs (see [Known limitations](#known-limitations) below).
+
+### Token accounting claims (high confidence, validated)
+
+These claims are supported by a [validation harness](analyze_tokens.py) that logged raw statusbar payloads across 31 API calls in 3 concurrent sessions, plus [direct API billing reconciliation](FINDINGS.md):
+
+1. **No double-counting.** `total_input_tokens` counts fresh input only — it excludes cache creation and cache read tokens. The energy formula applies separate constants to each token type without overlap.
+2. **Thinking tokens are included.** `total_output_tokens` includes extended thinking (chain-of-thought) tokens, confirmed by a 1.0x ratio to the API's `usage.output_tokens` field (which [includes thinking](https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#token-usage-and-pricing)) and a ~3x ratio versus JSONL logs (which exclude thinking).
+3. **Cache metrics are accurate.** Per-call `cache_read_input_tokens` and `cache_creation_input_tokens` match API billing to the token across 4 direct API test calls.
+4. **The energy formula is correct as-is.** Fresh input, cached reads, cache creation, and output are counted separately and completely. No changes needed.
+
+Full evidence in [FINDINGS.md](FINDINGS.md). To collect your own validation data, set `ENERGY_DEBUG=1` as an env var in the statusline command, then run `python3 analyze_tokens.py` after a session.
+
+### Energy estimate claims (order-of-magnitude proxy)
+
+The energy numbers shown in the statusbar are **order-of-magnitude estimates, not measurements**. They use per-token energy constants derived from published research (see [methodology](#energy-estimation-methodology) below), applied to each token type:
+
+```
+Energy = (fresh_input × 0.39) + (output × 1.95) + (cache_read × 0.039) + (cache_write × 0.49)  Wh per 1k tokens (center)
+```
+
+The low and high bounds are the center divided/multiplied by 3, giving a **~10x range from low to high**. This range is intentionally wide — it reflects genuine uncertainty, not imprecision in the token counting.
+
+On a real heavy-usage day (Opus 4.6, 20 sessions, ~74M tokens), the estimate was **3.1–27.6 kWh (center ~9.2 kWh)**. Output tokens dominated energy cost (42% of energy from just 2.7% of tokens) because autoregressive decode is ~5x more expensive per token than parallel prefill.
+
+### What the energy estimate does NOT include
+
+- **Full datacenter overhead.** The estimates cover GPU/accelerator compute only — not cooling, networking, CPU/RAM, storage, idle power, or PUE. Google reported a [2.4x multiplier](https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference) from chip-active to full-stack for Gemini queries. The real operational energy is likely 1.5–3x higher than what this script shows.
+- **Training energy.** Training a frontier model costs tens of gigawatt-hours, but that's a one-time cost amortized across millions of users.
+- **Embodied energy.** Manufacturing GPUs, building datacenters, networking infrastructure.
+- **Your own hardware.** Your laptop and monitor also consume energy while you wait for responses.
+
+### Known limitations
+
+1. **Pricing ≠ energy.** The biggest assumption: Anthropic's pricing ratios are used as a proxy for relative energy cost. Pricing reflects margin, competitive positioning, and demand management — not just energy. The correlation is plausible but unvalidated.
+
+2. **Model-agnostic constants.** The same energy constants are used for Haiku, Sonnet, and Opus. Opus likely uses 2–5x more energy per token due to larger model size. The estimate may undercount for heavy Opus usage and overcount for Haiku.
+
+3. **Context-length decode scaling.** The formula uses a fixed per-output-token constant regardless of context length. With very long cached contexts (25M+ tokens observed in practice), decode cost increases due to larger KV-cache attention. The formula underestimates in exactly these long-context sessions.
+
+4. **Infrastructure variability.** We don't know Anthropic's hardware (GPU types, cluster config), batch sizes, scheduling strategies, model sizes, or datacenter locations. Inference efficiency is a rapidly moving target — Google reported a [33x improvement](https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference) in a single year.
+
+5. **JSONL logs are incomplete.** Claude Code's JSONL conversation logs have streaming placeholder values for `usage.input_tokens` (75% are ≤1) and exclude thinking tokens from `usage.output_tokens`. Tools like [ccusage](https://github.com/ryoppippi/ccusage) that read JSONL may undercount actual compute by 10–174x. This monitor reads the statusbar context, which is the more complete data source. See [GitHub issue #28197](https://github.com/anthropics/claude-code/issues/28197).
+
+### How to use these numbers responsibly
+
+**Appropriate uses:**
+- Awareness — understanding the general scale of compute behind AI-assisted coding
+- Relative comparison — "today was a heavier compute day than yesterday"
+- Order-of-magnitude budgeting — "our team's AI usage is in the X kWh/day range"
+- Motivating efficiency — choosing smaller models for simple tasks, being mindful of long-context sessions
+
+**Not appropriate:**
+- Precise carbon accounting or ESG reporting (the uncertainty is too large)
+- Comparing energy efficiency between AI providers (the constants are derived from one provider's data)
+- Claiming exact energy figures without stating the ±3x uncertainty range
+
 ## Energy estimation methodology
 
 ### The problem
@@ -113,22 +182,6 @@ We don't know:
 - Geographic location of datacenters
 
 Inference efficiency is also a rapidly moving target. Google reported a [33x improvement](https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference) in a single year.
-
-### Compute-only vs full datacenter energy
-
-These estimates cover **accelerator compute energy only** — the GPU/TPU work of processing tokens. They do not include the full operational footprint of a datacenter: cooling, networking, CPU/RAM overhead, storage, idle power, and Power Usage Effectiveness (PUE).
-
-Google's [infrastructure measurement blog post](https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference) (August 2025) quantifies this gap: their median Gemini query goes from 0.10 Wh (chip-active only) to 0.24 Wh (full-stack) — a **2.4x multiplier** just from accounting methodology.
-
-This means the real operational energy could be 1.5-3x higher than what this script shows. The uncertainty band already partially absorbs this (our high estimate uses 3x the center), but for a complete picture you should be aware that "compute energy" and "datacenter electricity" are different things.
-
-## What this does NOT capture
-
-- **Full datacenter overhead.** See above. Our estimates are compute-focused. The real operational footprint is likely 1.5-3x higher.
-- **Training energy.** Training a frontier model costs tens of gigawatt-hours, but that's a one-time cost amortized across millions of users.
-- **Reasoning mode overhead.** Extended thinking / chain-of-thought can use [150-700x more energy](https://huggingface.co/blog/sasha/ai-energy-score-v2) than standard inference. The estimates above are for standard inference only. However, Claude Code's `total_output_tokens` **does include thinking tokens** (confirmed via validation harness — see [FINDINGS.md](FINDINGS.md)). The statusbar reports ~3x more output tokens than the JSONL conversation logs for well-covered sessions, consistent with Opus's chain-of-thought overhead. This means the energy estimate already scales with reasoning use.
-- **Embodied energy.** Manufacturing GPUs, building datacenters, networking infrastructure.
-- **Your own hardware.** Your laptop and monitor also consume energy while you wait for responses.
 
 ## Everyday comparisons
 
@@ -186,14 +239,6 @@ We built a [validation harness](analyze_tokens.py) that logs raw statusbar paylo
 To collect your own validation data, set `ENERGY_DEBUG=1` as an env var in the statusline command, then run `python3 analyze_tokens.py` after a session.
 
 Full investigation details in [FINDINGS.md](FINDINGS.md).
-
-## Known limitations
-
-1. **Model-agnostic constants.** The same energy constants are used for Haiku, Sonnet, and Opus. In practice, Opus likely uses 2-5x more energy per token due to larger model size. This means the estimate may undercount for heavy Opus usage and overcount for Haiku.
-
-2. **Context-length decode scaling.** The energy formula uses a fixed per-output-token constant regardless of context length. With very long cached contexts (25M+ tokens observed in practice), decode cost increases due to larger KV-cache attention. The formula underestimates in exactly these long-context sessions.
-
-3. **JSONL logs are incomplete.** Claude Code's JSONL conversation logs miss tool use intermediate calls, subagent API calls, and context management operations. Tools like [ccusage](https://github.com/ryoppippi/ccusage) that read JSONL may undercount actual compute by 3-15,000x on input/output tokens. This monitor reads the statusbar context, which is the more complete data source.
 
 ## References
 
