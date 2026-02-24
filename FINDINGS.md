@@ -141,6 +141,52 @@ Four fields observed: `input_tokens`, `output_tokens`, `cache_read_input_tokens`
 
 **No changes needed.** The current formula correctly treats `total_input_tokens` as fresh-only and adds cache creation separately. The energy estimate is as accurate as the underlying constants allow.
 
+## API billing reconciliation (2026-02-24)
+
+We made 4 direct Anthropic API calls (`api_test.py`) with a personal API key and compared the token counts from each API response's `usage` object against the Anthropic usage dashboard CSV export.
+
+### Test design
+
+| Test | Purpose | Expected behavior |
+|---|---|---|
+| 1. Short prompt | Minimal tokens, baseline | Fresh input + output only |
+| 2. Longer output | More output tokens | Higher output count |
+| 3. Cache write | Large system prompt, first call | `cache_creation_input_tokens` populated |
+| 4. Cache read | Same system prompt, second call | `cache_read_input_tokens` populated |
+
+Model: `claude-sonnet-4-20250514` (to keep costs low).
+
+### Results
+
+| Token type | API response totals | Dashboard CSV | Match? |
+|---|---|---|---|
+| Fresh input | 65 | 65 | exact |
+| Output | 249 | 249 | exact |
+| Cache read | 1,402 | 1,402 | exact |
+| Cache write (5min) | 1,402 | 1,402 | exact |
+
+**Total cost: $0.0096 (~1 cent)**
+
+### What this confirms
+
+1. **The API `usage` object is the ground truth** — the exact same numbers appear on the billing dashboard.
+2. **Our energy formula uses the right inputs.** The four token categories we track (fresh input, output, cache read, cache write) are the same four the API bills for. No hidden token types, no misattributed categories.
+3. **Cache semantics are correct.** Cache write shows up on the first call, cache read on the second — exactly as our `statusline.py` accumulation logic expects.
+4. **No token inflation or deflation.** What the API reports is what gets billed. The statusbar's cumulative counters (validated in the harness above) feed the same categories.
+
+### Relationship to statusbar validation
+
+This closes the loop on the full data path:
+
+```
+API response (usage object)  ──exact match──▶  Billing dashboard
+        │
+        ▼
+Statusbar (context_window)   ──1:1 ratio──▶  Our energy formula
+```
+
+The earlier validation harness confirmed that statusbar cumulative totals track the API's per-call usage at a 1:1 ratio. This test confirms the API's usage object matches billing. Together, they show the energy monitor's token inputs are faithful to actual billed compute.
+
 ## Remaining open questions
 
 1. ~~**What exactly does `total_input_tokens` include?**~~ **RESOLVED:** Fresh input only, excludes cache.
@@ -156,7 +202,7 @@ Four fields observed: `input_tokens`, `output_tokens`, `cache_read_input_tokens`
 3. **Publish finding:** The JSONL incompleteness affects every CC monitoring tool — this should be shared with the community
 4. **Update README:** Revise the "heavy day" range estimate and add caveats about token counting methodology
 5. **Consider per-model energy constants:** Different multipliers for Haiku/Sonnet/Opus based on estimated model sizes
-6. **Billing reconciliation test:** Make direct API calls with a script (controlled input, known expected output), read the `usage` object from each response, and compare against what the statusline's `cu.output_tokens` reports. Provides external ground truth without needing the billing UI. Sonnet recommended to keep costs low (~$5-10).
+6. ~~**Billing reconciliation test**~~ **DONE** (`api_test.py`). 4 API calls, all 4 token categories matched dashboard CSV exactly. Cost: $0.01.
 7. **Reframe energy output:** Per expert review, reframe from "energy estimate" to "compute-energy proxy (token-work scaled)" with optional full-stack datacenter multiplier. Label ±3× as minimum plausible range, not statistical bracket.
 
 ## Data
