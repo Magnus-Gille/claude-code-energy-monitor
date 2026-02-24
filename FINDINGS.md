@@ -205,6 +205,35 @@ The earlier validation harness confirmed that statusbar cumulative totals track 
 6. ~~**Billing reconciliation test**~~ **DONE** (`api_test.py`). 4 API calls, all 4 token categories matched dashboard CSV exactly. Cost: $0.01.
 7. **Reframe energy output:** Per expert review, reframe from "energy estimate" to "compute-energy proxy (token-work scaled)" with optional full-stack datacenter multiplier. Label ±3× as minimum plausible range, not statistical bracket.
 
+## Interpretation Notes (boundaries & semantics)
+
+### Boundary definition
+The energy estimate in this project is scoped to "token processing compute" and should be interpreted as:
+> a *work-proportional proxy* for accelerator energy attributable to prefill/decode/cache operations.
+
+It is not a direct measurement of wall-plug electricity, and it does not define an attribution method for shared infrastructure.
+
+### Semantics we rely on
+We only rely on monotonic cumulative counters because per-call `current_usage` fields may be placeholders during streaming. Specifically, totals are derived from deltas of:
+- `total_input_tokens` (fresh/non-cached input)
+- `total_output_tokens` (includes thinking tokens)
+- cache read / cache creation counters (as reported by statusline)
+
+### Reproducibility
+Token semantics are validated by capturing raw statusline payloads (`ENERGY_DEBUG=1`) and comparing deltas across call boundaries. This reduces the risk of:
+- double-counting cache creation inside input totals
+- missing thinking tokens in output totals
+
+### What would change our conclusions
+The token accounting conclusions would need revisiting if:
+- statusline totals are not monotonic within a session
+- Claude Code changes which counters are placeholders vs finalized
+- the statusline payload schema changes (field renames/redefinitions)
+
+The energy conclusions would materially change if:
+- a provider publishes measured per-model Wh/token with stated boundaries
+- we obtain direct measurement of token-level energy on known hardware (rather than proxy scaling)
+
 ## Data
 
 All raw data from this investigation is available in:
