@@ -4,3 +4,5 @@ __pycache__/
 debate/
 energy-estimate-*.md
 draft-issue.md
+.playwright-mcp/
+token-distributions.png

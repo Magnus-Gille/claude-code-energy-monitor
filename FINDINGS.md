@@ -52,6 +52,8 @@ Evidence: some sessions have only 49 JSONL input tokens vs 765,323 statusbar inp
 
 For sessions with good JSONL coverage (~3x ratio), the remaining gap on the output side is consistent with Opus's extended thinking tokens being included in the statusbar's `total_output_tokens` but excluded from the JSONL's per-message `output_tokens`.
 
+Anthropic's [adaptive thinking docs](https://docs.anthropic.com/en/docs/build-with-claude/adaptive-thinking) confirm that thinking tokens are classified as output tokens for billing: "Tokens used during thinking (output tokens)." The API has no separate `thinking_tokens` field in the `usage` object — thinking is counted within `output_tokens`.
+
 A ~3x output multiplier means roughly 60-70% of output tokens are thinking tokens — plausible for Opus.
 
 ## What this means
@@ -119,10 +121,13 @@ Evidence:
 
 ### Q2: Does `total_output_tokens` include thinking tokens?
 
-**YES.** Confirmed by two independent lines of evidence:
+**YES.** Confirmed by three independent lines of evidence:
 
-1. **Finalized calls show 1.0x ratio** between `delta(total_output)` and `cu.output_tokens`. Since Anthropic API's `usage.output_tokens` includes thinking, both counters include it.
-2. **3x ratio vs JSONL** (from initial investigation): JSONL's `message.output_tokens` excludes thinking, giving a ~3x gap. This implies ~60-70% of output tokens are thinking.
+1. **Anthropic docs classify thinking as output tokens.** The [adaptive thinking documentation](https://docs.anthropic.com/en/docs/build-with-claude/adaptive-thinking) states under Pricing that thinking incurs charges for "Tokens used during thinking (output tokens)" and that "Output tokens (billed): The original thinking tokens that Claude generated internally." There is no separate `thinking_tokens` field in the API `usage` object — thinking tokens are counted within `output_tokens`.
+2. **Finalized calls show 1.0x ratio** between `delta(total_output)` and `cu.output_tokens`. Since the API's `usage.output_tokens` includes thinking (per the docs above), both counters include it.
+3. **3x ratio vs JSONL** (from initial investigation): JSONL's `message.output_tokens` excludes thinking, giving a ~3x gap. This implies ~60-70% of output tokens are thinking.
+
+Note: The docs confirm thinking tokens are billed as output tokens and counted within `output_tokens`. However, there is no single sentence stating "`usage.output_tokens` includes thinking tokens" — this is inferred from (a) thinking being classified as output tokens, (b) no separate usage field existing for thinking, and (c) our empirical 1.0x ratio in point 2.
 
 ### Bonus: `current_usage.input_tokens` is always 1
 
@@ -151,6 +156,8 @@ Four fields observed: `input_tokens`, `output_tokens`, `cache_read_input_tokens`
 3. **Publish finding:** The JSONL incompleteness affects every CC monitoring tool — this should be shared with the community
 4. **Update README:** Revise the "heavy day" range estimate and add caveats about token counting methodology
 5. **Consider per-model energy constants:** Different multipliers for Haiku/Sonnet/Opus based on estimated model sizes
+6. **Billing reconciliation test:** Make direct API calls with a script (controlled input, known expected output), read the `usage` object from each response, and compare against what the statusline's `cu.output_tokens` reports. Provides external ground truth without needing the billing UI. Sonnet recommended to keep costs low (~$5-10).
+7. **Reframe energy output:** Per expert review, reframe from "energy estimate" to "compute-energy proxy (token-work scaled)" with optional full-stack datacenter multiplier. Label ±3× as minimum plausible range, not statistical bracket.
 
 ## Data
 
