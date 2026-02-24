@@ -8,6 +8,8 @@ I've [filed this as a feature request](https://github.com/anthropics/claude-code
 
 ## The data
 
+Claude Code has two separate data paths for token usage. **JSONL conversation logs** are written to disk (`~/.claude/projects/*/`) during streaming — these are what tools like ccusage read. **Statusbar context** is a JSON payload piped to [statusline scripts](https://docs.anthropic.com/en/docs/claude-code/status-bar) on every status update, containing cumulative totals that Claude Code maintains internally from finalized API responses. Same API calls, same process, two different recording mechanisms with very different fidelity.
+
 I compared JSONL token sums (deduplicated by `requestId`) against statusbar cumulative totals across two full days of Opus 4.6 usage.
 
 **Feb 20 — heavy day, 20 sessions, 1,365 unique API requests:**
