@@ -37,22 +37,37 @@ The ratios range from ~3x (for sessions with good JSONL coverage) to 15,000x+ (f
 
 Two compounding factors:
 
-### 1. JSONL logs are incomplete
+### 1. JSONL `usage` fields are streaming placeholders, not final values
 
-The JSONL conversation logs do not record all API calls. They appear to capture top-level conversation turns but miss:
+The JSONL logs record streaming snapshots of the `usage` object. Most fields are never updated to their final values:
 
-- Tool use intermediate calls (file reads, code execution, etc.)
-- Subagent/Task API calls
-- Context management operations (auto-compact, etc.)
-- Retry and streaming intermediate calls
+- **`input_tokens`:** Always a placeholder (`1` or `3`). Across 69 multi-entry requestIds examined, `input_tokens` never changed between the first and last streaming entry (100%). Single-entry requestIds are also placeholder (93%).
+- **`output_tokens`:** Partially eventually consistent. In 35% of multi-entry requests, `output_tokens` grows across streaming entries (e.g. `[1, 1, 211]` or `[4, 3182]`), and the final entry reflects the visible output count. But it still excludes thinking tokens (see below).
+- **`cache_read_input_tokens`:** Stable and correct from the first entry. Matches statusline within 0.8-1.4x across all dates tested.
+- **`cache_creation_input_tokens`:** Also stable and correct from the first entry.
 
-Evidence: some sessions have only 49 JSONL input tokens vs 765,323 statusbar input tokens (15,619x ratio), while others are within 3x. The coverage is inconsistent and unpredictable.
+| JSONL usage field | Eventually consistent? | Usable for accounting? |
+|---|---|---|
+| `input_tokens` | No (never updates from placeholder) | No |
+| `output_tokens` | Partially (visible output only) | No — excludes thinking (6-98x gap) |
+| `cache_read_input_tokens` | Yes (stable from first entry) | Yes |
+| `cache_creation_input_tokens` | Yes (stable from first entry) | Yes |
+
+Even with "last entry wins" deduplication, JSONL output totals remain 6-98x lower than statusline:
+
+| Date | JSONL output (deduped) | Statusline output | Ratio |
+|---|---|---|---|
+| 2026-02-20 | 182,292 | 3,208,365 | 17.6x |
+| 2026-02-23 | 158,532 | 4,157,122 | 26.2x |
+| 2026-02-24 | 98,856 | 1,112,591 | 11.3x |
+
+Note: our earlier claim that "JSONL misses API calls" was wrong for cache metrics — the ~1x cache read ratio proves both sources track the same API calls. The real issue is that per-call `input_tokens` and `output_tokens` in the JSONL are streaming artifacts, not finalized values.
 
 ### 2. Thinking tokens appear in statusbar but not JSONL
 
 For sessions with good JSONL coverage (~3x ratio), the remaining gap on the output side is consistent with Opus's extended thinking tokens being included in the statusbar's `total_output_tokens` but excluded from the JSONL's per-message `output_tokens`.
 
-Anthropic's [adaptive thinking docs](https://docs.anthropic.com/en/docs/build-with-claude/adaptive-thinking) confirm that thinking tokens are classified as output tokens for billing: "Tokens used during thinking (output tokens)." The API has no separate `thinking_tokens` field in the `usage` object — thinking is counted within `output_tokens`.
+Anthropic's [adaptive thinking docs](https://docs.anthropic.com/en/docs/build-with-claude/adaptive-thinking) confirm that thinking tokens are classified as output tokens for billing: "Tokens used during thinking (output tokens)." The JSONL `usage` object has no `thinking_tokens` or `thinking_output_tokens` field — thinking content blocks appear in the JSONL message content, but their token cost is not reflected in `usage.output_tokens`.
 
 A ~3x output multiplier means roughly 60-70% of output tokens are thinking tokens — plausible for Opus.
 
@@ -191,7 +206,7 @@ The earlier validation harness confirmed that statusbar cumulative totals track 
 
 1. ~~**What exactly does `total_input_tokens` include?**~~ **RESOLVED:** Fresh input only, excludes cache.
 2. ~~**Does `total_output_tokens` include thinking tokens?**~~ **RESOLVED:** Yes.
-3. **Why is JSONL coverage so inconsistent?** Some sessions have ~3x ratios, others 15,000x. What determines which API calls get logged?
+3. ~~**Why is JSONL coverage so inconsistent?**~~ **RESOLVED:** JSONL logs all API calls (cache metrics match ~1x), but `usage.input_tokens` is a streaming placeholder that never finalizes, and `usage.output_tokens` excludes thinking tokens. The wild per-session ratios (3x to 15,000x) reflect varying proportions of thinking tokens and placeholder values, not missing API calls.
 4. **Should energy constants differ for thinking vs. visible output?** Thinking may be batched differently or use different hardware paths.
 5. **Model-size energy scaling:** Same constants for Haiku/Sonnet/Opus despite likely 2-5x differences in actual compute.
 
@@ -214,10 +229,12 @@ The energy estimate in this project is scoped to "token processing compute" and 
 It is not a direct measurement of wall-plug electricity, and it does not define an attribution method for shared infrastructure.
 
 ### Semantics we rely on
-We only rely on monotonic cumulative counters because per-call `current_usage` fields may be placeholders during streaming. Specifically, totals are derived from deltas of:
+We only rely on monotonic cumulative counters because per-call `current_usage` fields are partially placeholders. Specifically, totals are derived from deltas of:
 - `total_input_tokens` (fresh/non-cached input)
 - `total_output_tokens` (includes thinking tokens)
 - cache read / cache creation counters (as reported by statusline)
+
+JSONL `usage` fields are not suitable for energy accounting: `input_tokens` is permanently a placeholder, `output_tokens` excludes thinking tokens, and only cache metrics are reliable. See "Root cause" section above for the full eventual-consistency analysis.
 
 ### Reproducibility
 Token semantics are validated by capturing raw statusline payloads (`ENERGY_DEBUG=1`) and comparing deltas across call boundaries. This reduces the risk of:
