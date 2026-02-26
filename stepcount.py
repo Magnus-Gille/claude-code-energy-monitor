@@ -161,6 +161,7 @@ def summary_lines(tok, e, sess):
     if comp:
         energy_str += f" {comp}"
     lines.append(energy_str)
+    lines.append("   (order-of-magnitude estimate · ±3×)")
     return lines
 
 
@@ -173,17 +174,12 @@ def view_today(days):
     tok = total_tokens(d)
     e = energy_wh(d)
     sess = d.get("sessions", 0)
-    comp = pick_comparison(e)
 
     lines = [
         f"🦶 Claude Code · {today.strftime('%b')} {today.day}",
         "",
-        f"   {fmt_tok(tok)} tokens · {sess} sessions",
     ]
-    energy_str = f"   ⚡ {fmt_energy(e)}"
-    if comp:
-        energy_str += f" {comp}"
-    lines.append(energy_str)
+    lines.extend(summary_lines(tok, e, sess))
     return "\n".join(lines)
 
 
