@@ -52,7 +52,7 @@ import sys
 import subprocess
 import time
 from pathlib import Path
-from datetime import date
+from datetime import date, timedelta
 
 CACHE_DIR = Path.home() / ".claude"
 DAILY_FILE = CACHE_DIR / "statusline_daily.json"
@@ -273,6 +273,67 @@ def fmt_nrg_range(lo_mwh, hi_mwh):
     return f"{lo_kwh:.1f}-{hi_kwh:.1f}kWh"
 
 
+HEAT = ["⬜", "🟨", "🟧", "🟥"]
+
+
+def week_heatmap():
+    """Compact 7-day heatmap for the status line: 🦶🟥🟧🟨⬜⬜⬜⬜"""
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    week_dates = [monday + timedelta(days=i) for i in range(7)]
+
+    days = {}
+    if HISTORY_FILE.exists():
+        for line in HISTORY_FILE.read_text().splitlines():
+            if line.strip():
+                try:
+                    d = json.loads(line)
+                    days[d["date"]] = d
+                except Exception:
+                    pass
+    daily = load(DAILY_FILE)
+    if daily.get("date"):
+        days[daily["date"]] = {
+            "input": daily.get("input", 0),
+            "output": daily.get("output", 0),
+            "cache_read": daily.get("cached", 0),
+            "cache_write": daily.get("cache_write", 0),
+        }
+
+    counts = []
+    for dt in week_dates:
+        d = days.get(dt.isoformat(), {})
+        counts.append(
+            d.get("input", 0) + d.get("output", 0)
+            + d.get("cache_read", 0) + d.get("cache_write", 0))
+
+    nonzero = sorted(v for v in counts if v > 0)
+    if not nonzero:
+        t1, t2 = 1, 2
+    elif len(nonzero) == 1:
+        t1, t2 = nonzero[0] * 0.33, nonzero[0] * 0.66
+    elif len(nonzero) == 2:
+        t1, t2 = nonzero[0], (nonzero[0] + nonzero[1]) / 2
+    else:
+        t1 = nonzero[len(nonzero) // 3]
+        t2 = nonzero[len(nonzero) * 2 // 3]
+
+    cells = []
+    for i in range(7):
+        if week_dates[i] > today:
+            cells.append("⬜")
+        elif counts[i] == 0:
+            cells.append(HEAT[0])
+        elif counts[i] <= t1:
+            cells.append(HEAT[1])
+        elif counts[i] <= t2:
+            cells.append(HEAT[2])
+        else:
+            cells.append(HEAT[3])
+
+    return "🦶" + "".join(cells)
+
+
 def main():
     try:
         data = json.loads(sys.stdin.read())
@@ -324,6 +385,7 @@ def main():
         parts.append(q_str)
     parts.append(f"S:{fmt_tok(s_in + s_cr + s_cw + s_out)} {fmt_nrg_range(s_lo, s_hi)}")
     parts.append(f"D:{fmt_tok(d_in + d_cr + d_cw + d_out)} {fmt_nrg_range(d_lo, d_hi)}")
+    parts.append(week_heatmap())
 
     print(" | ".join(parts), end="")
 
