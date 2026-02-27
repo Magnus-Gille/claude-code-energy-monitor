@@ -89,35 +89,43 @@ This isn't a bug in ccusage — it correctly sums what's in the JSONL. The JSONL
 
 A full workday of Claude Code on Opus 4.6 produced:
 - **Statusbar totals:** 7.1M input + 3.0M output + 76.5M cached + 1.9M cache write
-- **Energy estimate (center):** ~10 kWh (range: 3.1-27.6 kWh)
-- **Everyday comparison:** equivalent to driving an EV 60 km, or running 3-7 refrigerators for a day
+- **Energy estimate (mid, revised constants):** ~5 kWh
+- **Everyday comparison:** roughly equivalent to running a fridge for 2–3 days
 
-This is not extreme or unusual usage — it's a developer using Claude Code as their primary tool for a workday, across ~12 working sessions. The energy cost is structural, driven by:
-- Output token generation (43% of energy, dominated by thinking tokens)
-- Cache reads (27% of energy, from Claude Code's context-resend architecture)
-- Fresh input processing (21% of energy)
+This is not extreme or unusual usage — it's a developer using Claude Code as their primary tool for a workday, across ~12 working sessions. With the revised constants (Feb 2026, see below), the energy cost is driven by:
+- Output token generation (~48% of energy, dominated by thinking tokens)
+- Fresh input processing (~31% of energy)
+- Cache reads (~13% of energy, reduced from 27% after physics-derived cache discount)
+- Cache write (~8% of energy)
+
+Note: The original constants (Couch 2026, pricing-derived) estimated ~10 kWh center for this day. The revised constants reduce this to ~5 kWh, primarily due to the cache read discount changing from 10x to 26x and output from 1,950 to 1,400 mWh/1k tokens.
 
 ## Adversarial review (debate with Codex)
 
+### Debate 1: Energy estimate validity (Feb 2026)
+
 The energy estimates were stress-tested through a structured 2-round adversarial debate between Claude Opus 4.6 and OpenAI Codex (gpt-5.3-codex). Full debate transcript is in `debate/` (gitignored as process artifact).
 
-### Points of agreement
-
+**Points of agreement:**
 1. The estimate is a useful **order-of-magnitude indicator**, not a calibrated measurement
 2. The derivation chain (Epoch AI GPT-4o analysis -> Couch pricing-ratio mapping -> applied to Opus) is a "proxy stack" with unvalidated links
 3. The ±3x uncertainty band is a minimum; the true value could exceed the high estimate
 4. Context-length decode scaling (fixed per-token energy ignoring context size) is a blind spot
 5. The weakest assumption is using pricing ratios as an energy proxy, especially for cache operations
 
-### Points of disagreement
+**Codex's recommended next step:** Build a token-accounting validation harness — DONE (see below).
 
-1. Whether thinking tokens are captured (now resolved: they are, in the statusbar)
-2. Whether the `total_input_tokens` monotonicity assumption is safe (untested)
-3. Specific numeric adjustments for model size, context scaling, etc. (ungrounded)
+### Debate 2: Energy constants revision (Feb 2026)
 
-### Codex's recommended next step
+A second debate focused on whether pricing-derived ratios should be replaced with physics-derived values. See `debate/energy-constants-summary.md`.
 
-Build a token-accounting validation harness that logs raw statusbar payloads per-update alongside JSONL entries, to definitively resolve what each field contains.
+**Key outcomes:**
+1. **Output constant reduced** from 1,950 to 1,400 mWh/1k tokens. Multiple cross-checks (FLOP-based, AI Energy Score, Llama 405B measurements) cluster at 600–1,800, making 1,950 too high.
+2. **Cache read constant reduced** from 39 to 15 mWh/1k tokens (~26x discount vs input, up from 10x). Physics shows cache reads skip all prefill computation — the energy is primarily KV cache loading from memory. The 10x pricing discount reflected business strategy and storage amortization, not compute energy.
+3. **Fresh input and cache write unchanged.** 390 mWh/1k is well-anchored to Epoch AI's long-context analysis, which matches Claude Code's typical 50–200k context windows.
+4. **Display changed** from precise lo–hi range to order-of-magnitude (e.g. `~5kWh`), reflecting genuine uncertainty.
+
+**Impact:** Monthly estimate for a heavy user dropped from ~73 to ~48 kWh (mid).
 
 ## Validation harness results (2026-02-24)
 

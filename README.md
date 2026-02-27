@@ -1,9 +1,9 @@
 # Claude Code Energy Monitor
 
-A statusline script for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that shows real-time token usage and a compute-energy proxy estimate. It tracks session and daily totals, distinguishes cheap cached tokens from expensive fresh tokens, and logs daily history automatically.
+A statusline script for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that shows real-time token usage and order-of-magnitude energy estimates. It tracks daily, weekly, and monthly totals, distinguishes cheap cached tokens from expensive fresh tokens, and logs history automatically.
 
 ```
-Opus 4.6 | Ctx:47% | 5h:29% 7d:52% | S:124k 7-64Wh | D:2.0M 0.5-4.2kWh
+Opus 4.6 | 5h:29% 7d:52% | D:2.0M ~2kWh | W:45.3M ~20kWh | M:412M ~50kWh
 ```
 
 Reading left to right:
@@ -11,10 +11,10 @@ Reading left to right:
 | Segment | Meaning |
 |---------|---------|
 | `Opus 4.6` | Active model |
-| `Ctx:47%` | Context window usage |
 | `5h:29% 7d:52%` | API quota consumption (5-hour and 7-day rolling windows) |
-| `S:124k 7-64Wh` | Session total tokens and energy range |
-| `D:2.0M 0.5-4.2kWh` | Daily total tokens and energy range (across all sessions) |
+| `D:2.0M ~2kWh` | Daily total tokens and energy estimate |
+| `W:45.3M ~20kWh` | Weekly total (Monday–today) |
+| `M:412M ~50kWh` | Monthly total (1st–today) |
 
 ## Installation
 
@@ -91,15 +91,15 @@ Full evidence in [FINDINGS.md](FINDINGS.md). To collect your own validation data
 
 ### Energy estimate claims (order-of-magnitude proxy)
 
-The energy numbers shown in the statusbar are **order-of-magnitude estimates, not measurements**. They use per-token energy constants derived from published research (see [methodology](#energy-estimation-methodology) below), applied to each token type:
+The energy numbers shown in the statusbar are **order-of-magnitude estimates, not measurements**. They use per-token energy constants derived from published research and refined via adversarial debate (see [methodology](#energy-estimation-methodology) below), applied to each token type:
 
 ```
-Energy = (fresh_input × 0.39) + (output × 1.95) + (cache_read × 0.039) + (cache_write × 0.49)  Wh per 1k tokens (center)
+Energy = (fresh_input × 0.39) + (output × 1.40) + (cache_read × 0.015) + (cache_write × 0.49)  Wh per 1k tokens
 ```
 
-The low and high bounds are the center divided/multiplied by 3, giving a **~10x range from low to high**. This range is intentionally wide — it reflects genuine uncertainty, not imprecision in the token counting.
+The display snaps to order-of-magnitude steps (1, 2, 5, 10, 20, 50, ...) because the real uncertainty is at least ±3x in each direction. This is intentionally coarse — it reflects genuine uncertainty, not imprecision in the token counting.
 
-On a real heavy-usage day (Opus 4.6, 20 sessions, ~74M tokens), the estimate was **3.1–27.6 kWh (center ~9.2 kWh)**. Output tokens dominated energy cost (42% of energy from just 2.7% of tokens) because autoregressive decode is ~5x more expensive per token than parallel prefill.
+On a real heavy-usage month (Opus 4.6, 119 sessions, ~757M tokens), the mid estimate was **~48 kWh**. Output tokens dominated energy cost (~43% of energy from just 2% of tokens) because autoregressive decode is ~3.6x more expensive per token than parallel prefill.
 
 ### What the energy estimate does NOT include
 
@@ -110,7 +110,7 @@ On a real heavy-usage day (Opus 4.6, 20 sessions, ~74M tokens), the estimate was
 
 ### Known limitations
 
-1. **Pricing ≠ energy.** The biggest assumption: Anthropic's pricing ratios are used as a proxy for relative energy cost. Pricing reflects margin, competitive positioning, and demand management — not just energy. The correlation is plausible but unvalidated.
+1. **Pricing ≠ energy.** Anthropic's pricing ratios were the original basis for relative energy cost between token types. We've since revised the output and cache read constants using physics-derived cross-checks (FLOP-based estimates, AI Energy Score benchmarks, Google's measured per-query energy). The fresh input and cache write constants still inherit from pricing. Pricing reflects margin, competitive positioning, and demand management — not just energy.
 
 2. **Model-agnostic constants.** The same energy constants are used for Haiku, Sonnet, and Opus. Opus likely uses 2–5x more energy per token due to larger model size. The estimate may undercount for heavy Opus usage and overcount for Haiku.
 
@@ -139,40 +139,45 @@ On a real heavy-usage day (Opus 4.6, 20 sessions, ~74M tokens), the estimate was
 
 **No one outside Anthropic knows the actual energy per token for Claude models.** There are no published measurements. Rather than pretending to have precise numbers, the script shows a range with ~10x total uncertainty.
 
-### Center estimates
+### Mid estimates
 
-The center estimates come from [Simon P. Couch's analysis](https://www.simonpcouch.com/blog/2026-01-20-cc-impact/) (January 2026) of Claude Code energy use. Couch derived per-token energy figures from [Epoch AI's research](https://epoch.ai/gradient-updates/how-much-energy-does-chatgpt-use) on GPT-4o inference energy and Anthropic's pricing ratios.
+The constants use a hybrid approach: Couch's (2026) base estimates from [Epoch AI's GPT-4o research](https://epoch.ai/gradient-updates/how-much-energy-does-chatgpt-use), revised via adversarial debate (Claude vs Codex, Feb 2026) using physics-derived cross-checks.
 
-| Token type | Low estimate | Center | High estimate |
-|------------|-------------|--------|---------------|
-| Fresh input (prefill) | 130 mWh/1k tokens | 390 | 1,170 mWh/1k tokens |
-| Output (decode) | 650 mWh/1k tokens | 1,950 | 5,850 mWh/1k tokens |
-| Cached input (cache read) | 13 mWh/1k tokens | 39 | 117 mWh/1k tokens |
-| Cache creation (write) | 163 mWh/1k tokens | 490 | 1,470 mWh/1k tokens |
+| Token type | Mid estimate | Derivation |
+|------------|-------------|------------|
+| Fresh input (prefill) | 390 mWh/1k tokens | Epoch AI long-context anchor (unchanged from Couch) |
+| Output (decode) | 1,400 mWh/1k tokens | Reduced from 1,950; cross-checks cluster 600–1,800 |
+| Cached input (cache read) | 15 mWh/1k tokens | Reduced from 39; physics-derived ~26x discount vs input |
+| Cache creation (write) | 490 mWh/1k tokens | Prefill + write overhead, ~1.25x fresh input (unchanged) |
 
-The low and high bounds are 3x below and above the center (i.e. divide/multiply by 3), giving a ~10x range from low to high.
+The display shows order-of-magnitude estimates (snapping to 1/2/5 per decade) because the real uncertainty is at least ±3x in each direction.
 
-### Why output tokens cost ~5x more than input
+### Why output tokens cost ~3.6x more than input
 
-Input tokens are processed in parallel (prefill), while output tokens are generated one at a time (autoregressive decode). This serial generation is inherently less efficient, requiring roughly 5x the energy per token.
+Input tokens are processed in parallel (prefill), while output tokens are generated one at a time (autoregressive decode). This serial generation is inherently less efficient. The original 5:1 ratio (from Anthropic's pricing) was revised down to ~3.6:1 based on FLOP-based estimates, AI Energy Score benchmarks, and measured Llama 405B inference data, which cluster around 1,000–1,800 mWh/1k output tokens.
 
-### Why cached tokens are ~10x cheaper
+### Why cached tokens are ~26x cheaper
 
-Claude Code aggressively caches conversation context. When tokens are read from cache, they skip the expensive prefill computation entirely. The 10x ratio mirrors Anthropic's pricing structure (cached input is 90% cheaper than fresh input).
+Claude Code aggressively caches conversation context. When tokens are read from cache, they skip the expensive prefill computation entirely — the cost is primarily loading pre-computed KV pairs from memory. Anthropic's pricing gives a 10x discount, but physics analysis shows the real compute saving is much larger (potentially 100–1,000x). The 26x discount is a conservative compromise: it accounts for the near-zero compute cost of cache loading plus the ongoing attention cost during decode over cached context.
 
 ### Why cache creation costs ~1.25x fresh input
 
 When tokens are written to cache for the first time, they require the same prefill computation as fresh input *plus* the overhead of writing to cache storage. Anthropic charges a 25% surcharge for cache creation, which Couch uses as a proxy for the additional energy cost.
 
-### Validation against published measurements
+### Cross-checks against published measurements
 
-The range brackets several published data points:
+The estimates were sanity-checked against multiple independent data points:
 
-- **Google** measured [0.24 Wh per median Gemini query](https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference) (August 2025)
+- **Google** measured [0.24 Wh per median Gemini query](https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference) (August 2025) — comprehensive, including idle capacity and PUE
 - **OpenAI** reported [0.34 Wh per average ChatGPT query](https://blog.samaltman.com/the-gentle-singularity) (June 2025)
-- **Couch** derived 41 Wh per median Claude Code session (January 2026)
+- **Couch** derived 41 Wh per median Claude Code session (January 2026) — based on JSONL logs which undercount by ~2.8x (see [FINDINGS.md](FINDINGS.md))
+- **AI Energy Score** benchmarks: ~600 mWh/1k output tokens for 70B models, scaled to ~1,200 for 200B+
+- **FLOP-based estimate**: 750–1,500 mWh/1k output tokens for a 200B-class model with datacenter overhead
+- **Llama 405B measured** (batched): ~2,800 mWh/1k output tokens including overhead
 
-### Why the range is so wide
+Full debate transcript and analysis in `debate/energy-constants-summary.md` (gitignored).
+
+### Why the uncertainty is so large
 
 We don't know:
 - Anthropic's hardware (GPU types, cluster configuration)
@@ -197,7 +202,7 @@ To put the numbers in context:
 | Driving an EV 1 km | ~150 Wh |
 | Swedish household daily use (with electric heating) | ~40 kWh |
 
-A typical day of AI-assisted coding likely falls in the 0.5-5 kWh range. A heavy day on Opus (full workday, many sessions) measured at 3-28 kWh (center ~10 kWh), equivalent to running several extra refrigerators or driving an EV 20-180 km. See [FINDINGS.md](FINDINGS.md) for a detailed analysis of a real usage day.
+A typical day of AI-assisted coding likely falls in the 1–5 kWh range (mid estimate). A heavy month (119 sessions on Opus 4.6) estimated at ~48 kWh, roughly equivalent to running a fridge for a month. See [FINDINGS.md](FINDINGS.md) for detailed analysis.
 
 ## Platform support
 
@@ -246,9 +251,10 @@ Full investigation details in [FINDINGS.md](FINDINGS.md).
 
 | Source | Year | Description |
 |--------|------|-------------|
-| [Couch, "Claude Code's Environmental Impact"](https://www.simonpcouch.com/blog/2026-01-20-cc-impact/) | 2026 | Derived per-token energy for Claude from Epoch AI data and Anthropic pricing ratios |
+| [Couch, "Claude Code's Environmental Impact"](https://www.simonpcouch.com/blog/2026-01-20-cc-impact/) | 2026 | Derived per-token energy for Claude from Epoch AI data and Anthropic pricing ratios. Base for fresh input and cache write constants. |
 | [Epoch AI, "How much energy does ChatGPT use?"](https://epoch.ai/gradient-updates/how-much-energy-does-chatgpt-use) | 2025 | Empirical analysis of GPT-4o inference energy |
 | [Google, "Measuring the environmental impact of AI inference"](https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference) | 2025 | Google's own measurements: 0.24 Wh per median Gemini query, 33x efficiency improvement in one year |
+| [AI Energy Score v2](https://huggingface.co/spaces/AIEnergyScore/Leaderboard) | 2025 | Standardized inference energy benchmarks on H100 hardware; used to cross-check output constant |
 | [Altman, "The Gentle Singularity"](https://blog.samaltman.com/the-gentle-singularity) | 2025 | OpenAI's reported 0.34 Wh per average ChatGPT query |
 
 ### Additional academic references
