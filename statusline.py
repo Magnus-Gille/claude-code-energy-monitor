@@ -167,7 +167,8 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write):
     """Update daily totals with file locking to prevent lost updates.
 
     cu_cache_read/cu_cache_write: per-API-call values from current_usage.
-    We accumulate these across calls by detecting new API calls (total_input increased).
+    We accumulate these across calls by detecting new API calls (total_input increased
+    OR current_usage cache values changed — the latter catches fully-cached calls).
     Returns (daily_input, daily_output, daily_cache_read, daily_cache_write,
              session_cache_read, session_cache_write).
     """
@@ -204,11 +205,16 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write):
 
         prev = d.get("sessions", {}).get(sid, {})
 
-        # Detect new API call: total_input_tokens increased since last seen.
-        # Only accumulate cache values on new calls to avoid double-counting
+        # Detect new API call to avoid double-counting cache values
         # (statusline fires multiple times per call during streaming).
+        # Primary: total_input increased. Fallback: current_usage changed
+        # (catches calls where input is fully cached, so total_input stays flat).
         prev_li = prev.get("li", 0)
-        new_call = inp > prev_li
+        prev_cu_cr = prev.get("lcr", 0)
+        prev_cu_cw = prev.get("lcw", 0)
+        new_call = (inp > prev_li
+                    or cu_cache_read != prev_cu_cr
+                    or cu_cache_write != prev_cu_cw)
         prev_cr = prev.get("c", 0)
         prev_cw = prev.get("cw", 0)
         acc_cr = prev_cr + cu_cache_read if new_call else prev_cr
@@ -220,7 +226,8 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write):
         d_cw = max(0, acc_cw - prev_cw)
 
         d.setdefault("sessions", {})[sid] = {
-            "i": inp, "o": out, "c": acc_cr, "cw": acc_cw, "li": inp}
+            "i": inp, "o": out, "c": acc_cr, "cw": acc_cw, "li": inp,
+            "lcr": cu_cache_read, "lcw": cu_cache_write}
         d["input"] = d.get("input", 0) + di
         d["output"] = d.get("output", 0) + do_
         d["cached"] = d.get("cached", 0) + d_cr
