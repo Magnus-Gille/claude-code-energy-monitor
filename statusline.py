@@ -41,6 +41,7 @@ subject to breaking changes or removal without notice.
 """
 
 import fcntl
+import hashlib
 import json
 import os
 import sys
@@ -56,6 +57,8 @@ QUOTA_CACHE = CACHE_DIR / "statusline_quota_cache.json"
 QUOTA_TTL = 300  # seconds between API calls
 DEBUG_FILE = CACHE_DIR / "statusline_debug.jsonl"
 DEBUG = os.environ.get("ENERGY_DEBUG", "") == "1"
+# Short content hash of this script — stamps data so we know which version produced it.
+_SELF_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:8]
 
 # Energy: mWh per 1k tokens — mid estimates
 # Hybrid constants from Couch (2026) base + physics-derived cache/output
@@ -192,6 +195,7 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write):
                     "cache_read": d.get("cached", 0),
                     "cache_write": d.get("cache_write", 0),
                     "sessions": len(d.get("sessions", {})),
+                    "v": d.get("v", ""),
                 })
                 try:
                     fd2 = os.open(str(HISTORY_FILE),
@@ -201,7 +205,8 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write):
                 except Exception:
                     pass
             d = {"date": today, "sessions": {},
-                 "input": 0, "output": 0, "cached": 0, "cache_write": 0}
+                 "input": 0, "output": 0, "cached": 0, "cache_write": 0,
+                 "v": _SELF_HASH}
 
         prev = d.get("sessions", {}).get(sid, {})
 
