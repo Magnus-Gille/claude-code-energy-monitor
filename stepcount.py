@@ -115,24 +115,18 @@ def fmt_energy(wh):
     return f"~{v:g}kWh"
 
 
-def scale_lines(wh):
-    """OOM comparison ladder — reference levels below, user's level marked."""
+def energy_comparison(wh):
+    """Single-line energy estimate with nearest real-world comparison."""
     if wh < 0.5:
-        return ["▸      ~0  ±3×"]
+        return "~0 Wh"
     user_str = fmt_energy(wh)
-    lines = []
     for ref_wh, comparison in OOM_SCALE:
         ref_str = fmt_energy(ref_wh)
         if ref_str == user_str:
-            # User lands on this reference level — merge into marked line
-            lines.append(f"▸ {ref_str:>8}  {comparison} ±3×")
-            return lines
+            return f"{user_str} ≈ {comparison} (±3×)"
         if ref_wh >= wh:
             break
-        lines.append(f"  {ref_str:>8}  {comparison}")
-    # User's level is between two reference levels
-    lines.append(f"▸ {user_str:>8}  ±3×")
-    return lines
+    return f"{user_str} (±3×)"
 
 
 def empty_day(date_str):
@@ -158,12 +152,9 @@ def view_today(days):
     e = energy_wh(d)
     sess = d.get("sessions", 0)
 
-    lines = [
-        f"⚡ Claude Code · {today.strftime('%b')} {today.day}",
-        f"{fmt_tok(tok)} tokens · {sess} sessions",
-    ]
-    lines.extend(scale_lines(e))
-    return "\n".join(lines)
+    return (f"⚡ Claude Code · {today.strftime('%b')} {today.day}\n"
+            f"{fmt_tok(tok)} tokens · {sess} sessions\n"
+            f"{energy_comparison(e)}")
 
 
 def view_week(days):
@@ -182,12 +173,9 @@ def view_week(days):
         range_str = (f"{start.strftime('%b')} {start.day} – "
                      f"{today.strftime('%b')} {today.day}")
 
-    lines = [
-        f"⚡ Claude Code · {range_str}",
-        f"{fmt_tok(tok)} tokens · {sess} sessions",
-    ]
-    lines.extend(scale_lines(e))
-    return "\n".join(lines)
+    return (f"⚡ Claude Code · {range_str}\n"
+            f"{fmt_tok(tok)} tokens · {sess} sessions\n"
+            f"{energy_comparison(e)}")
 
 
 def view_month(days):
@@ -206,12 +194,9 @@ def view_month(days):
         range_str = (f"{start.strftime('%b')} {start.day} – "
                      f"{today.strftime('%b')} {today.day}")
 
-    lines = [
-        f"⚡ Claude Code · {range_str}",
-        f"{fmt_tok(tok)} tokens · {sess} sessions",
-    ]
-    lines.extend(scale_lines(e))
-    return "\n".join(lines)
+    return (f"⚡ Claude Code · {range_str}\n"
+            f"{fmt_tok(tok)} tokens · {sess} sessions\n"
+            f"{energy_comparison(e)}")
 
 
 # ── Main ───────────────────────────────────────────────────
