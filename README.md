@@ -22,7 +22,7 @@ Reading left to right:
 
 > Please set up a custom statusline for me. Do the following:
 >
-> 1. Download the script from this repo and save it to `~/.claude/statusline.py`
+> 1. Download `statusline.py` from https://github.com/Magnus-Gille/claude-code-energy-monitor and save it to `~/.claude/statusline.py`
 > 2. Run `chmod +x ~/.claude/statusline.py`
 > 3. Run `claude config set --global statusline "python3 ~/.claude/statusline.py"` to enable it
 
