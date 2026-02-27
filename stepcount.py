@@ -144,20 +144,20 @@ def aggregate(day_list):
 
 # ── Views ──────────────────────────────────────────────────
 
-def view_today(days):
+def view_today(days, energy=False):
     today = date.today()
     d = days.get(today.isoformat(), empty_day(today.isoformat()))
 
     tok = total_tokens(d)
-    e = energy_wh(d)
     sess = d.get("sessions", 0)
+    out = (f"⚡ Claude Code · {today.strftime('%b')} {today.day}\n"
+           f"{fmt_tok(tok)} tokens · {sess} sessions")
+    if energy:
+        out += f"\n{energy_comparison(energy_wh(d))}"
+    return out
 
-    return (f"⚡ Claude Code · {today.strftime('%b')} {today.day}\n"
-            f"{fmt_tok(tok)} tokens · {sess} sessions\n"
-            f"{energy_comparison(e)}")
 
-
-def view_week(days):
+def view_week(days, energy=False):
     today = date.today()
     week_dates = [today - timedelta(days=6 - i) for i in range(7)]
 
@@ -173,12 +173,14 @@ def view_week(days):
         range_str = (f"{start.strftime('%b')} {start.day} – "
                      f"{today.strftime('%b')} {today.day}")
 
-    return (f"⚡ Claude Code · {range_str}\n"
-            f"{fmt_tok(tok)} tokens · {sess} sessions\n"
-            f"{energy_comparison(e)}")
+    out = (f"⚡ Claude Code · {range_str}\n"
+           f"{fmt_tok(tok)} tokens · {sess} sessions")
+    if energy:
+        out += f"\n{energy_comparison(e)}"
+    return out
 
 
-def view_month(days):
+def view_month(days, energy=False):
     today = date.today()
     month_dates = [today - timedelta(days=29 - i) for i in range(30)]
 
@@ -194,9 +196,11 @@ def view_month(days):
         range_str = (f"{start.strftime('%b')} {start.day} – "
                      f"{today.strftime('%b')} {today.day}")
 
-    return (f"⚡ Claude Code · {range_str}\n"
-            f"{fmt_tok(tok)} tokens · {sess} sessions\n"
-            f"{energy_comparison(e)}")
+    out = (f"⚡ Claude Code · {range_str}\n"
+           f"{fmt_tok(tok)} tokens · {sess} sessions")
+    if energy:
+        out += f"\n{energy_comparison(e)}"
+    return out
 
 
 # ── Main ───────────────────────────────────────────────────
@@ -209,6 +213,8 @@ def main():
                        help="Last 7 days")
     group.add_argument("--month", action="store_true",
                        help="Last 30 days")
+    parser.add_argument("--rough-energy-estimate", action="store_true",
+                        help="Include a very rough order-of-magnitude energy guess")
     parser.add_argument("--copy", action="store_true",
                         help="Copy to clipboard")
     args = parser.parse_args()
@@ -219,12 +225,13 @@ def main():
               file=sys.stderr)
         sys.exit(1)
 
+    e = args.rough_energy_estimate
     if args.month:
-        output = view_month(days)
+        output = view_month(days, energy=e)
     elif args.week:
-        output = view_week(days)
+        output = view_week(days, energy=e)
     else:
-        output = view_today(days)
+        output = view_today(days, energy=e)
 
     print(output)
 
