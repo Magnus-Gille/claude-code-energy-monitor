@@ -1,44 +1,39 @@
 #!/usr/bin/env python3
-"""Claude Code statusline: model, context, quota, tokens, energy range, daily history.
+"""Claude Code statusline: model, context, quota, tokens, energy estimate, history.
 
-Energy estimates show a LOW-HIGH range with ~10x total uncertainty,
-based on the best available public research. No one outside Anthropic
-knows the actual energy per token for Claude models — these are derived
-estimates, not measurements.
+Displays order-of-magnitude energy estimates (e.g. ~5kWh) for daily,
+weekly, and monthly usage. No one outside Anthropic knows the actual
+energy per token — these are derived estimates, not measurements.
 
-Center estimates (mWh per 1k tokens) from Couch (2026), who derived
-them from Epoch AI's GPT-4o analysis and Anthropic's pricing ratios:
-  - Fresh input:   390   (parallel prefill)
-  - Output:        1,950 (autoregressive decode, ~5x input)
-  - Cache read:    39    (skips prefill, ~10x cheaper than fresh input)
+Mid estimates (mWh per 1k tokens), hybrid physics + pricing derivation:
+  - Fresh input:   390   (Epoch AI long-context anchor, unchanged from Couch)
+  - Output:      1,400   (cross-checks cluster 600-1800; reduced from 1950)
+  - Cache read:     15   (~26x discount vs input; physics-derived, see below)
   - Cache write:   490   (prefill + write overhead, ~1.25x fresh input)
 
-We apply 3x uncertainty in each direction (divide/multiply by 3),
-giving a ~10x range from low to high. This brackets:
-  - Google's measured 0.24 Wh per median Gemini query (Aug 2025)
-  - OpenAI's reported 0.34 Wh per avg ChatGPT query (Jun 2025)
-  - Couch's derived 41 Wh per median Claude Code session (Jan 2026)
+The output and cache read constants were revised via adversarial debate
+(Claude vs Codex, Feb 2026; see debate/energy-constants-summary.md):
+  - Output reduced from 1950→1400: pricing ratio (5:1) overstated decode
+    cost vs FLOP-based estimates and AI Energy Score benchmarks.
+  - Cache read reduced from 39→15: pricing ratio (10:1) reflected business
+    strategy and storage amortization, not compute energy. Physics shows
+    cache reads skip all prefill computation (just KV cache loading from
+    memory). True discount is 26-1000x vs fresh input; 26x is conservative.
+
+Displayed as order-of-magnitude (snaps to 1/2/5 per decade) because the
+real uncertainty is at least ±3x in each direction.
 
 Primary sources:
   Couch (2026)    https://www.simonpcouch.com/blog/2026-01-20-cc-impact/
   Epoch AI (2025) https://epoch.ai/gradient-updates/how-much-energy-does-chatgpt-use
   Google (2025)   https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference
-  Luccioni (2024) arXiv:2311.16863  "Power Hungry Processing"
-  Husom (2024)    arXiv:2407.16893  "The Price of Prompting"
+  AI Energy Score https://huggingface.co/spaces/AIEnergyScore/Leaderboard
 
 What this does NOT capture:
   - Training energy, embodied energy, networking
-  - Reasoning/extended thinking overhead (can be 150-700x, per AI Energy Score v2)
+  - Reasoning/extended thinking overhead
   - Geographic carbon intensity variation
   - Actual hardware, batch sizes, or optimizations used by Anthropic
-
-For everyday comparisons (order of magnitude):
-  One Google search ............. ~0.3 Wh
-  One ChatGPT/Gemini query ...... ~0.3 Wh
-  Charging a smartphone ......... ~15 Wh
-  LED bulb for 1 hour ........... 10 Wh
-  Electric oven for 1 minute .... 50 Wh
-  Driving an EV 1 km ............ ~150 Wh
 
 NOTE: Quota fetching uses an UNDOCUMENTED Anthropic beta API endpoint
 (/api/oauth/usage with anthropic-beta: oauth-2025-04-20). This is
@@ -62,12 +57,17 @@ QUOTA_TTL = 300  # seconds between API calls
 DEBUG_FILE = CACHE_DIR / "statusline_debug.jsonl"
 DEBUG = os.environ.get("ENERGY_DEBUG", "") == "1"
 
-# Energy: mWh per 1k tokens — low / high bounds
-# Center from Couch (2026), +/- 3x uncertainty
-E_IN_LO, E_IN_HI = 130, 1170          # fresh input
-E_OUT_LO, E_OUT_HI = 650, 5850        # output (decode)
-E_CACHE_LO, E_CACHE_HI = 13, 117      # cached input (cache read)
-E_CW_LO, E_CW_HI = 163, 1470         # cache creation (write)
+# Energy: mWh per 1k tokens — mid estimates
+# Hybrid constants from Couch (2026) base + physics-derived cache/output
+# adjustments via adversarial debate (see debate/energy-constants-summary.md).
+# Fresh input: Epoch AI long-context anchor (unchanged)
+# Output: reduced from 1950→1400 (cross-checks cluster 600-1800)
+# Cache read: reduced from 39→15 (~26x discount vs input; pricing 10x was too conservative)
+# Cache write: unchanged (prefill + write overhead)
+E_IN = 390      # fresh input (long-context workload)
+E_OUT = 1400    # output (decode)
+E_CACHE = 15    # cached input (cache read)
+E_CW = 490      # cache creation (write)
 
 
 def load(path):
@@ -234,17 +234,12 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write):
         os.close(lock_fd)
 
 
-def energy_range(fresh_in, cached_in, cache_write_in, out):
-    """Compute low/high energy in mWh from token counts."""
-    lo = (fresh_in / 1000 * E_IN_LO
-          + cached_in / 1000 * E_CACHE_LO
-          + cache_write_in / 1000 * E_CW_LO
-          + out / 1000 * E_OUT_LO)
-    hi = (fresh_in / 1000 * E_IN_HI
-          + cached_in / 1000 * E_CACHE_HI
-          + cache_write_in / 1000 * E_CW_HI
-          + out / 1000 * E_OUT_HI)
-    return lo, hi
+def energy_mid(fresh_in, cached_in, cache_write_in, out):
+    """Compute mid energy estimate in mWh from token counts."""
+    return (fresh_in / 1000 * E_IN
+            + cached_in / 1000 * E_CACHE
+            + cache_write_in / 1000 * E_CW
+            + out / 1000 * E_OUT)
 
 
 def fmt_tok(n):
@@ -255,33 +250,36 @@ def fmt_tok(n):
     return str(n)
 
 
-def fmt_nrg_range(lo_mwh, hi_mwh):
-    """Format energy range, normalizing both values to the same unit."""
-    if hi_mwh < 1:
-        return "<1mWh"
-    if hi_mwh < 1000:
-        lo_s = f"{lo_mwh:.0f}" if lo_mwh >= 1 else "<1"
-        return f"{lo_s}-{hi_mwh:.0f}mWh"
-    lo_wh = lo_mwh / 1000
-    hi_wh = hi_mwh / 1000
-    if hi_wh < 1000:
-        lo_s = f"{lo_wh:.1f}" if lo_wh < 10 else f"{lo_wh:.0f}"
-        hi_s = f"{hi_wh:.1f}" if hi_wh < 10 else f"{hi_wh:.0f}"
-        return f"{lo_s}-{hi_s}Wh"
-    lo_kwh = lo_wh / 1000
-    hi_kwh = hi_wh / 1000
-    return f"{lo_kwh:.1f}-{hi_kwh:.1f}kWh"
+def fmt_nrg(mwh):
+    """Format energy as order-of-magnitude estimate: ~1mWh, ~10Wh, ~1kWh etc."""
+    if mwh < 1:
+        return "~0"
+    # Snap to nearest 1, 2, 5, 10, 20, 50, ... (E-series-like steps)
+    import math
+    log = math.log10(mwh)
+    decade = int(math.floor(log))
+    frac = log - decade
+    # Snap to 1, 2, 5, or 10 (at log10 positions 0, 0.3, 0.7, 1.0)
+    if frac < 0.15:
+        val = 10 ** decade
+    elif frac < 0.50:
+        val = 2 * 10 ** decade
+    elif frac < 0.85:
+        val = 5 * 10 ** decade
+    else:
+        val = 10 ** (decade + 1)
+    val = round(val)
+    if val < 1000:
+        return f"~{val}mWh"
+    if val < 1_000_000:
+        v = val / 1000
+        return f"~{v:g}Wh"
+    v = val / 1_000_000
+    return f"~{v:g}kWh"
 
 
-HEAT = ["⬜", "🟨", "🟧", "🟥"]
-
-
-def week_heatmap():
-    """Compact 7-day heatmap for the status line: 🦶🟥🟧🟨⬜⬜⬜⬜"""
-    today = date.today()
-    monday = today - timedelta(days=today.weekday())
-    week_dates = [monday + timedelta(days=i) for i in range(7)]
-
+def load_history():
+    """Load history file into a dict keyed by date string."""
     days = {}
     if HISTORY_FILE.exists():
         for line in HISTORY_FILE.read_text().splitlines():
@@ -291,47 +289,45 @@ def week_heatmap():
                     days[d["date"]] = d
                 except Exception:
                     pass
-    daily = load(DAILY_FILE)
-    if daily.get("date"):
-        days[daily["date"]] = {
-            "input": daily.get("input", 0),
-            "output": daily.get("output", 0),
-            "cache_read": daily.get("cached", 0),
-            "cache_write": daily.get("cache_write", 0),
-        }
+    return days
 
-    counts = []
-    for dt in week_dates:
-        d = days.get(dt.isoformat(), {})
-        counts.append(
-            d.get("input", 0) + d.get("output", 0)
-            + d.get("cache_read", 0) + d.get("cache_write", 0))
 
-    nonzero = sorted(v for v in counts if v > 0)
-    if not nonzero:
-        t1, t2 = 1, 2
-    elif len(nonzero) == 1:
-        t1, t2 = nonzero[0] * 0.33, nonzero[0] * 0.66
-    elif len(nonzero) == 2:
-        t1, t2 = nonzero[0], (nonzero[0] + nonzero[1]) / 2
-    else:
-        t1 = nonzero[len(nonzero) // 3]
-        t2 = nonzero[len(nonzero) * 2 // 3]
+def _sum_range(days, start, end):
+    """Sum token fields from history entries in [start, end] date range.
+    Returns (input, output, cache_read, cache_write)."""
+    inp = out = cr = cw = 0
+    for dt_str, entry in days.items():
+        if start <= dt_str <= end:
+            inp += entry.get("input", 0)
+            out += entry.get("output", 0)
+            cr += entry.get("cache_read", 0)
+            cw += entry.get("cache_write", 0)
+    return inp, out, cr, cw
 
-    cells = []
-    for i in range(7):
-        if week_dates[i] > today:
-            cells.append("⬜")
-        elif counts[i] == 0:
-            cells.append(HEAT[0])
-        elif counts[i] <= t1:
-            cells.append(HEAT[1])
-        elif counts[i] <= t2:
-            cells.append(HEAT[2])
-        else:
-            cells.append(HEAT[3])
 
-    return "🦶" + "".join(cells)
+def weekly_monthly_totals(d_in, d_out, d_cr, d_cw):
+    """Compute W/M token totals and energy estimates."""
+    today = date.today()
+    days = load_history()
+
+    # Week = Monday..today (today's live data added separately)
+    monday = today - timedelta(days=today.weekday())
+    w_start = monday.isoformat()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    w_inp, w_out, w_cr, w_cw = _sum_range(days, w_start, yesterday)
+    w_inp += d_in; w_out += d_out; w_cr += d_cr; w_cw += d_cw
+
+    # Month = 1st of month..today
+    m_start = today.replace(day=1).isoformat()
+    m_inp, m_out, m_cr, m_cw = _sum_range(days, m_start, yesterday)
+    m_inp += d_in; m_out += d_out; m_cr += d_cr; m_cw += d_cw
+
+    w_mid = energy_mid(w_inp, w_cr, w_cw, w_out)
+    m_mid = energy_mid(m_inp, m_cr, m_cw, m_out)
+
+    w_str = f"W:{fmt_tok(w_inp + w_out + w_cr + w_cw)} {fmt_nrg(w_mid)}"
+    m_str = f"M:{fmt_tok(m_inp + m_out + m_cr + m_cw)} {fmt_nrg(m_mid)}"
+    return w_str, m_str
 
 
 def main():
@@ -367,11 +363,7 @@ def main():
         sid, s_in, s_out, cu_cache_read, cu_cache_write)
     # total_input_tokens EXCLUDES cached tokens in Claude Code's API.
     # fresh = total_input (already fresh-only), cached is additive.
-    s_fresh = s_in
-    d_fresh = d_in
-
-    s_lo, s_hi = energy_range(s_fresh, s_cr, s_cw, s_out)
-    d_lo, d_hi = energy_range(d_fresh, d_cr, d_cw, d_out)
+    d_mid = energy_mid(d_in, d_cr, d_cw, d_out)
 
     q5, q7 = fetch_quota()
 
@@ -383,9 +375,11 @@ def main():
         if q7 is not None:
             q_str += f" 7d:{q7:.0f}%"
         parts.append(q_str)
-    parts.append(f"S:{fmt_tok(s_in + s_cr + s_cw + s_out)} {fmt_nrg_range(s_lo, s_hi)}")
-    parts.append(f"D:{fmt_tok(d_in + d_cr + d_cw + d_out)} {fmt_nrg_range(d_lo, d_hi)}")
-    parts.append(week_heatmap())
+    parts.append(f"D:{fmt_tok(d_in + d_cr + d_cw + d_out)} {fmt_nrg(d_mid)}")
+
+    w_str, m_str = weekly_monthly_totals(d_in, d_out, d_cr, d_cw)
+    parts.append(w_str)
+    parts.append(m_str)
 
     print(" | ".join(parts), end="")
 
