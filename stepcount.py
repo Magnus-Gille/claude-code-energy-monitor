@@ -6,8 +6,9 @@ energy monitor data. Like a fitness tracker for your AI coding.
 
 Usage:
     python stepcount.py              # today (default)
-    python stepcount.py --week       # this week's heatmap
-    python stepcount.py --month      # monthly calendar heatmap
+    python stepcount.py --week       # last 7 days
+    python stepcount.py --month      # last 30 days
+    python stepcount.py --rough-energy-estimate  # add energy guess
     python stepcount.py --copy       # copy output to clipboard
 """
 
