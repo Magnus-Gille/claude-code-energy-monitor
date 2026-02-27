@@ -30,16 +30,18 @@ E_OUT = 3250     # output (decode)
 E_CR = 65        # cache read
 E_CW = 816.5     # cache write
 
-# Real-world comparisons, ordered by magnitude: (wh_per_unit, singular, plural)
-COMPARISONS = [
-    (0.3, "Google search", "Google searches"),
-    (15, "phone charge", "phone charges"),
-    (60, "laptop charge", "laptop charges"),
-    (150, "km of EV driving", "km of EV driving"),
-    (1000, "hour of air conditioning", "hours of air conditioning"),
+# OOM scale: one relatable comparison per order of magnitude (Wh)
+OOM_SCALE = [
+    (1,        "a Google search"),
+    (10,       "a phone charge"),
+    (100,      "a laptop charge"),
+    (1000,     "an hour of AC"),
+    (10000,    "a day of home electricity"),
+    (100000,   "a full EV charge"),
+    (1000000,  "a month of home electricity"),
+    (10000000, "a year of home electricity"),
 ]
 
-HEAT = ["⬜", "🟨", "🟧", "🟥"]
 DAYS_SHORT = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
 
 
@@ -113,48 +115,24 @@ def fmt_energy(wh):
     return f"~{v:g}kWh"
 
 
-def pick_comparison(wh):
-    """Auto-select the real-world comparison that gives a human-sized number."""
-    if wh < 0.01:
-        return ""
-    best = COMPARISONS[0]
-    for comp in COMPARISONS:
-        if wh / comp[0] >= 1:
-            best = comp
-    count = wh / best[0]
-    _, singular, plural = best
-    if count < 1.05:
-        return f"≈ 1 {singular}"
-    if count < 10:
-        return f"≈ {count:.1f} {plural}"
-    return f"≈ {count:.0f} {plural}"
-
-
-def compute_thresholds(token_counts):
-    """Tercile boundaries from non-zero values for 3-level heatmap."""
-    nonzero = sorted(v for v in token_counts if v > 0)
-    if not nonzero:
-        return (1, 2)
-    if len(nonzero) == 1:
-        v = nonzero[0]
-        return (v * 0.33, v * 0.66)
-    if len(nonzero) == 2:
-        return (nonzero[0], (nonzero[0] + nonzero[1]) / 2)
-    t1 = nonzero[len(nonzero) // 3]
-    t2 = nonzero[len(nonzero) * 2 // 3]
-    return (t1, t2)
-
-
-def heat_cell(value, thresholds):
-    """Map a token count to a heatmap emoji."""
-    if value == 0:
-        return HEAT[0]
-    t1, t2 = thresholds
-    if value <= t1:
-        return HEAT[1]
-    if value <= t2:
-        return HEAT[2]
-    return HEAT[3]
+def scale_lines(wh):
+    """OOM comparison ladder — reference levels below, user's level marked."""
+    if wh < 0.5:
+        return ["▸      ~0  ±3×"]
+    user_str = fmt_energy(wh)
+    lines = []
+    for ref_wh, comparison in OOM_SCALE:
+        ref_str = fmt_energy(ref_wh)
+        if ref_str == user_str:
+            # User lands on this reference level — merge into marked line
+            lines.append(f"▸ {ref_str:>8}  {comparison} ±3×")
+            return lines
+        if ref_wh >= wh:
+            break
+        lines.append(f"  {ref_str:>8}  {comparison}")
+    # User's level is between two reference levels
+    lines.append(f"▸ {user_str:>8}  ±3×")
+    return lines
 
 
 def empty_day(date_str):
@@ -170,18 +148,6 @@ def aggregate(day_list):
     return tok, e, sess
 
 
-def summary_lines(tok, e, sess):
-    """Format the summary footer."""
-    comp = pick_comparison(e)
-    lines = [f"   {fmt_tok(tok)} tokens · {sess} sessions"]
-    energy_str = f"   ⚡ {fmt_energy(e)}"
-    if comp:
-        energy_str += f" {comp}"
-    lines.append(energy_str)
-    lines.append("   (order-of-magnitude estimate · ±3×)")
-    return lines
-
-
 # ── Views ──────────────────────────────────────────────────
 
 def view_today(days):
@@ -193,96 +159,58 @@ def view_today(days):
     sess = d.get("sessions", 0)
 
     lines = [
-        f"🦶 Claude Code · {today.strftime('%b')} {today.day}",
-        "",
+        f"⚡ Claude Code · {today.strftime('%b')} {today.day}",
+        f"{fmt_tok(tok)} tokens · {sess} sessions",
     ]
-    lines.extend(summary_lines(tok, e, sess))
+    lines.extend(scale_lines(e))
     return "\n".join(lines)
 
 
 def view_week(days):
     today = date.today()
-    monday = today - timedelta(days=today.weekday())
-    week_dates = [monday + timedelta(days=i) for i in range(7)]
+    week_dates = [today - timedelta(days=6 - i) for i in range(7)]
 
-    week_data = []
-    for dt in week_dates:
-        week_data.append(days.get(dt.isoformat(), empty_day(dt.isoformat())))
-
-    token_counts = [total_tokens(d) for d in week_data]
-    thresholds = compute_thresholds(token_counts)
-
+    week_data = [days.get(dt.isoformat(), empty_day(dt.isoformat()))
+                 for dt in week_dates]
     tok, e, sess = aggregate(week_data)
 
     # Date range header
-    end = min(week_dates[-1], today)
-    if monday.month == end.month:
-        range_str = f"{monday.strftime('%b')} {monday.day}–{end.day}"
+    start = week_dates[0]
+    if start.month == today.month:
+        range_str = f"{start.strftime('%b')} {start.day}–{today.day}"
     else:
-        range_str = (f"{monday.strftime('%b')} {monday.day} – "
-                     f"{end.strftime('%b')} {end.day}")
-
-    # Heatmap row
-    cells = []
-    for i in range(7):
-        if week_dates[i] > today:
-            cells.append(f"{DAYS_SHORT[i]} ⬜")
-        else:
-            cells.append(
-                f"{DAYS_SHORT[i]} {heat_cell(token_counts[i], thresholds)}")
-    heatmap = "  ".join(cells)
+        range_str = (f"{start.strftime('%b')} {start.day} – "
+                     f"{today.strftime('%b')} {today.day}")
 
     lines = [
-        f"🦶 Claude Code · {range_str}",
-        "",
-        f"   {heatmap}",
-        "",
+        f"⚡ Claude Code · {range_str}",
+        f"{fmt_tok(tok)} tokens · {sess} sessions",
     ]
-    lines.extend(summary_lines(tok, e, sess))
+    lines.extend(scale_lines(e))
     return "\n".join(lines)
 
 
 def view_month(days):
     today = date.today()
-    first = today.replace(day=1)
+    month_dates = [today - timedelta(days=29 - i) for i in range(30)]
 
-    # All dates in the month up to today
-    month_dates = []
-    dt = first
-    while dt.month == first.month and dt <= today:
-        month_dates.append(dt)
-        dt += timedelta(days=1)
-
-    month_data = [days.get(d.isoformat(), empty_day(d.isoformat()))
-                  for d in month_dates]
-
-    token_counts = [total_tokens(d) for d in month_data]
-    thresholds = compute_thresholds(token_counts)
-
+    month_data = [days.get(dt.isoformat(), empty_day(dt.isoformat()))
+                  for dt in month_dates]
     tok, e, sess = aggregate(month_data)
 
-    # Calendar grid: rows = weekdays (Mo–Su), cols = week columns
-    first_weekday = first.weekday()
-    week_start = first - timedelta(days=first_weekday)
-    last_date = month_dates[-1]
-    num_weeks = ((last_date - week_start).days // 7) + 1
-
-    grid = [["  "] * num_weeks for _ in range(7)]
-    for dt in month_dates:
-        w = (dt - week_start).days // 7
-        d = days.get(dt.isoformat(), empty_day(dt.isoformat()))
-        grid[dt.weekday()][w] = heat_cell(total_tokens(d), thresholds)
+    # Date range header
+    start = month_dates[0]
+    if start.month == today.month:
+        range_str = f"{start.strftime('%b')} {start.day}–{today.day}"
+    else:
+        range_str = (f"{start.strftime('%b')} {start.day} – "
+                     f"{today.strftime('%b')} {today.day}")
 
     lines = [
-        f"🦶 Claude Code · {first.strftime('%B %Y')}",
-        "",
+        f"⚡ Claude Code · {range_str}",
+        f"{fmt_tok(tok)} tokens · {sess} sessions",
     ]
-    for day_idx in range(7):
-        row = f"   {DAYS_SHORT[day_idx]}  " + "  ".join(grid[day_idx])
-        lines.append(row.rstrip())
-
-    lines.append("")
-    lines.extend(summary_lines(tok, e, sess))
+    lines.extend(scale_lines(e))
     return "\n".join(lines)
 
 
@@ -293,9 +221,9 @@ def main():
         description="🦶 Claude Code Step Counter — shareable usage summaries")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--week", action="store_true",
-                       help="This week's heatmap")
+                       help="Last 7 days")
     group.add_argument("--month", action="store_true",
-                       help="Monthly calendar heatmap")
+                       help="Last 30 days")
     parser.add_argument("--copy", action="store_true",
                         help="Copy to clipboard")
     args = parser.parse_args()
