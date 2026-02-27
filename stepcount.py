@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 from datetime import date, timedelta
@@ -87,13 +88,29 @@ def fmt_tok(n):
 
 
 def fmt_energy(wh):
-    if wh < 0.001:
-        return "~0 Wh"
-    if wh < 1:
-        return f"~{wh * 1000:.0f} mWh"
-    if wh < 1000:
-        return f"~{wh:.0f} Wh"
-    return f"~{wh / 1000:.1f} kWh"
+    """Format energy as order-of-magnitude estimate with 1/2/5 snap points."""
+    mwh = wh * 1000
+    if mwh < 1:
+        return "~0"
+    log = math.log10(mwh)
+    decade = int(math.floor(log))
+    frac = log - decade
+    if frac < 0.15:
+        val = 10 ** decade
+    elif frac < 0.50:
+        val = 2 * 10 ** decade
+    elif frac < 0.85:
+        val = 5 * 10 ** decade
+    else:
+        val = 10 ** (decade + 1)
+    val = round(val)
+    if val < 1000:
+        return f"~{val}mWh"
+    if val < 1_000_000:
+        v = val / 1000
+        return f"~{v:g}Wh"
+    v = val / 1_000_000
+    return f"~{v:g}kWh"
 
 
 def pick_comparison(wh):
