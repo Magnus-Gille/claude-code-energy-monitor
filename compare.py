@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Statusline vs JSONL token comparison table.
+"""Three-way token comparison: Statusline vs ccusage vs JSONL.
 
-Shows side-by-side token counts from both data sources to highlight
-where JSONL undercounts (input placeholders, missing thinking tokens)
-and where it agrees (cache metrics).
+Shows side-by-side token counts from three data sources to highlight
+where JSONL/ccusage undercount (input placeholders, missing thinking
+tokens) and where all sources agree (cache metrics).
+
+Statusline = this project's real-time statusbar accumulator
+ccusage    = community tool (npx ccusage), parses same JSONL with its own dedup
+JSONL      = our own independent JSONL parser (sum_jsonl.py logic)
 
 Usage:
     python compare.py              # today (default)
@@ -17,7 +21,7 @@ import json
 import subprocess
 import sys
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 CLAUDE_DIR = Path.home() / ".claude"
@@ -45,6 +49,45 @@ def load_statusline_days():
             "cache_read": today.get("cached", 0),
             "cache_write": today.get("cache_write", 0),
             "sessions": len(today.get("sessions", {})),
+        }
+    return days
+
+
+# ── Data loading: ccusage ───────────────────────────────────
+
+def load_ccusage_days(since, until):
+    """Load daily data from ccusage via npx. Returns {iso_date: dict}."""
+    since_str = since.strftime("%Y%m%d")
+    until_str = until.strftime("%Y%m%d")
+    try:
+        result = subprocess.run(
+            ["npx", "-y", "ccusage", "daily", "--json",
+             "--since", since_str, "--until", until_str],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            print(f"ccusage failed: {result.stderr.strip()}", file=sys.stderr)
+            return None
+        data = json.loads(result.stdout)
+    except FileNotFoundError:
+        print("npx not found — skipping ccusage", file=sys.stderr)
+        return None
+    except subprocess.TimeoutExpired:
+        print("ccusage timed out", file=sys.stderr)
+        return None
+    except json.JSONDecodeError:
+        print("ccusage returned invalid JSON", file=sys.stderr)
+        return None
+
+    days = {}
+    for entry in data.get("daily", []):
+        d = entry["date"]
+        days[d] = {
+            "date": d,
+            "input": entry.get("inputTokens", 0),
+            "output": entry.get("outputTokens", 0),
+            "cache_read": entry.get("cacheReadTokens", 0),
+            "cache_write": entry.get("cacheCreationTokens", 0),
         }
     return days
 
@@ -99,7 +142,6 @@ def load_jsonl_days():
 
     days = {}
     for d, msgs in raw_by_date.items():
-        # Deduplicate: last entry per requestId
         by_request = {}
         for m in msgs:
             rid = m["request_id"]
@@ -113,8 +155,6 @@ def load_jsonl_days():
             "output": sum(m["output_tokens"] for m in deduped),
             "cache_read": sum(m["cache_read"] for m in deduped),
             "cache_write": sum(m["cache_creation"] for m in deduped),
-            "requests": len(deduped),
-            "raw_entries": len(msgs),
         }
     return days
 
@@ -134,11 +174,11 @@ def fmt(n):
     return str(n)
 
 
-def ratio_str(sl, jl):
-    """Format ratio between statusline and JSONL values."""
-    if jl == 0:
-        return "n/a" if sl == 0 else "inf"
-    r = sl / jl
+def ratio_str(a, b):
+    """Format ratio a/b."""
+    if b == 0:
+        return "n/a" if a == 0 else "inf"
+    r = a / b
     if 0.95 <= r <= 1.05:
         return f"{r:.2f}x"
     if r >= 10:
@@ -148,10 +188,9 @@ def ratio_str(sl, jl):
 
 # ── Aggregation ─────────────────────────────────────────────
 
-def empty_day(d):
+def empty_day(d=""):
     return {"date": d, "input": 0, "output": 0,
-            "cache_read": 0, "cache_write": 0,
-            "requests": 0, "raw_entries": 0, "sessions": 0}
+            "cache_read": 0, "cache_write": 0}
 
 
 def sum_days(day_list):
@@ -170,8 +209,8 @@ def total(d):
 
 # ── Table rendering ─────────────────────────────────────────
 
-def render_table(sl, jl, label):
-    """Render a comparison table for a date range."""
+def render_table(sl, cu, jl, label, has_ccusage):
+    """Render a three-way comparison table."""
     rows = [
         ("Input", "input"),
         ("Output", "output"),
@@ -182,16 +221,26 @@ def render_table(sl, jl, label):
     sl_total = total(sl)
     jl_total = total(jl)
 
-    # Column widths
     lbl_w = 12
     val_w = 10
-    rat_w = 8
 
-    header = f"{'':>{lbl_w}}  {'Statusline':>{val_w}}  {'JSONL':>{val_w}}  {'Ratio':>{rat_w}}"
-    sep = f"{'':>{lbl_w}}  {'─' * val_w}  {'─' * val_w}  {'─' * rat_w}"
+    if has_ccusage:
+        cu_total = total(cu)
+        header = (f"{'':>{lbl_w}}  {'Statusline':>{val_w}}"
+                  f"  {'ccusage':>{val_w}}  {'JSONL':>{val_w}}"
+                  f"  {'SL/cc':>6}  {'SL/JL':>6}")
+        sep = (f"{'':>{lbl_w}}  {'─' * val_w}"
+               f"  {'─' * val_w}  {'─' * val_w}"
+               f"  {'─' * 6}  {'─' * 6}")
+    else:
+        header = (f"{'':>{lbl_w}}  {'Statusline':>{val_w}}"
+                  f"  {'JSONL':>{val_w}}  {'Ratio':>8}")
+        sep = (f"{'':>{lbl_w}}  {'─' * val_w}"
+               f"  {'─' * val_w}  {'─' * 8}")
 
     lines = []
-    lines.append(f"Statusline vs JSONL · {label}")
+    title = "Statusline vs ccusage vs JSONL" if has_ccusage else "Statusline vs JSONL"
+    lines.append(f"{title} · {label}")
     lines.append("")
     lines.append(header)
     lines.append(sep)
@@ -199,22 +248,46 @@ def render_table(sl, jl, label):
     for name, key in rows:
         sv = sl[key]
         jv = jl[key]
-        r = ratio_str(sv, jv)
-        lines.append(f"{name:>{lbl_w}}  {fmt(sv):>{val_w}}  {fmt(jv):>{val_w}}  {r:>{rat_w}}")
+        if has_ccusage:
+            cv = cu[key]
+            r_cu = ratio_str(sv, cv)
+            r_jl = ratio_str(sv, jv)
+            lines.append(f"{name:>{lbl_w}}  {fmt(sv):>{val_w}}"
+                         f"  {fmt(cv):>{val_w}}  {fmt(jv):>{val_w}}"
+                         f"  {r_cu:>6}  {r_jl:>6}")
+        else:
+            r = ratio_str(sv, jv)
+            lines.append(f"{name:>{lbl_w}}  {fmt(sv):>{val_w}}"
+                         f"  {fmt(jv):>{val_w}}  {r:>8}")
 
     lines.append(sep)
-    r = ratio_str(sl_total, jl_total)
-    lines.append(f"{'Total':>{lbl_w}}  {fmt(sl_total):>{val_w}}  {fmt(jl_total):>{val_w}}  {r:>{rat_w}}")
+    if has_ccusage:
+        r_cu = ratio_str(sl_total, cu_total)
+        r_jl = ratio_str(sl_total, jl_total)
+        lines.append(f"{'Total':>{lbl_w}}  {fmt(sl_total):>{val_w}}"
+                     f"  {fmt(cu_total):>{val_w}}  {fmt(jl_total):>{val_w}}"
+                     f"  {r_cu:>6}  {r_jl:>6}")
+    else:
+        r = ratio_str(sl_total, jl_total)
+        lines.append(f"{'Total':>{lbl_w}}  {fmt(sl_total):>{val_w}}"
+                     f"  {fmt(jl_total):>{val_w}}  {r:>8}")
 
-    # Notes on discrepancies
+    # Notes
     notes = []
     if jl["input"] > 0 and sl["input"] / jl["input"] > 5:
-        notes.append("Input: JSONL records placeholder (1), not real token counts")
+        notes.append("Input: JSONL/ccusage record placeholder (1), not real counts")
     if jl["output"] > 0 and sl["output"] / jl["output"] > 2:
-        notes.append("Output: JSONL excludes thinking tokens")
+        notes.append("Output: JSONL/ccusage exclude thinking tokens")
     cr_r = sl["cache_read"] / jl["cache_read"] if jl["cache_read"] > 0 else 1
     if 0.7 <= cr_r <= 1.5:
-        notes.append(f"Cache read: both sources agree ({ratio_str(sl['cache_read'], jl['cache_read'])})")
+        notes.append(f"Cache: all sources agree ({ratio_str(sl['cache_read'], jl['cache_read'])})")
+    if has_ccusage:
+        cu_jl_in = ratio_str(cu["input"], jl["input"]) if jl["input"] > 0 else "n/a"
+        cu_jl_out = ratio_str(cu["output"], jl["output"]) if jl["output"] > 0 else "n/a"
+        if cu["input"] > 0 and jl["input"] > 0:
+            r = cu["input"] / jl["input"]
+            if 0.8 <= r <= 1.2:
+                notes.append(f"ccusage ≈ JSONL for input/output (same underlying data)")
 
     if notes:
         lines.append("")
@@ -255,12 +328,14 @@ def date_label(dates):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Statusline vs JSONL token comparison")
+        description="Three-way token comparison: Statusline vs ccusage vs JSONL")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--week", action="store_true", help="Last 7 days")
     group.add_argument("--month", action="store_true", help="Last 30 days")
     parser.add_argument("--copy", action="store_true",
                         help="Copy to clipboard")
+    parser.add_argument("--no-ccusage", action="store_true",
+                        help="Skip ccusage (faster, no npx)")
     args = parser.parse_args()
 
     # Pick date range
@@ -272,22 +347,29 @@ def main():
         dates = get_dates_today()
 
     label = date_label(dates)
-    date_strs = {d.isoformat() for d in dates}
+    date_strs = sorted(d.isoformat() for d in dates)
 
-    # Load both sources
+    # Load statusline
     sl_days = load_statusline_days()
+
+    # Load ccusage
+    cu_days = None
+    has_ccusage = False
+    if not args.no_ccusage:
+        print("Running ccusage...", file=sys.stderr)
+        cu_days = load_ccusage_days(dates[0], dates[-1])
+        has_ccusage = cu_days is not None
+
+    # Load JSONL
     print("Scanning JSONL files...", file=sys.stderr)
     jl_days = load_jsonl_days()
-    print(f"Found data for {len(jl_days)} days in JSONL", file=sys.stderr)
 
     # Aggregate over date range
-    sl_range = [sl_days.get(d, empty_day(d)) for d in sorted(date_strs)]
-    jl_range = [jl_days.get(d, empty_day(d)) for d in sorted(date_strs)]
+    sl_agg = sum_days([sl_days.get(d, empty_day(d)) for d in date_strs])
+    jl_agg = sum_days([jl_days.get(d, empty_day(d)) for d in date_strs])
+    cu_agg = sum_days([cu_days.get(d, empty_day(d)) for d in date_strs]) if has_ccusage else empty_day()
 
-    sl_agg = sum_days(sl_range)
-    jl_agg = sum_days(jl_range)
-
-    output = render_table(sl_agg, jl_agg, label)
+    output = render_table(sl_agg, cu_agg, jl_agg, label, has_ccusage)
     print(output)
 
     if args.copy:
