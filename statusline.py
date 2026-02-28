@@ -204,7 +204,17 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write):
                     os.close(fd2)
                 except Exception:
                     pass
-            d = {"date": today, "sessions": {},
+            # Carry forward session baselines so resumed sessions
+            # don't attribute their full history to the new day.
+            baselines = {}
+            for s_id, s_val in d.get("sessions", {}).items():
+                baselines[s_id] = {
+                    "i": s_val.get("i", 0), "o": s_val.get("o", 0),
+                    "c": s_val.get("c", 0), "cw": s_val.get("cw", 0),
+                    "li": s_val.get("li", 0),
+                    "lcr": s_val.get("lcr", 0), "lcw": s_val.get("lcw", 0),
+                }
+            d = {"date": today, "sessions": baselines,
                  "input": 0, "output": 0, "cached": 0, "cache_write": 0,
                  "v": _SELF_HASH}
 
