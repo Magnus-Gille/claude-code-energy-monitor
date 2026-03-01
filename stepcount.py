@@ -6,8 +6,10 @@ energy monitor data. Like a fitness tracker for your AI coding.
 
 Usage:
     python stepcount.py              # today (default)
-    python stepcount.py --week       # last 7 days
-    python stepcount.py --month      # last 30 days
+    python stepcount.py -w           # last 7 days
+    python stepcount.py -m           # last 30 days
+    python stepcount.py -a           # today + week + month stacked
+    python stepcount.py -t           # today + week + month as table
     python stepcount.py --rough-energy-estimate  # add energy guess
     python stepcount.py --copy       # copy output to clipboard
 """

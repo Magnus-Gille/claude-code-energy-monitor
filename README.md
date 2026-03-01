@@ -64,6 +64,43 @@ All files are created with owner-only permissions (`0600`). Example history entr
 {"date": "2026-02-18", "input": 2797805, "output": 693769, "cache_read": 1901548, "cache_write": 312000, "sessions": 12}
 ```
 
+## Step counter (shareable summaries)
+
+`stepcount.py` generates copy-pasteable usage summaries from the accumulated history — like a fitness tracker for AI coding.
+
+```bash
+python3 stepcount.py           # today (default)
+python3 stepcount.py -w        # last 7 days
+python3 stepcount.py -m        # last 30 days
+python3 stepcount.py -a        # today + week + month stacked
+python3 stepcount.py -t        # today + week + month as ASCII table
+python3 stepcount.py --copy    # copy output to clipboard
+```
+
+Add `--rough-energy-estimate` to any view to include the order-of-magnitude energy guess.
+
+Example output (`-a`):
+
+```
+⚡ Claude Code
+   Today   18M tokens ·   9 sessions
+   Week   563M tokens · 106 sessions
+   Month  917M tokens · 156 sessions
+```
+
+Example output (`-t`):
+
+```
+⚡ Claude Code
+   ┌───────┬────────┬──────┬────────────┐
+   │       │ tokens │ sess │            │
+   ├───────┼────────┼──────┼────────────┤
+   │ Today │    18M │    9 │ █░░░░░░░░░ │
+   │ Week  │   563M │  106 │ ██████░░░░ │
+   │ Month │   917M │  156 │ ██████████ │
+   └───────┴────────┴──────┴────────────┘
+```
+
 ## Results & Claims
 
 This section separates what we can measure with high confidence from what we can only estimate at order-of-magnitude level.
