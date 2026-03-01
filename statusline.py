@@ -332,15 +332,14 @@ def weekly_monthly_totals(d_in, d_out, d_cr, d_cw):
     today = date.today()
     days = load_history()
 
-    # Week = Monday..today (today's live data added separately)
-    monday = today - timedelta(days=today.weekday())
-    w_start = monday.isoformat()
+    # Week = rolling 7 days (6 prior days from history + today's live data)
+    w_start = (today - timedelta(days=6)).isoformat()
     yesterday = (today - timedelta(days=1)).isoformat()
     w_inp, w_out, w_cr, w_cw = _sum_range(days, w_start, yesterday)
     w_inp += d_in; w_out += d_out; w_cr += d_cr; w_cw += d_cw
 
-    # Month = 1st of month..today
-    m_start = today.replace(day=1).isoformat()
+    # Month = rolling 30 days (29 prior days from history + today's live data)
+    m_start = (today - timedelta(days=29)).isoformat()
     m_inp, m_out, m_cr, m_cw = _sum_range(days, m_start, yesterday)
     m_inp += d_in; m_out += d_out; m_cr += d_cr; m_cw += d_cw
 
