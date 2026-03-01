@@ -17,6 +17,7 @@ Usage:
 import argparse
 import json
 import math
+import re
 import subprocess
 import sys
 from datetime import date, timedelta
@@ -288,11 +289,55 @@ def view_table(days, energy=False):
     return "\n".join(lines)
 
 
-# ── Main ───────────────────────────────────────────────────
+# ── CLI ───────────────────────────────────────────────────
+
+# Common wrong flags → (suggestion, explanation)
+_SUGGESTIONS = {
+    "-d":        ("(no flag needed)", "today is the default"),
+    "--day":     ("(no flag needed)", "today is the default"),
+    "--today":   ("(no flag needed)", "today is the default"),
+    "--daily":   ("(no flag needed)", "today is the default"),
+    "--weekly":  ("-w / --week",      None),
+    "--monthly": ("-m / --month",     None),
+    "-e":        ("--rough-energy-estimate", None),
+    "--energy":  ("--rough-energy-estimate", None),
+    "-c":        ("--copy",           None),
+}
+
+EXAMPLES = """\
+examples:
+  stepcount.py                 today's tokens and sessions
+  stepcount.py -w              last 7 days
+  stepcount.py -m              last 30 days
+  stepcount.py -a              today + week + month stacked
+  stepcount.py -t              today + week + month as table
+  stepcount.py -a --copy       all periods, copied to clipboard
+  stepcount.py --rough-energy-estimate   add energy estimate"""
+
+
+class _Parser(argparse.ArgumentParser):
+    """ArgumentParser that suggests corrections for common wrong flags."""
+
+    def error(self, message):
+        # Extract the bad flag from argparse's error message
+        m = re.search(r"unrecognized arguments: (\S+)", message)
+        if m:
+            bad = m.group(1)
+            if bad in _SUGGESTIONS:
+                hint, note = _SUGGESTIONS[bad]
+                msg = f"unknown flag: {bad}  →  did you mean: {hint}"
+                if note:
+                    msg += f"  ({note})"
+                print(msg, file=sys.stderr)
+                sys.exit(2)
+        super().error(message)
+
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="🦶 Claude Code Step Counter — shareable usage summaries")
+    parser = _Parser(
+        description="⚡ Claude Code Step Counter — shareable usage summaries",
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("-w", "--week", action="store_true",
                        help="Last 7 days")
@@ -303,9 +348,9 @@ def main():
     group.add_argument("-t", "--table", action="store_true",
                        help="Show today, week, and month as ASCII table")
     parser.add_argument("--rough-energy-estimate", action="store_true",
-                        help="Include a very rough order-of-magnitude energy guess")
+                        help="Include order-of-magnitude energy guess (±3x)")
     parser.add_argument("--copy", action="store_true",
-                        help="Copy to clipboard")
+                        help="Copy output to clipboard")
     args = parser.parse_args()
 
     days = load_days()
