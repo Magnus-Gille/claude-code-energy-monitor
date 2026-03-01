@@ -5,10 +5,10 @@ Generates copy-pasteable usage visualizations from Claude Code
 energy monitor data. Like a fitness tracker for your AI coding.
 
 Usage:
-    python stepcount.py              # today (default)
-    python stepcount.py -w           # last 7 days
-    python stepcount.py -m           # last 30 days
-    python stepcount.py -a           # today + week + month stacked
+    python stepcount.py              # today + week + month stacked (default)
+    python stepcount.py -d           # today only
+    python stepcount.py -w           # last 7 days only
+    python stepcount.py -m           # last 30 days only
     python stepcount.py -t           # today + week + month as table
     python stepcount.py --rough-energy-estimate  # add energy guess
     python stepcount.py --copy       # copy output to clipboard
@@ -146,30 +146,41 @@ def aggregate(day_list):
     return tok, e, sess
 
 
+def _data_span(days):
+    """Number of days from earliest recorded day to today (inclusive)."""
+    if not days:
+        return 0
+    earliest = min(days.keys())
+    return (date.today() - date.fromisoformat(earliest)).days + 1
+
+
 def _gather_all(days):
-    """Gather D/W/M data for combined views."""
+    """Gather D/W/M data for combined views. Only include periods with full data."""
     today = date.today()
+    span = _data_span(days)
 
     d_today = days.get(today.isoformat(), empty_day(today.isoformat()))
     tok_d = total_tokens(d_today)
     sess_d = d_today.get("sessions", 0)
     e_d = energy_wh(d_today)
 
-    week_dates = [today - timedelta(days=6 - i) for i in range(7)]
-    week_data = [days.get(dt.isoformat(), empty_day(dt.isoformat()))
-                 for dt in week_dates]
-    tok_w, e_w, sess_w = aggregate(week_data)
+    rows = [("Today", tok_d, sess_d, e_d)]
 
-    month_dates = [today - timedelta(days=29 - i) for i in range(30)]
-    month_data = [days.get(dt.isoformat(), empty_day(dt.isoformat()))
-                  for dt in month_dates]
-    tok_m, e_m, sess_m = aggregate(month_data)
+    if span >= 7:
+        week_dates = [today - timedelta(days=6 - i) for i in range(7)]
+        week_data = [days.get(dt.isoformat(), empty_day(dt.isoformat()))
+                     for dt in week_dates]
+        tok_w, e_w, sess_w = aggregate(week_data)
+        rows.append(("Week", tok_w, sess_w, e_w))
 
-    return [
-        ("Today", tok_d, sess_d, e_d),
-        ("Week", tok_w, sess_w, e_w),
-        ("Month", tok_m, sess_m, e_m),
-    ]
+    if span >= 30:
+        month_dates = [today - timedelta(days=29 - i) for i in range(30)]
+        month_data = [days.get(dt.isoformat(), empty_day(dt.isoformat()))
+                      for dt in month_dates]
+        tok_m, e_m, sess_m = aggregate(month_data)
+        rows.append(("Month", tok_m, sess_m, e_m))
+
+    return rows
 
 
 # ── Views ──────────────────────────────────────────────────
@@ -283,8 +294,8 @@ def view_table(days, energy=False):
     lines.append(f"   └{'─' * 7}┴{'─' * (tw + 2)}┴{'─' * (sw + 2)}┴{'─' * (BAR_W + 2)}┘")
 
     if energy:
-        _, _, _, e_m = rows[2]
-        lines.append(f"   {energy_comparison(e_m)}")
+        _, _, _, e_last = rows[-1]
+        lines.append(f"   {energy_comparison(e_last)}")
 
     return "\n".join(lines)
 
@@ -293,10 +304,8 @@ def view_table(days, energy=False):
 
 # Common wrong flags → (suggestion, explanation)
 _SUGGESTIONS = {
-    "-d":        ("(no flag needed)", "today is the default"),
-    "--day":     ("(no flag needed)", "today is the default"),
-    "--today":   ("(no flag needed)", "today is the default"),
-    "--daily":   ("(no flag needed)", "today is the default"),
+    "-a":        ("(no flag needed)", "all periods is the default"),
+    "--all":     ("(no flag needed)", "all periods is the default"),
     "--weekly":  ("-w / --week",      None),
     "--monthly": ("-m / --month",     None),
     "-e":        ("--rough-energy-estimate", None),
@@ -306,12 +315,12 @@ _SUGGESTIONS = {
 
 EXAMPLES = """\
 examples:
-  stepcount.py                 today's tokens and sessions
-  stepcount.py -w              last 7 days
-  stepcount.py -m              last 30 days
-  stepcount.py -a              today + week + month stacked
+  stepcount.py                 today + week + month (default)
+  stepcount.py -d              today only
+  stepcount.py -w              last 7 days only
+  stepcount.py -m              last 30 days only
   stepcount.py -t              today + week + month as table
-  stepcount.py -a --copy       all periods, copied to clipboard
+  stepcount.py --copy          copy output to clipboard
   stepcount.py --rough-energy-estimate   add energy estimate"""
 
 
@@ -339,12 +348,12 @@ def main():
         epilog=EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     group = parser.add_mutually_exclusive_group()
+    group.add_argument("-d", "--day", action="store_true",
+                       help="Today only")
     group.add_argument("-w", "--week", action="store_true",
-                       help="Last 7 days")
+                       help="Last 7 days only")
     group.add_argument("-m", "--month", action="store_true",
-                       help="Last 30 days")
-    group.add_argument("-a", "--all", action="store_true",
-                       help="Show today, week, and month together")
+                       help="Last 30 days only")
     group.add_argument("-t", "--table", action="store_true",
                        help="Show today, week, and month as ASCII table")
     parser.add_argument("--rough-energy-estimate", action="store_true",
@@ -360,16 +369,16 @@ def main():
         sys.exit(1)
 
     e = args.rough_energy_estimate
-    if args.all:
-        output = view_all(days, energy=e)
-    elif args.table:
+    if args.table:
         output = view_table(days, energy=e)
     elif args.month:
         output = view_month(days, energy=e)
     elif args.week:
         output = view_week(days, energy=e)
-    else:
+    elif args.day:
         output = view_today(days, energy=e)
+    else:
+        output = view_all(days, energy=e)
 
     print(output)
 

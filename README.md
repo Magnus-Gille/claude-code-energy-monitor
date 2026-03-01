@@ -69,17 +69,36 @@ All files are created with owner-only permissions (`0600`). Example history entr
 `stepcount.py` generates copy-pasteable usage summaries from the accumulated history — like a fitness tracker for AI coding.
 
 ```bash
-python3 stepcount.py           # today (default)
-python3 stepcount.py -w        # last 7 days
-python3 stepcount.py -m        # last 30 days
-python3 stepcount.py -a        # today + week + month stacked
+python3 stepcount.py           # today + week + month stacked (default)
+python3 stepcount.py -d        # today only
+python3 stepcount.py -w        # last 7 days only
+python3 stepcount.py -m        # last 30 days only
 python3 stepcount.py -t        # today + week + month as ASCII table
 python3 stepcount.py --copy    # copy output to clipboard
 ```
 
 Add `--rough-energy-estimate` to any view to include the order-of-magnitude energy guess.
 
-Example output (`-a`):
+Week and Month rows only appear once you have 7 and 30 days of data respectively.
+
+**Optional: auto-print after each session.** Add a [Stop hook](https://docs.anthropic.com/en/docs/claude-code/hooks) to `~/.claude/settings.json`:
+
+```json
+"hooks": {
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 '/path/to/stepcount.py'"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Example output (default):
 
 ```
 ⚡ Claude Code
