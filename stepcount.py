@@ -143,6 +143,32 @@ def aggregate(day_list):
     return tok, e, sess
 
 
+def _gather_all(days):
+    """Gather D/W/M data for combined views."""
+    today = date.today()
+
+    d_today = days.get(today.isoformat(), empty_day(today.isoformat()))
+    tok_d = total_tokens(d_today)
+    sess_d = d_today.get("sessions", 0)
+    e_d = energy_wh(d_today)
+
+    week_dates = [today - timedelta(days=6 - i) for i in range(7)]
+    week_data = [days.get(dt.isoformat(), empty_day(dt.isoformat()))
+                 for dt in week_dates]
+    tok_w, e_w, sess_w = aggregate(week_data)
+
+    month_dates = [today - timedelta(days=29 - i) for i in range(30)]
+    month_data = [days.get(dt.isoformat(), empty_day(dt.isoformat()))
+                  for dt in month_dates]
+    tok_m, e_m, sess_m = aggregate(month_data)
+
+    return [
+        ("Today", tok_d, sess_d, e_d),
+        ("Week", tok_w, sess_w, e_w),
+        ("Month", tok_m, sess_m, e_m),
+    ]
+
+
 # ── Views ──────────────────────────────────────────────────
 
 def view_today(days, energy=False):
@@ -204,16 +230,76 @@ def view_month(days, energy=False):
     return out
 
 
+def view_all(days, energy=False):
+    """Compact D/W/M stacked view."""
+    rows = _gather_all(days)
+    tok_strs = [fmt_tok(tok) for _, tok, _, _ in rows]
+    tw = max(len(s) for s in tok_strs)
+    sw = max(len(str(sess)) for _, _, sess, _ in rows)
+
+    lines = ["⚡ Claude Code"]
+    if energy:
+        e_strs = [fmt_energy(e) for _, _, _, e in rows]
+        ew = max(len(s) for s in e_strs)
+        for (label, _, sess, _), tok_s, e_s in zip(rows, tok_strs, e_strs):
+            lines.append(
+                f"   {label:<5} {tok_s:>{tw}} tokens · "
+                f"{sess:>{sw}} sessions · {e_s:>{ew}}")
+    else:
+        for (label, _, sess, _), tok_s in zip(rows, tok_strs):
+            lines.append(
+                f"   {label:<5} {tok_s:>{tw}} tokens · "
+                f"{sess:>{sw}} sessions")
+
+    return "\n".join(lines)
+
+
+def view_table(days, energy=False):
+    """ASCII table D/W/M with bars."""
+    rows = _gather_all(days)
+    tok_strs = [fmt_tok(tok) for _, tok, _, _ in rows]
+    max_tok = max(tok for _, tok, _, _ in rows) or 1
+    BAR_W = 10
+
+    def bar(val):
+        filled = round(val / max_tok * BAR_W)
+        if val > 0 and filled == 0:
+            filled = 1
+        return "█" * filled + "░" * (BAR_W - filled)
+
+    tw = max(max(len(s) for s in tok_strs), 6)   # "tokens"
+    sw = max(max(len(str(s)) for _, _, s, _ in rows), 4)  # "sess"
+
+    lines = ["⚡ Claude Code"]
+    lines.append(f"   ┌{'─' * 7}┬{'─' * (tw + 2)}┬{'─' * (sw + 2)}┬{'─' * (BAR_W + 2)}┐")
+    lines.append(f"   │       │ {'tokens':>{tw}} │ {'sess':>{sw}} │ {' ' * BAR_W} │")
+    lines.append(f"   ├{'─' * 7}┼{'─' * (tw + 2)}┼{'─' * (sw + 2)}┼{'─' * (BAR_W + 2)}┤")
+    for (label, tok, sess, _), tok_s in zip(rows, tok_strs):
+        lines.append(
+            f"   │ {label:<5} │ {tok_s:>{tw}} │ {sess:>{sw}} │ {bar(tok)} │")
+    lines.append(f"   └{'─' * 7}┴{'─' * (tw + 2)}┴{'─' * (sw + 2)}┴{'─' * (BAR_W + 2)}┘")
+
+    if energy:
+        _, _, _, e_m = rows[2]
+        lines.append(f"   {energy_comparison(e_m)}")
+
+    return "\n".join(lines)
+
+
 # ── Main ───────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
         description="🦶 Claude Code Step Counter — shareable usage summaries")
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--week", action="store_true",
+    group.add_argument("-w", "--week", action="store_true",
                        help="Last 7 days")
-    group.add_argument("--month", action="store_true",
+    group.add_argument("-m", "--month", action="store_true",
                        help="Last 30 days")
+    group.add_argument("-a", "--all", action="store_true",
+                       help="Show today, week, and month together")
+    group.add_argument("-t", "--table", action="store_true",
+                       help="Show today, week, and month as ASCII table")
     parser.add_argument("--rough-energy-estimate", action="store_true",
                         help="Include a very rough order-of-magnitude energy guess")
     parser.add_argument("--copy", action="store_true",
@@ -227,7 +313,11 @@ def main():
         sys.exit(1)
 
     e = args.rough_energy_estimate
-    if args.month:
+    if args.all:
+        output = view_all(days, energy=e)
+    elif args.table:
+        output = view_table(days, energy=e)
+    elif args.month:
         output = view_month(days, energy=e)
     elif args.week:
         output = view_week(days, energy=e)
