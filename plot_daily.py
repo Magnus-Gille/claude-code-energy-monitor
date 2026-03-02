@@ -4,8 +4,7 @@
 Reads from ~/.claude/statusline_history.jsonl (completed days) and
 ~/.claude/statusline_daily.json (today, in progress).
 
-Energy midpoints are the geometric mean of the low/high bounds from
-statusline.py (Couch 2026, +/- 3x uncertainty).
+Energy constants imported from energy_constants.py (single source of truth).
 
 Usage:
     python plot_daily.py              # show in window
@@ -29,11 +28,9 @@ CACHE_DIR = Path.home() / ".claude"
 HISTORY_FILE = CACHE_DIR / "statusline_history.jsonl"
 DAILY_FILE = CACHE_DIR / "statusline_daily.json"
 
-# Energy midpoints (mWh per 1k tokens) — average of lo/hi bounds
-E_IN_MID = (130 + 1170) / 2      # 650  — fresh input
-E_OUT_MID = (650 + 5850) / 2     # 3250 — output (decode)
-E_CACHE_MID = (13 + 117) / 2     # 65   — cache read
-E_CW_MID = (163 + 1470) / 2      # 816.5 — cache write
+# Energy constants: mWh per 1k tokens (mid estimates).
+# Imported from energy_constants.py — the single source of truth.
+from energy_constants import E_IN, E_OUT, E_CACHE, E_CW
 
 
 def load_days():
@@ -71,10 +68,10 @@ def compute(days):
 
         tokens.append((inp + out + cr + cw) / 1e6)
 
-        e_mwh = (inp / 1000 * E_IN_MID
-                 + cr / 1000 * E_CACHE_MID
-                 + cw / 1000 * E_CW_MID
-                 + out / 1000 * E_OUT_MID)
+        e_mwh = (inp / 1000 * E_IN
+                 + cr / 1000 * E_CACHE
+                 + cw / 1000 * E_CW
+                 + out / 1000 * E_OUT)
         energy_wh.append(e_mwh / 1000)
 
     return dates, tokens, energy_wh

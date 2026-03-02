@@ -13,8 +13,8 @@ Reading left to right:
 | `Opus 4.6` | Active model |
 | `5h:29% 7d:52%` | API quota consumption (5-hour and 7-day rolling windows) |
 | `D:2.0M ~2kWh` | Daily total tokens and energy estimate |
-| `W:45.3M ~20kWh` | Weekly total (Monday–today) |
-| `M:412M ~50kWh` | Monthly total (1st–today) |
+| `W:45.3M ~20kWh` | Weekly total (rolling 7 days) |
+| `M:412M ~50kWh` | Monthly total (rolling 30 days) |
 
 ## Installation
 
@@ -174,7 +174,7 @@ On a real heavy-usage month (Opus 4.6, 119 sessions, ~757M tokens), the mid esti
 
 4. **Infrastructure variability.** We don't know Anthropic's hardware (GPU types, cluster config), batch sizes, scheduling strategies, model sizes, or datacenter locations. Inference efficiency is a rapidly moving target — Google reported a [33x improvement](https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference) in a single year.
 
-5. **JSONL logs are incomplete.** Claude Code's JSONL conversation logs have streaming placeholder values for `usage.input_tokens` (75% are ≤1) and exclude thinking tokens from `usage.output_tokens`. Tools like [ccusage](https://github.com/ryoppippi/ccusage) that read JSONL may undercount actual compute by 10–174x. This monitor reads the statusbar context, which is the more complete data source. See [GitHub issue #28197](https://github.com/anthropics/claude-code/issues/28197).
+5. **JSONL logs are incomplete.** In tested versions, Claude Code's JSONL conversation logs have streaming placeholder values for `usage.input_tokens` (75% were ≤1 in our dataset) and exclude thinking tokens from `usage.output_tokens`. Tools like [ccusage](https://github.com/ryoppippi/ccusage) that read JSONL may significantly undercount actual compute as a result. This monitor reads the statusbar context, which is the more complete data source. See [GitHub issue #28197](https://github.com/anthropics/claude-code/issues/28197).
 
 ### How to use these numbers responsibly
 
@@ -231,7 +231,7 @@ The estimates were sanity-checked against multiple independent data points:
 - **FLOP-based estimate**: 750–1,500 mWh/1k output tokens for a 200B-class model with datacenter overhead
 - **Llama 405B measured** (batched): ~2,800 mWh/1k output tokens including overhead
 
-Full debate transcript and analysis in `debate/energy-constants-summary.md` (gitignored).
+Rationale for each constant in [`docs/energy-constants.md`](docs/energy-constants.md). Full debate transcripts are in `debate/` (gitignored due to size).
 
 ### Why the uncertainty is so large
 

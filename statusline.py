@@ -60,9 +60,10 @@ DEBUG = os.environ.get("ENERGY_DEBUG", "") == "1"
 # Short content hash of this script — stamps data so we know which version produced it.
 _SELF_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:8]
 
-# Energy: mWh per 1k tokens — mid estimates
+# Energy: mWh per 1k tokens — mid estimates.
+# Canonical source: energy_constants.py — keep in sync.
 # Hybrid constants from Couch (2026) base + physics-derived cache/output
-# adjustments via adversarial debate (see debate/energy-constants-summary.md).
+# adjustments via adversarial debate (see docs/energy-constants.md).
 # Fresh input: Epoch AI long-context anchor (unchanged)
 # Output: reduced from 1950→1400 (cross-checks cluster 600-1800)
 # Cache read: reduced from 39→15 (~26x discount vs input; pricing 10x was too conservative)

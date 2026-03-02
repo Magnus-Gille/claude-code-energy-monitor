@@ -27,12 +27,9 @@ CACHE_DIR = Path.home() / ".claude"
 DAILY_FILE = CACHE_DIR / "statusline_daily.json"
 HISTORY_FILE = CACHE_DIR / "statusline_history.jsonl"
 
-# Energy midpoints (mWh per 1k tokens) — geometric mean of ±3x bounds
-# Source: Couch (2026), derived from Epoch AI + Anthropic pricing ratios
-E_IN = 650       # fresh input
-E_OUT = 3250     # output (decode)
-E_CR = 65        # cache read
-E_CW = 816.5     # cache write
+# Energy constants: mWh per 1k tokens (mid estimates).
+# Imported from energy_constants.py — the single source of truth.
+from energy_constants import E_IN, E_OUT, E_CACHE, E_CW
 
 # OOM scale: one relatable comparison per order of magnitude (Wh)
 OOM_SCALE = [
@@ -74,7 +71,7 @@ def energy_wh(d):
     """Midpoint energy estimate in Wh for a day."""
     return (d.get("input", 0) / 1000 * E_IN
             + d.get("output", 0) / 1000 * E_OUT
-            + d.get("cache_read", 0) / 1000 * E_CR
+            + d.get("cache_read", 0) / 1000 * E_CACHE
             + d.get("cache_write", 0) / 1000 * E_CW) / 1000
 
 
