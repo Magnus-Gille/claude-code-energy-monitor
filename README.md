@@ -2,6 +2,8 @@
 
 A statusline script for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that shows real-time token usage and order-of-magnitude energy estimates. It tracks daily, weekly, and monthly totals, distinguishes cheap cached tokens from expensive fresh tokens, and logs history automatically.
 
+The repo now also includes `codex_status.py` for Codex CLI. Codex does not have Claude Code's custom statusline hook, so the Codex version is a companion command that reads rollout JSONL files from `~/.codex/sessions/` and prints the same style of one-line summary for a prompt, tmux status, or sidecar terminal.
+
 ```
 Opus 4.6 | 5h:29% 7d:52% | D:2.0M ~2kWh | W:45.3M ~20kWh | M:412M ~50kWh
 ```
@@ -40,6 +42,90 @@ claude config set --global statusline "python3 ~/.claude/statusline.py"
 ```
 
 That's it. The statusline appears the next time you start a Claude Code session.
+
+## Codex CLI
+
+Codex support lives in [`codex_status.py`](codex_status.py). It is not injected into the Codex TUI itself; Codex currently writes rollout logs instead of calling an external statusline command.
+
+```bash
+# From this repo
+chmod +x ./codex_status.py
+
+# Print one status line for the latest Codex rollout
+python3 ./codex_status.py
+
+# Continuously refresh it in a side terminal
+python3 ./codex_status.py --watch
+```
+
+Example output:
+
+```
+gpt-5.4 | Win:258k | 5h:36% 7d:46% | D:1.8M ~100Wh | W:27.4M ~5kWh | M:75.6M ~10kWh
+```
+
+Useful integrations:
+
+```bash
+# zsh right prompt
+setopt PROMPT_SUBST
+RPROMPT='$(python3 /path/to/codex_status.py 2>/dev/null)'
+
+# tmux status-right
+set -g status-right "#(python3 /path/to/codex_status.py 2>/dev/null)"
+```
+
+Notes:
+- Codex rollout logs expose total input, cached input, output, reasoning output, context window, and 5h/7d rate-limit usage.
+- Unlike Claude Code, Codex rollout logs do **not** expose cache-write tokens, so the Codex energy estimate treats cache write as zero.
+- Parsed rollout summaries are cached in `~/.codex/statusline_rollout_cache.json` to keep prompt-time execution reasonably fast.
+
+### Codex step counter
+
+For copy/pasteable summaries similar to `stepcount.py`, use [`codex_stepcount.py`](codex_stepcount.py):
+
+```bash
+python3 ./codex_stepcount.py
+python3 ./codex_stepcount.py -d
+python3 ./codex_stepcount.py -w
+python3 ./codex_stepcount.py -m
+python3 ./codex_stepcount.py -t
+python3 ./codex_stepcount.py --rough-energy-estimate
+python3 ./codex_stepcount.py --copy
+```
+
+Example output:
+
+```text
+⚡ Codex
+   Today  5.1M tokens ·    5 sessions
+   Week  30.8M tokens · 1395 sessions
+   Month 79.0M tokens · 2129 sessions
+```
+
+### Print after Codex exits
+
+Codex still has no native Stop hook, so the practical equivalent is a wrapper that runs Codex and then prints the summary after the process exits.
+
+This repo includes [`codex_with_summary.py`](codex_with_summary.py):
+
+```bash
+python3 ./codex_with_summary.py
+python3 ./codex_with_summary.py resume --last
+python3 ./codex_with_summary.py exec "fix the failing tests"
+```
+
+If you want this behavior on your normal `codex` command, add a shell function to your `~/.zshrc`:
+
+```bash
+codex() {
+  python3 /path/to/codex_with_summary.py "$@"
+}
+```
+
+Optional:
+- Set `CODEX_SUMMARY_ARGS="--rough-energy-estimate"` to change the summary flags.
+- The wrapper intentionally skips printing a summary for `--help`, `--version`, `completion`, `features`, `login`, `logout`, `mcp`, and `debug`.
 
 ## How it works
 

@@ -1,7 +1,7 @@
 # Multi-CLI Support Research
 
 **Date:** 2026-03-02
-**Status:** Research only — no implementation
+**Status:** Codex implemented on 2026-03-05 via `codex_status.py`; Gemini remains research only
 
 ## Goal
 
@@ -22,12 +22,12 @@ Evaluate extending the energy monitor to support Gemini CLI and OpenAI Codex CLI
 
 **What's missing vs Claude Code:**
 - No cache-write tracking (only reads)
-- No cross-session persistent storage — we'd build that ourselves
+- No built-in statusline hook inside the Codex TUI
 - `--ephemeral` flag suppresses rollout files
 
 **Existing ecosystem:** `ccusage`, `codex-hud`, `tokscale`, `CodexBar` all parse the rollout JSONL successfully.
 
-**Verdict:** Straightforward integration. Parse JSONL, accumulate into our daily storage format.
+**Verdict:** Straightforward integration. Implemented as `codex_status.py`, which parses rollout JSONL directly, caches per-file summaries in `~/.codex/statusline_rollout_cache.json`, and renders a companion one-line monitor for prompt/tmux/sidecar usage.
 
 ## Gemini CLI — Moderate
 
