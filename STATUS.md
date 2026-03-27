@@ -3,43 +3,23 @@
 **Last session:** 2026-03-27
 **Branch:** master
 
-## Completed This Session
-- Wrote [`debate/heimdall-env-codex-rebuttal-1.md`](debate/heimdall-env-codex-rebuttal-1.md), a Round 2 rebuttal to Claude's revised Heimdall `EnvironmentFile` plan
-- Accepted that Claude made genuine concessions on root-cause certainty, March 22 speculation, and the draft's internal inconsistency
-- Concluded the revised plan is close but still insufficient as written for incident close-out: it needs `daemon-reload` and explicit verification of intended account selection, not just a fallback check after failure
-- Wrote [`debate/heimdall-env-codex-critique.md`](debate/heimdall-env-codex-critique.md), an adversarial review of Claude's proposed Heimdall `EnvironmentFile=/home/magnus/.heimdall/env` fix
-- Concluded the `EnvironmentFile` change is a reasonable minimal deployment fix but not a proven root-cause resolution
-- Flagged the main evidentiary gaps: the diagnosis overstates certainty from one env-var mismatch, the two-account MSAL cache remains a live secondary risk, and the March 22 explanation is speculative
-- Wrote [`debate/model-tiering-codex-rebuttal-1.md`](debate/model-tiering-codex-rebuttal-1.md), a Round 2 rebuttal to Claude's revised model-tiering position
-- Accepted that Claude made genuine concessions on sequencing, speculative quota math, and custom-scheduler complexity
-- Argued that the remaining blocker is operational: Hugin still needs a minimal invocation journal and explicit acceptance contract before any broad Sonnet-first rollout
-- Wrote [`debate/model-tiering-codex-critique.md`](debate/model-tiering-codex-critique.md), an adversarial review of Claude's model-tiering proposal for Hugin
-- Concluded that the core premise is directionally valid because Anthropic docs indicate model choice affects usage limits, but the draft's concrete Max-quota savings math is unproven
-- Recommended a simpler rollout order for Hugin: Sonnet-first with acceptance-check-based escalation and telemetry first, planner/scheduler second
-- Wrote [`debate/headless-energy-codex-critique.md`](debate/headless-energy-codex-critique.md), an adversarial review of Claude's headless-energy proposal
-- Wrote [`debate/headless-energy-codex-rebuttal-1.md`](debate/headless-energy-codex-rebuttal-1.md), a Round 2 rebuttal after Claude's empirical response
-- Acknowledged that Claude empirically resolved the top `--resume` overcount concern and that journal-first wrapper architecture is now directionally acceptable
-- Flagged the remaining blocker as thinking-token semantic validation, plus an internal inconsistency in Claude's reported `output_tokens` vs claimed ratio
-- Critiqued `--output-format json` reliability, including schema-contract uncertainty, error/interrupt edge cases, stdout compatibility, and resumed-session overcount risk
-- Assessed alternatives (hooks, plugins, file watchers, API-level integration, cost-only derivation) and argued that hooks help as triggers but not as an accurate token source
-- Called out Pi-specific constraints and multi-turn headless agent-session risks, especially the unresolved question of invocation-delta vs resumed-session-cumulative usage
-- Implemented `codex_status.py`, a Codex companion monitor that parses `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`
-- Added rollout-summary caching in `~/.codex/statusline_rollout_cache.json` to keep repeated prompt/status invocations under 1s
-- Matched Codex token semantics correctly: fresh input = `input_tokens - cached_input_tokens`; output includes reasoning; cache write unavailable and treated as zero
-- Rendered Claude-style status segments for Codex: model, context window, 5h/7d quota (when present), and D/W/M token + energy totals
-- Implemented `codex_stepcount.py` for copy/pasteable Codex usage summaries (`-d/-w/-m/-t/--rough-energy-estimate/--copy`)
-- Implemented `codex_with_summary.py` wrapper to run `codex` and print the Codex summary on exit, since Codex still has no native stop hook
-- Verified the script against real local Codex rollout files and specific historical files with rate-limit data
-- Updated `README.md` with Codex usage/integration examples and refreshed `research/multi-cli-support.md` to reflect implementation
+## Completed This Session (2026-03-27)
+- **Sonnet-first pilot experiment** — wrote `docs/sonnet-pilot-experiment.md`: 3-phase evaluation (baseline/pilot/evaluate) of routing Cat A+B Hugin tasks to Sonnet. Phase 1 starts today (Mar 27 - Apr 2).
+- **Notification pipeline** — tested Telegram (Ratatoskr) and email (Heimdall) channels. Ratatoskr `POST /api/send` endpoint added via Hugin task (ae4f64a). Email deprecated: `grimnir-bot@outlook.com` flagged by Microsoft (AADSTS70000 "service abuse"). Set `NOTIFY_ENABLED=false`.
+- **Heimdall EnvironmentFile debate** — 2-round Codex debate on fixing missing `MICROSOFT_MCP_CLIENT_ID`. Applied fix (`EnvironmentFile=/home/magnus/.heimdall/env`), but discovered real root cause is the Microsoft account lockout, not just the missing env var. MSAL cache has 2 accounts; `accounts[0]` happens to be correct (`grimnir-bot`) but is fragile.
+- **Email deprecation across repos** — updated grimnir `docs/architecture.md`, heimdall `STATUS.md`, Munin `projects/heimdall/status` and `people/grimnir-bot/status`. All notifications now go through Telegram.
+- **Free email research** — evaluated 8 transactional email services. Best free options: Brevo (300/day, no domain needed) or SMTP2GO (200/day). Parked for now — Telegram is sufficient.
+- **Session history + advisor tooling** (40bcd18) — statusline.py now tracks per-session metadata (model, project, context size, cost, API calls). advisor.py provides analysis.
+
+## Previous Session
+- Codex monitor suite (codex_status.py, codex_stepcount.py, codex_with_summary.py)
+- Model tiering and headless energy monitoring debates
 
 ## In Progress
 - Nothing active
 
 ## Next Steps
-- **Heimdall env-file debate** (Round 2 completed 2026-03-27):
-  - Treat `EnvironmentFile + verify` as an immediate repair attempt, not full closure
-  - Include `systemctl daemon-reload` if the unit file or drop-in is changed
-  - Verify not just endpoint success but the actual account/mailbox selected by Heimdall
+- **Sonnet-first pilot** — baseline week in progress (Mar 27 - Apr 2). Set up scheduled trigger for daily monitoring + Telegram alerts.
 - **Model tiering for Hugin** (debate Round 2 completed 2026-03-26):
   - If implemented, do not flip all code tasks to Sonnet by default without telemetry
   - First add a minimal append-only invocation journal from the first pilot run
