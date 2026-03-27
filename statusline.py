@@ -53,6 +53,7 @@ from datetime import date, timedelta
 CACHE_DIR = Path.home() / ".claude"
 DAILY_FILE = CACHE_DIR / "statusline_daily.json"
 HISTORY_FILE = CACHE_DIR / "statusline_history.jsonl"
+SESSION_HISTORY_FILE = CACHE_DIR / "statusline_session_history.jsonl"
 QUOTA_CACHE = CACHE_DIR / "statusline_quota_cache.json"
 QUOTA_TTL = 300  # seconds between API calls
 DEBUG_FILE = CACHE_DIR / "statusline_debug.jsonl"
@@ -167,7 +168,9 @@ def fetch_quota():
         return cache.get("q5"), cache.get("q7")
 
 
-def update_daily(sid, inp, out, cu_cache_read, cu_cache_write):
+def update_daily(sid, inp, out, cu_cache_read, cu_cache_write,
+                  model_id="?", project="?", ctx_size=0, ctx_pct=0,
+                  cost_usd=0):
     """Update daily totals with file locking to prevent lost updates.
 
     cu_cache_read/cu_cache_write: per-API-call values from current_usage.
@@ -205,6 +208,34 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write):
                     os.close(fd2)
                 except Exception:
                     pass
+            # Archive per-session records for advisor analysis.
+            try:
+                sess = d.get("sessions", {})
+                if sess:
+                    lines = []
+                    for s_id, s_val in sess.items():
+                        rec = {
+                            "date": d["date"], "sid": s_id,
+                            "m": s_val.get("m", "?"),
+                            "p": s_val.get("p", "?"),
+                            "cws": s_val.get("cws", 0),
+                            "cpk": s_val.get("cpk", 0),
+                            "$": s_val.get("$", 0),
+                            "n": s_val.get("n", 0),
+                            "i": s_val.get("i", 0),
+                            "o": s_val.get("o", 0),
+                            "c": s_val.get("c", 0),
+                            "cw": s_val.get("cw", 0),
+                            "fs": s_val.get("fs", 0),
+                            "ls": s_val.get("ls", 0),
+                        }
+                        lines.append(json.dumps(rec))
+                    fd3 = os.open(str(SESSION_HISTORY_FILE),
+                                  os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                    os.write(fd3, ("\n".join(lines) + "\n").encode())
+                    os.close(fd3)
+            except Exception:
+                pass
             # Carry forward session baselines so resumed sessions
             # don't attribute their full history to the new day.
             baselines = {}
@@ -214,6 +245,10 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write):
                     "c": s_val.get("c", 0), "cw": s_val.get("cw", 0),
                     "li": s_val.get("li", 0),
                     "lcr": s_val.get("lcr", 0), "lcw": s_val.get("lcw", 0),
+                    "m": s_val.get("m", "?"), "p": s_val.get("p", "?"),
+                    "cws": s_val.get("cws", 0), "cpk": 0,
+                    "$": s_val.get("$", 0), "n": 0,
+                    "fs": s_val.get("fs", 0), "ls": s_val.get("ls", 0),
                 }
             d = {"date": today, "sessions": baselines,
                  "input": 0, "output": 0, "cached": 0, "cache_write": 0,
@@ -241,9 +276,16 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write):
         d_cr = max(0, acc_cr - prev_cr)
         d_cw = max(0, acc_cw - prev_cw)
 
+        now = time.time()
         d.setdefault("sessions", {})[sid] = {
             "i": inp, "o": out, "c": acc_cr, "cw": acc_cw, "li": inp,
-            "lcr": cu_cache_read, "lcw": cu_cache_write}
+            "lcr": cu_cache_read, "lcw": cu_cache_write,
+            "m": model_id, "p": project,
+            "cws": ctx_size,
+            "cpk": max(prev.get("cpk", 0), ctx_pct or 0),
+            "$": cost_usd,
+            "n": prev.get("n", 0) + (1 if new_call else 0),
+            "fs": prev.get("fs", now), "ls": now}
         d["input"] = d.get("input", 0) + di
         d["output"] = d.get("output", 0) + do_
         d["cached"] = d.get("cached", 0) + d_cr
@@ -368,9 +410,14 @@ def main():
             pass
 
     model = data.get("model", {}).get("display_name", "?")
+    model_id = data.get("model", {}).get("id", "?")
     ctx = data.get("context_window", {})
     ctx_pct = ctx.get("used_percentage")
+    ctx_size = ctx.get("context_window_size", 0)
     sid = data.get("session_id", "unknown")
+    project = os.path.basename(
+        data.get("workspace", {}).get("project_dir", "?"))
+    cost_usd = data.get("cost", {}).get("total_cost_usd", 0)
 
     s_in = ctx.get("total_input_tokens", 0)
     s_out = ctx.get("total_output_tokens", 0)
@@ -382,7 +429,9 @@ def main():
     cu_cache_write = current_usage.get("cache_creation_input_tokens", 0)
 
     d_in, d_out, d_cr, d_cw, s_cr, s_cw = update_daily(
-        sid, s_in, s_out, cu_cache_read, cu_cache_write)
+        sid, s_in, s_out, cu_cache_read, cu_cache_write,
+        model_id=model_id, project=project, ctx_size=ctx_size,
+        ctx_pct=ctx_pct or 0, cost_usd=cost_usd)
     # total_input_tokens EXCLUDES cached tokens in Claude Code's API.
     # fresh = total_input (already fresh-only), cached is additive.
     d_mid = energy_mid(d_in, d_cr, d_cw, d_out)
