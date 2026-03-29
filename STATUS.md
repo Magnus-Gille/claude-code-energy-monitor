@@ -1,7 +1,21 @@
 # Project Status
 
-**Last session:** 2026-03-27
+**Last session:** 2026-03-29
 **Branch:** master
+
+## Completed This Session (2026-03-29)
+- **Quota analyzer (`advisor.py --breakdown`)** — new per-project/per-model cost breakdown view. Shows top sessions by quota impact, output token share analysis. Per-session daily deltas (`di/do/dc/dcw`) now tracked in statusline.py. Stale baselines (sessions with no metadata) pruned at midnight.
+- **Pi headless energy monitoring — implemented and deployed**:
+  - `pi_scanner.py` — scans print-mode JSONL from `~/.claude/projects/` on Pi. Dual mode: `--file` for targeted parsing, global scan for cron catch-up. requestId dedup, fcntl locking, schema warnings.
+  - `pi_sync.sh` — rsync wrapper syncing journal + rollup from Pi to laptop.
+  - `advisor.py` + `stepcount.py` extended to merge Pi data (additive per date, `--no-pi` flag).
+  - **Deployed:** Scanner running via cron `*/15` on Pi (`huginmunin`). Sync running via cron `*/30` on laptop. Initial scan found 51 sessions across 7 days.
+  - Pi sessions now appear in advisor analysis (model mix shows Opus/Haiku, projects show heimdall/hugin/skuld).
+- **Pi implementation adversarial debate** (2 rounds, 12 critique points):
+  - Dropped `last-prompt` as completion gate (replaced with "assistant entry with nonzero usage")
+  - Changed from rollup-only to full journal sync
+  - Confirmed requestId dedup needed even in print mode
+  - Scanner is decoupled v1; Hugin-side capture is target architecture
 
 ## Completed This Session (2026-03-27)
 - **Sonnet-first pilot experiment** — wrote `docs/sonnet-pilot-experiment.md`: 3-phase evaluation (baseline/pilot/evaluate) of routing Cat A+B Hugin tasks to Sonnet. Phase 1 starts today (Mar 27 - Apr 2).
@@ -18,6 +32,13 @@
 ## In Progress
 - Nothing active
 
+## Deployment: Pi Energy Scanner
+- **Pi cron:** `*/15 * * * * python3 /home/magnus/repos/claude-code-energy-monitor/pi_scanner.py` (logs to syslog via `logger -t pi-energy-scanner`)
+- **Laptop cron:** `*/30 * * * * /Users/magnus/repos/claude-code-energy-monitor/pi_sync.sh` (logs via `logger -t pi-energy-sync`)
+- **Pi data files:** `~/.claude/pi_journal.jsonl` (append-only, 51 entries), `~/.claude/pi_daily_rollup.jsonl` (derived daily totals)
+- **Laptop copies:** same filenames in `~/.claude/`, synced via rsync
+- **To update scanner:** `scp pi_scanner.py huginmunin.local:~/repos/claude-code-energy-monitor/pi_scanner.py`
+
 ## Next Steps
 - **Sonnet-first pilot** — baseline week in progress (Mar 27 - Apr 2). Set up scheduled trigger for daily monitoring + Telegram alerts.
 - **Model tiering for Hugin** (debate Round 2 completed 2026-03-26):
@@ -25,15 +46,6 @@
   - First add a minimal append-only invocation journal from the first pilot run
   - Define a narrow acceptance contract for a small pilot task set before broader Sonnet-first rollout
   - Treat `opusplan` as research only until Sonnet-first pilot data shows a planning gap
-- **Pi headless energy monitoring** (debate + verification done 2026-03-21):
-  - Build a JSONL scanner that reads print-mode session files from `~/.claude/projects/<path>/*.jsonl` on the Pi
-  - Print-mode JSONL is clean: 5 lines per session, one assistant entry with accurate usage (no placeholders, no streaming duplicates — unlike interactive JSONL)
-  - No changes to Hugin needed — Hugin uses `-p` which already writes clean JSONL
-  - Extended thinking is DISABLED in print mode, so `output_tokens` = visible output only (accurate for actual compute)
-  - `--resume` returns per-invocation usage, not cumulative (verified)
-  - Architecture: append-only invocation journal → derived daily rollups, with machine_id + claude version stamps
-  - Add `machine` field to history entries for cross-machine aggregation with laptop data
-  - See `debate/headless-energy-summary.md` for full debate results
 - Per-model energy constants (Haiku/Sonnet/Opus use same constants despite ~2-5x size differences)
 - Improve active-session heuristics if Codex changes rollout behavior or adds a native status hook
 - Consider blog post about JSONL placeholder finding (issue #28197)

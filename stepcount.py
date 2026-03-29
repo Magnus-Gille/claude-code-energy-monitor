@@ -26,6 +26,7 @@ from pathlib import Path
 CACHE_DIR = Path.home() / ".claude"
 DAILY_FILE = CACHE_DIR / "statusline_daily.json"
 HISTORY_FILE = CACHE_DIR / "statusline_history.jsonl"
+PI_ROLLUP_FILE = CACHE_DIR / "pi_daily_rollup.jsonl"
 
 # Energy constants: mWh per 1k tokens (mid estimates).
 # Imported from energy_constants.py — the single source of truth.
@@ -47,7 +48,7 @@ DAYS_SHORT = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
 
 
 def load_days():
-    """Load all days as {iso_date_str: day_dict}."""
+    """Load all days as {iso_date_str: day_dict}, including Pi data."""
     days = {}
     if HISTORY_FILE.exists():
         for line in HISTORY_FILE.read_text().splitlines():
@@ -64,6 +65,31 @@ def load_days():
             "cache_write": today.get("cache_write", 0),
             "sessions": len(today.get("sessions", {})),
         }
+    # Merge Pi daily rollup (additive per date)
+    if PI_ROLLUP_FILE.exists():
+        for line in PI_ROLLUP_FILE.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ds = d["date"]
+            if ds in days:
+                days[ds]["input"] += d.get("input", 0)
+                days[ds]["output"] += d.get("output", 0)
+                days[ds]["cache_read"] += d.get("cache_read", 0)
+                days[ds]["cache_write"] += d.get("cache_write", 0)
+                days[ds]["sessions"] += d.get("sessions", 0)
+            else:
+                days[ds] = {
+                    "date": ds,
+                    "input": d.get("input", 0),
+                    "output": d.get("output", 0),
+                    "cache_read": d.get("cache_read", 0),
+                    "cache_write": d.get("cache_write", 0),
+                    "sessions": d.get("sessions", 0),
+                }
     return days
 
 

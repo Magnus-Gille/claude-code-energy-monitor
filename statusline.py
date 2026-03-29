@@ -226,6 +226,11 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write,
                             "o": s_val.get("o", 0),
                             "c": s_val.get("c", 0),
                             "cw": s_val.get("cw", 0),
+                            # Daily deltas for this session
+                            "di": s_val.get("di", 0),
+                            "do": s_val.get("do", 0),
+                            "dc": s_val.get("dc", 0),
+                            "dcw": s_val.get("dcw", 0),
                             "fs": s_val.get("fs", 0),
                             "ls": s_val.get("ls", 0),
                         }
@@ -240,11 +245,17 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write,
             # don't attribute their full history to the new day.
             baselines = {}
             for s_id, s_val in d.get("sessions", {}).items():
+                # Prune stale baselines: no metadata and no activity today
+                if (s_val.get("m", "?") == "?"
+                        and s_val.get("n", 0) == 0):
+                    continue
                 baselines[s_id] = {
                     "i": s_val.get("i", 0), "o": s_val.get("o", 0),
                     "c": s_val.get("c", 0), "cw": s_val.get("cw", 0),
                     "li": s_val.get("li", 0),
                     "lcr": s_val.get("lcr", 0), "lcw": s_val.get("lcw", 0),
+                    # Reset daily deltas for new day
+                    "di": 0, "do": 0, "dc": 0, "dcw": 0,
                     "m": s_val.get("m", "?"), "p": s_val.get("p", "?"),
                     "cws": s_val.get("cws", 0), "cpk": 0,
                     "$": s_val.get("$", 0), "n": 0,
@@ -280,6 +291,11 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write,
         d.setdefault("sessions", {})[sid] = {
             "i": inp, "o": out, "c": acc_cr, "cw": acc_cw, "li": inp,
             "lcr": cu_cache_read, "lcw": cu_cache_write,
+            # Daily deltas for this session (accumulated across calls today)
+            "di": prev.get("di", 0) + di,
+            "do": prev.get("do", 0) + do_,
+            "dc": prev.get("dc", 0) + d_cr,
+            "dcw": prev.get("dcw", 0) + d_cw,
             "m": model_id, "p": project,
             "cws": ctx_size,
             "cpk": max(prev.get("cpk", 0), ctx_pct or 0),
