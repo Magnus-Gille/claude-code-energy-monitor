@@ -1,7 +1,14 @@
 # Project Status
 
-**Last session:** 2026-04-08
+**Last session:** 2026-04-10
 **Branch:** master
+
+## Completed This Session (2026-04-10)
+- **plot_daily.py improvements** (3a53332) — stacked bars (compute vs cache), gap-filling for missing days, 7-day trailing average (causal, no edge artifacts), correct window semantics. Identified input undercounting bug on low-activity days and cache_write growth trend as monitor improvement signals.
+- **Memory/CLAUDE.md audit and cleanup** — full audit of all 24 project MEMORY.md files vs Munin. Migrated 8 valuable local-only entries to Munin (gavel, hoganas-coach, flowdictate, 4× feedback/hugin, munin-zero hardware). Deleted 12 redundant/duplicate files. Trimmed 9 MEMORY.md files (munin-memory 204→25 lines, AXON 243→20, claude-code-energy-monitor 136→50, etc.). Total reduction: ~1,800 lines → ~600 lines across all project memories.
+- **CLAUDE.md global trim** — Munin section 94→55 lines (-40%). Removed redundant prose, verbose Desktop/Web/Mobile instructions, artifact indexing sub-sections. All rules preserved.
+- **Removed MEMORY.md auto-memory reference from CLAUDE.md** — no longer instructs Claude to maintain local MEMORY.md files alongside Munin.
+- **claude.ai MCP note** — the 3 dead claude.ai MCPs (M365, Gmail, Calendar) are account-synced from claude.ai web, not CLI-managed. Must be removed via claude.ai → Settings → Integrations.
 
 ## Completed This Session (2026-04-08)
 - **Fixed stale statusline.py deployment** — deployed `~/.claude/statusline.py` was from Mar 1, missing all quota analyzer features (per-session model/project tracking, daily deltas, stale pruning, session history archiving). Per-model and per-project breakdown in `advisor.py --breakdown` was showing "?" for all sessions.
