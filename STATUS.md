@@ -1,7 +1,12 @@
 # Project Status
 
-**Last session:** 2026-03-29
+**Last session:** 2026-04-08
 **Branch:** master
+
+## Completed This Session (2026-04-08)
+- **Fixed stale statusline.py deployment** — deployed `~/.claude/statusline.py` was from Mar 1, missing all quota analyzer features (per-session model/project tracking, daily deltas, stale pruning, session history archiving). Per-model and per-project breakdown in `advisor.py --breakdown` was showing "?" for all sessions.
+- **Symlinked statusline.py** — `~/.claude/statusline.py` → repo copy. No more manual deploy step; edits are live immediately.
+- **Data collection confirmed active** — 47 days of history, Pi sync running, per-model/project data will populate from next API call onward.
 
 ## Completed This Session (2026-03-29)
 - **Quota analyzer (`advisor.py --breakdown`)** — new per-project/per-model cost breakdown view. Shows top sessions by quota impact, output token share analysis. Per-session daily deltas (`di/do/dc/dcw`) now tracked in statusline.py. Stale baselines (sessions with no metadata) pruned at midnight.
@@ -30,7 +35,7 @@
 - Model tiering and headless energy monitoring debates
 
 ## In Progress
-- Nothing active
+- **Per-model/project data collection** — symlink deployed, awaiting first full day of data to verify breakdown works. Backup at `~/.claude/statusline.py.bak` (remove once confirmed).
 
 ## Deployment: Pi Energy Scanner
 - **Pi cron:** `*/15 * * * * python3 /home/magnus/repos/claude-code-energy-monitor/pi_scanner.py` (logs to syslog via `logger -t pi-energy-scanner`)
