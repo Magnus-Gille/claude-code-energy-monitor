@@ -1,7 +1,14 @@
 # Project Status
 
-**Last session:** 2026-04-10
+**Last session:** 2026-04-18
 **Branch:** master
+
+## Completed This Session (2026-04-18)
+- **Token optimization analysis** — advisor.py + breakdown shows Opus at 89-93% of weekly quota; 9 sessions hit >80% ctx; 257 extended-context sessions (now capped via CLAUDE_CODE_DISABLE_1M_CONTEXT=1, already set on both laptop and Pi).
+- **Pinned 4 skills to Sonnet** (close, capture, index-artifacts, submit-task) — added Model Check step: "stop and ask the user to run /model sonnet, wait for confirmation before proceeding." Also pinned submit-task. Reviewed by Codex CLI (PR #1) — wording clarified to make delegation explicit.
+- **Deleted duplicate `/index-artifacts` command** — `~/.claude/commands/index-artifacts.md` was stale (old `~/mgc/` path). Deleted from both laptop and Pi.
+- **Skills repo PR #1 merged** — `github.com/Magnus-Gille/claude-skills`. Established PR workflow (direct push to main is blocked). Codex cross-model review integrated.
+- **grimnir-bot added as collaborator on claude-skills** — Pi's GitHub identity; was blocked from pulling. Invite accepted, Pi remote switched to SSH, `git pull` now works.
 
 ## Completed This Session (2026-04-10)
 - **plot_daily.py improvements** (3a53332) — stacked bars (compute vs cache), gap-filling for missing days, 7-day trailing average (causal, no edge artifacts), correct window semantics. Identified input undercounting bug on low-activity days and cache_write growth trend as monitor improvement signals.
