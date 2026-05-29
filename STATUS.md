@@ -1,7 +1,18 @@
 # Project Status
 
-**Last session:** 2026-04-18
+**Last session:** 2026-05-30
 **Branch:** master
+
+## Completed This Session (2026-05-30) — accuracy audit + fixes
+Deep-dive audit (Claude Opus 4.8, CC v2.1.157): multi-agent research workflow (49 agents, adversarial verification) + `ENERGY_DEBUG` re-validation. **Changes staged, NOT yet committed** (7 files).
+
+- **Token accounting fix (critical).** CC **v2.1.122** redefined `context_window.total_input_tokens`/`total_output_tokens` from cumulative session counters to **current-context snapshots** (`total_input = input+cache_creation+cache_read` of latest response; `total_output` = that response's output, resets per call). The old `update_daily` delta logic was over-counting fresh input **~53×** (tracking context growth) and under-counting output; cache terms unaffected. **Rewrote `update_daily`** to accumulate per-call `current_usage`, detecting call boundaries (input-side change OR output reset — also fixes the consecutive-identical-fully-cached-call miss). Fresh input = `total_input − cache_read − cache_creation`. **Replay-validated against ground truth on 392 captured fires: exact match on all 4 token types.** Fresh-input energy share drops from spurious ~12–15% → ~1%.
+- **Per-model multipliers** (decision): Haiku ×0.3 / Sonnet ×0.6 / Opus ×1.0 (price-proxy 1:3:5, discounted for sub-linear scaling; order-of-magnitude). statusline weights today + future via `d['by_model']`; legacy history days fall back to 1.0×. stepcount mirrors with a Pi residual term. Fleet mix: Opus 56% / Sonnet 43% / Haiku 1%.
+- **E_CW** (decision): value kept at 490, **relabeled** "prefill + pricing-derived infra surcharge proxy" (cache creation = prefill FLOPs; +25% has no measured energy basis).
+- **Quota source**: `/api/oauth/usage` (now 429-dead) → statusline payload `rate_limits.{five_hour,seven_day}.used_percentage` (CC v2.1.80+), OAuth as fallback.
+- **Constants unchanged in value** (390/1400/15/490): new 2026 evidence (Oviedo/*Joule* 0.34 Wh + 4–20× overstatement; ML.ENERGY v3.0 + B200 −35%; Jegham Claude-3.7) all sit within ±3× and bracket E_OUT. **E_CACHE is the most leverage-sensitive constant** (cache_read volume ~23× cache_write). Workload inverted Feb→May: output-dominated → cache_write-dominated (~40%), driven by a 23% drop in cache_read reuse (not volume, +9%).
+- **Docs**: FINDINGS.md ~5 kWh → ~9 kWh arithmetic fix + audit section; README Opus 4.6→4.8, corrected validated-semantics claims, workload-dependent breakdown; new `docs/energy-constants.md` "2026-05-30 audit update". Noted Opus 4.7+ tokenizer (+0–35% tokens) and Opus 4.8 cache-min 4096→1024.
+- **Files**: statusline.py, energy_constants.py, stepcount.py, pi_scanner.py, README.md, FINDINGS.md, docs/energy-constants.md. All compile; statusline replay/e2e/smoke-tested; advisor + stepcount run clean on live data.
 
 ## Completed This Session (2026-04-18)
 - **Token optimization analysis** — advisor.py + breakdown shows Opus at 89-93% of weekly quota; 9 sessions hit >80% ctx; 257 extended-context sessions (now capped via CLAUDE_CODE_DISABLE_1M_CONTEXT=1, already set on both laptop and Pi).

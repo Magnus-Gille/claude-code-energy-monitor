@@ -128,6 +128,13 @@ def parse_jsonl(path):
     total_cache_write = 0
 
     for usage in by_request.values():
+        # NOTE: JSONL message.usage input_tokens/output_tokens are unreliable
+        # (input_tokens is a streaming placeholder ~1; output_tokens excludes
+        # thinking tokens) — see FINDINGS.md. Only the cache fields are accurate.
+        # The Pi rollup therefore effectively zeroes fresh input and under-counts
+        # output; its energy contribution is cache-dominated, which is acceptable
+        # given fresh input is ~1% of energy in cached workloads. (Pre-v2.1.152
+        # cache_creation could also read as 0 in JSONL.)
         total_input += usage.get("input_tokens", 0)
         total_output += usage.get("output_tokens", 0)
         total_cache_read += usage.get("cache_read_input_tokens", 0)

@@ -30,7 +30,7 @@ PI_ROLLUP_FILE = CACHE_DIR / "pi_daily_rollup.jsonl"
 
 # Energy constants: mWh per 1k tokens (mid estimates).
 # Imported from energy_constants.py — the single source of truth.
-from energy_constants import E_IN, E_OUT, E_CACHE, E_CW
+from energy_constants import E_IN, E_OUT, E_CACHE, E_CW, MODEL_MULTIPLIERS
 
 # OOM scale: one relatable comparison per order of magnitude (Wh)
 OOM_SCALE = [
@@ -63,6 +63,7 @@ def load_days():
             "output": today.get("output", 0),
             "cache_read": today.get("cached", 0),
             "cache_write": today.get("cache_write", 0),
+            "by_model": today.get("by_model"),
             "sessions": len(today.get("sessions", {})),
         }
     # Merge Pi daily rollup (additive per date)
@@ -94,11 +95,31 @@ def load_days():
 
 
 def energy_wh(d):
-    """Midpoint energy estimate in Wh for a day."""
-    return (d.get("input", 0) / 1000 * E_IN
-            + d.get("output", 0) / 1000 * E_OUT
-            + d.get("cache_read", 0) / 1000 * E_CACHE
-            + d.get("cache_write", 0) / 1000 * E_CW) / 1000
+    """Midpoint energy estimate in Wh for a day, model-weighted when a per-model
+    breakdown ('by_model') is present. Any top-level tokens not represented in
+    by_model (e.g. merged Pi rollup data, which has no model split) are counted
+    at the agnostic 1.0x rate as a residual. Legacy days (no by_model) are fully
+    agnostic."""
+    def mwh(inp, out, cr, cw, mult=1.0):
+        return mult * (inp / 1000 * E_IN + out / 1000 * E_OUT
+                       + cr / 1000 * E_CACHE + cw / 1000 * E_CW)
+
+    bm = d.get("by_model")
+    total = 0.0
+    acc_in = acc_out = acc_cr = acc_cw = 0
+    if bm:
+        for tier, t in bm.items():
+            total += mwh(t.get("input", 0), t.get("output", 0),
+                         t.get("cached", 0), t.get("cache_write", 0),
+                         MODEL_MULTIPLIERS.get(tier, 1.0))
+            acc_in += t.get("input", 0); acc_out += t.get("output", 0)
+            acc_cr += t.get("cached", 0); acc_cw += t.get("cache_write", 0)
+    # Residual (e.g. Pi rollup) counted model-agnostically at 1.0x.
+    total += mwh(max(0, d.get("input", 0) - acc_in),
+                 max(0, d.get("output", 0) - acc_out),
+                 max(0, d.get("cache_read", 0) - acc_cr),
+                 max(0, d.get("cache_write", 0) - acc_cw))
+    return total / 1000
 
 
 def total_tokens(d):
