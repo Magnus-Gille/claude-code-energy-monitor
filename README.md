@@ -5,18 +5,21 @@ A statusline script for [Claude Code](https://docs.anthropic.com/en/docs/claude-
 The repo now also includes `codex_status.py` for Codex CLI. Codex does not have Claude Code's custom statusline hook, so the Codex version is a companion command that reads rollout JSONL files from `~/.codex/sessions/` and prints the same style of one-line summary for a prompt, tmux status, or sidecar terminal.
 
 ```
-Opus 4.6 | 5h:29% 7d:52% | D:2.0M ~2kWh | W:45.3M ~20kWh | M:412M ~50kWh
+Opus 4.8 | Ctx:42% | 5h:29% 7d:52% | D:2.0M ~2kWh | W:45.3M ~20kWh | M:412M ~50kWh
 ```
 
 Reading left to right:
 
 | Segment | Meaning |
 |---------|---------|
-| `Opus 4.6` | Active model |
+| `Opus 4.8` | Active model |
+| `Ctx:42%` | Context-window utilization (current session) |
 | `5h:29% 7d:52%` | API quota consumption (5-hour and 7-day rolling windows) |
 | `D:2.0M ~2kWh` | Daily total tokens and energy estimate |
 | `W:45.3M ~20kWh` | Weekly total (rolling 7 days) |
 | `M:412M ~50kWh` | Monthly total (rolling 30 days) |
+
+Energy is **model-weighted** (Haiku ×0.3, Sonnet ×0.6, Opus ×1.0; order-of-magnitude) for today and going forward; older history days are model-agnostic. Quota prefers the statusline payload's `rate_limits` (no API call), falling back to the OAuth usage endpoint when absent.
 
 ## Installation
 
@@ -214,20 +217,21 @@ This section separates what we can measure with high confidence from what we can
 
 The script reads Claude Code's **statusbar JSON payload**, piped to stdin on every status update. This payload contains:
 
-- **Cumulative session totals:** `total_input_tokens`, `total_output_tokens` — these grow monotonically across API calls within a session.
-- **Per-call snapshot:** `current_usage.input_tokens`, `current_usage.output_tokens`, `current_usage.cache_read_input_tokens`, `current_usage.cache_creation_input_tokens` — these reflect the most recent API call.
-- **Per-call deltas** are derived by detecting when `total_input_tokens` increases (signaling a new API call) and computing the difference from the previous total.
+- **Per-call snapshot (`current_usage`):** `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` — these reflect the most recent API call. The monitor accumulates these across calls (detecting call boundaries) to build daily totals.
+- **Current-context totals:** `total_input_tokens` (= `input + cache_creation + cache_read` of the most recent response) and `total_output_tokens` (that response's output). **As of Claude Code v2.1.122 these are current-context snapshots, not cumulative session counters.** Earlier builds of this monitor treated them as cumulative; the accumulation now sums per-call `current_usage` fields and derives fresh (uncached) input as `total_input − cache_read − cache_creation`.
 
 Daily totals are accumulated across sessions via a locked JSON file. This is the most complete token data source available — more complete than JSONL conversation logs (see [Known limitations](#known-limitations) below).
 
 ### Token accounting claims (high confidence, validated)
 
-These claims are supported by a [validation harness](analyze_tokens.py) that logged raw statusbar payloads across 31 API calls in 3 concurrent sessions, plus [direct API billing reconciliation](FINDINGS.md):
+These claims are supported by a [validation harness](analyze_tokens.py) that logged raw statusbar payloads (Feb 2026: 31 calls / 3 sessions; re-validated May 2026 on CC v2.1.157), plus [direct API billing reconciliation](FINDINGS.md):
 
-1. **No double-counting.** `total_input_tokens` counts fresh input only — it excludes cache creation and cache read tokens. The energy formula applies separate constants to each token type without overlap.
-2. **Thinking tokens are included.** `total_output_tokens` includes extended thinking (chain-of-thought) tokens, confirmed by a 1.0x ratio to the API's `usage.output_tokens` field (which [includes thinking](https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#token-usage-and-pricing)) and a ~3x ratio versus JSONL logs (which exclude thinking).
-3. **Cache metrics are accurate.** Per-call `cache_read_input_tokens` and `cache_creation_input_tokens` match API billing to the token across 4 direct API test calls.
-4. **The energy formula is correct as-is.** Fresh input, cached reads, cache creation, and output are counted separately and completely. No changes needed.
+1. **No double-counting.** Energy applies separate constants to four non-overlapping token types: fresh (uncached) input, cache reads, cache creation, and output. Fresh input is derived per call as `total_input − cache_read − cache_creation` (≈ `current_usage.input_tokens`).
+2. **Thinking tokens are included.** `current_usage.output_tokens` includes extended thinking tokens (no separate `thinking_tokens` field exists), confirmed by a ~3x ratio versus JSONL logs (which exclude thinking).
+3. **Cache metrics are accurate.** Per-call `cache_read_input_tokens` and `cache_creation_input_tokens` match API billing to the token across 4 direct API test calls, and are stable within a call (the monitor sums them once per call).
+4. **Most prefill work shows up as cache creation.** In a heavily-cached workload, truly-fresh input is tiny (~1% of energy); the bulk of prefill work is `cache_creation`. This is why `E_CW` is treated as roughly prefill-cost.
+
+> ⚠️ **Schema change (CC v2.1.122):** `total_input_tokens`/`total_output_tokens` became *current-context snapshots* rather than cumulative session counters. Builds of this monitor before the 2026-05 fix mis-counted input (≈53× over) and output (under) as a result. See [docs/energy-constants.md](docs/energy-constants.md#2026-05-30-audit-update) for the corrected accounting and re-validation.
 
 Full evidence in [FINDINGS.md](FINDINGS.md). To collect your own validation data, set `ENERGY_DEBUG=1` as an env var in the statusline command, then run `python3 analyze_tokens.py` after a session.
 
@@ -241,7 +245,7 @@ Energy = (fresh_input × 0.39) + (output × 1.40) + (cache_read × 0.015) + (cac
 
 The display snaps to order-of-magnitude steps (1, 2, 5, 10, 20, 50, ...) because the real uncertainty is at least ±3x in each direction. This is intentionally coarse — it reflects genuine uncertainty, not imprecision in the token counting.
 
-On a real heavy-usage month (Opus 4.6, 119 sessions, ~757M tokens), the mid estimate was **~48 kWh**. Output tokens dominated energy cost (~43% of energy from just 2% of tokens) because autoregressive decode is ~3.6x more expensive per token than parallel prefill.
+**Which token type dominates energy depends heavily on the workload.** For long interactive sessions (e.g. a Feb 2026 Opus month, ~757M tokens, ~48 kWh mid) **output** dominated (~46% of energy from ~3% of tokens, since decode is ~3.6x more expensive per token than parallel prefill). For many short automated/headless sessions (the more recent pattern) **cache creation** dominates (~34–40%), because each session writes a fresh cache that is read few times before expiring. Don't assume one fixed breakdown — the statusline reflects whatever mix you actually run.
 
 ### What the energy estimate does NOT include
 
@@ -254,7 +258,7 @@ On a real heavy-usage month (Opus 4.6, 119 sessions, ~757M tokens), the mid esti
 
 1. **Pricing ≠ energy.** Anthropic's pricing ratios were the original basis for relative energy cost between token types. We've since revised the output and cache read constants using physics-derived cross-checks (FLOP-based estimates, AI Energy Score benchmarks, Google's measured per-query energy). The fresh input and cache write constants still inherit from pricing. Pricing reflects margin, competitive positioning, and demand management — not just energy.
 
-2. **Model-agnostic constants.** The same energy constants are used for Haiku, Sonnet, and Opus. Opus likely uses 2–5x more energy per token due to larger model size. The estimate may undercount for heavy Opus usage and overcount for Haiku.
+2. **Per-model constants are approximate.** A single set of constants (anchored to Opus-class compute) is scaled by rough order-of-magnitude multipliers — Haiku ×0.3, Sonnet ×0.6, Opus ×1.0 — based on the input-price ratio (1:3:5), discounted for sub-linear param→energy scaling. Anthropic discloses no parameter counts, so these are guesses, not measurements. (Earlier versions used the same constant for all three tiers.)
 
 3. **Context-length decode scaling.** The formula uses a fixed per-output-token constant regardless of context length. With very long cached contexts (25M+ tokens observed in practice), decode cost increases due to larger KV-cache attention. The formula underestimates in exactly these long-context sessions.
 
@@ -354,11 +358,11 @@ A typical day of AI-assisted coding likely falls in the 1–5 kWh range (mid est
 | Energy estimates | Yes | Yes | Yes |
 | Daily history | Yes | Yes | Yes |
 | Prompt cache tracking | Yes | Yes | Yes |
-| API quota display | Yes | No* | No* |
+| API quota display | Yes | Yes* | Yes* |
 
-\* The quota feature reads the OAuth token from the macOS Keychain using the `security` command. On Linux and Windows/WSL, the quota segments are silently omitted. Everything else works.
+\* Quota now comes primarily from the statusline payload's `rate_limits` fields (Claude Code v2.1.80+, Pro/Max), which work on every platform with no API call. The legacy fallback reads the OAuth token from the macOS Keychain via the `security` command and is macOS-only; on Linux/Windows it's simply skipped. So if your build provides `rate_limits`, quota shows everywhere; otherwise it's macOS-only.
 
-**Note:** The quota display uses an **undocumented** Anthropic beta API endpoint (`/api/oauth/usage` with `anthropic-beta: oauth-2025-04-20`). This may change or disappear without notice. The token and energy features do not depend on it.
+**Note:** The fallback quota path uses an **undocumented** Anthropic beta API endpoint (`/api/oauth/usage` with `anthropic-beta: oauth-2025-04-20`), which may change or disappear without notice. The token and energy features do not depend on it.
 
 ## Dependencies
 
@@ -377,11 +381,11 @@ None. The script uses only the Python 3 standard library (`json`, `os`, `sys`, `
 
 ## Token counting: validated semantics
 
-We built a [validation harness](analyze_tokens.py) that logs raw statusbar payloads and analyzes token-counting behavior across API calls. Key findings (31 API calls across 3 concurrent sessions):
+We built a [validation harness](analyze_tokens.py) that logs raw statusbar payloads and analyzes token-counting behavior across API calls (Feb 2026: 31 calls / 3 sessions; re-validated May 2026 on CC v2.1.157). Key findings:
 
-- **`total_input_tokens` = fresh input only.** It excludes cache creation and cache read tokens. No double-counting in the energy formula.
-- **`total_output_tokens` includes thinking tokens.** Both the cumulative total and per-call `current_usage.output_tokens` include extended thinking, confirmed by 1.0x ratio between them and ~3x ratio vs JSONL (which excludes thinking).
-- **Energy formula is correct as-is.** Fresh input, cached reads, cache creation, and output are counted separately without overlap.
+- **`total_input_tokens` = `input + cache_creation + cache_read` of the most recent response** (current-context, *not* cumulative, since CC v2.1.122). Fresh (uncached) input is recovered as `total_input − cache_read − cache_creation`.
+- **`total_output_tokens` = the most recent response's output** (per-call, not cumulative since v2.1.122) and includes extended thinking tokens (no separate `thinking_tokens` field; ~3x ratio vs JSONL, which excludes thinking). The monitor accumulates `current_usage.output_tokens` per call.
+- **Cache fields are stable within a call** and summed once per detected call boundary; no double-counting across the four token types.
 
 To collect your own validation data, set `ENERGY_DEBUG=1` as an env var in the statusline command, then run `python3 analyze_tokens.py` after a session.
 
@@ -415,4 +419,4 @@ Full investigation details in [FINDINGS.md](FINDINGS.md).
 
 Magnus Gille — [gille.ai](https://gille.ai)
 
-Built collaboratively with Claude Opus 4.6. Energy estimates, comparisons, and arithmetic independently verified by OpenAI Codex against DOE, ENERGY STAR, IEA, and Swedish Energy Agency sources.
+Built collaboratively with Claude Opus 4.6, with a 2026-05 accuracy audit (token-accounting fix for CC v2.1.122, per-model multipliers, refreshed energy literature) by Claude Opus 4.8. Energy estimates, comparisons, and arithmetic independently verified by OpenAI Codex against DOE, ENERGY STAR, IEA, and Swedish Energy Agency sources.

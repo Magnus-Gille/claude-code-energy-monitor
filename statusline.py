@@ -31,13 +31,15 @@ Primary sources:
 
 What this does NOT capture:
   - Training energy, embodied energy, networking
-  - Reasoning/extended thinking overhead
+  - Distinct energy weighting for reasoning/thinking tokens — they ARE counted
+    (within output tokens), but priced the same as visible output
   - Geographic carbon intensity variation
   - Actual hardware, batch sizes, or optimizations used by Anthropic
 
-NOTE: Quota fetching uses an UNDOCUMENTED Anthropic beta API endpoint
-(/api/oauth/usage with anthropic-beta: oauth-2025-04-20). This is
-subject to breaking changes or removal without notice.
+NOTE: Quota is read from the statusline payload's rate_limits fields
+(Claude Code v2.1.80+; no API call). If those are absent it falls back to
+an UNDOCUMENTED Anthropic beta endpoint (/api/oauth/usage with
+anthropic-beta: oauth-2025-04-20), which may change or disappear without notice.
 """
 
 import fcntl
@@ -68,11 +70,34 @@ _SELF_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:8]
 # Fresh input: Epoch AI long-context anchor (unchanged)
 # Output: reduced from 1950→1400 (cross-checks cluster 600-1800)
 # Cache read: reduced from 39→15 (~26x discount vs input; pricing 10x was too conservative)
-# Cache write: unchanged (prefill + write overhead)
+# Cache write: 490 = prefill compute (~390) + pricing-derived infra surcharge proxy
+#   (1.25x). KV-cache creation has the same FLOPs as a normal prefill, so the +25%
+#   is a pricing/infra carryover, not a measured GPU-energy delta. Treat accordingly.
 E_IN = 390      # fresh input (long-context workload)
 E_OUT = 1400    # output (decode)
 E_CACHE = 15    # cached input (cache read)
-E_CW = 490      # cache creation (write)
+E_CW = 490      # cache creation (write) — prefill + infra surcharge proxy
+
+# Per-model energy multipliers (relative to the Opus-anchored constants above).
+# Order-of-magnitude only — basis is the input-price ratio (Haiku:Sonnet:Opus = 1:3:5)
+# discounted for sub-linear param->energy scaling and larger batches on cheaper tiers.
+# Anthropic discloses no parameter counts; these are guesses. See docs/energy-constants.md.
+MODEL_MULTIPLIERS = {"haiku": 0.3, "sonnet": 0.6, "opus": 1.0}
+
+
+def model_tier(model_id):
+    m = (model_id or "").lower()
+    if "haiku" in m:
+        return "haiku"
+    if "sonnet" in m:
+        return "sonnet"
+    if "opus" in m:
+        return "opus"
+    return "opus"  # unknown -> conservative (most energy-intensive)
+
+
+def model_mult(model_id):
+    return MODEL_MULTIPLIERS.get(model_tier(model_id), 1.0)
 
 
 def load(path):
@@ -168,16 +193,24 @@ def fetch_quota():
         return cache.get("q5"), cache.get("q7")
 
 
-def update_daily(sid, inp, out, cu_cache_read, cu_cache_write,
+def update_daily(sid, total_in, cu_input, cu_output, cu_cache_read, cu_cache_write,
                   model_id="?", project="?", ctx_size=0, ctx_pct=0,
                   cost_usd=0):
-    """Update daily totals with file locking to prevent lost updates.
+    """Accumulate daily token totals from per-call current_usage values.
 
-    cu_cache_read/cu_cache_write: per-API-call values from current_usage.
-    We accumulate these across calls by detecting new API calls (total_input increased
-    OR current_usage cache values changed — the latter catches fully-cached calls).
-    Returns (daily_input, daily_output, daily_cache_read, daily_cache_write,
-             session_cache_read, session_cache_write).
+    As of Claude Code v2.1.122 the statusline's context_window.total_input_tokens
+    and total_output_tokens became CURRENT-CONTEXT snapshots (input+cache_read+
+    cache_creation for the latest response; output of the latest response) rather
+    than cumulative session totals. So we accumulate the per-call current_usage
+    fields, detecting call boundaries and summing each call once:
+      - fresh (uncached) input = total_in - cache_read - cache_creation
+        (equals current_usage.input_tokens, which is otherwise a near-placeholder)
+      - cache_read / cache_creation: stable within a call, added once per new call
+      - output: streams up within a call, so we add the per-fire positive delta
+    A new call is detected when the input-side signature changes (total_in grows,
+    or cache_read/creation change) OR output resets below the previous value (which
+    also catches two consecutive identical fully-cached calls). Returns the daily
+    dict d.
     """
     today = date.today().isoformat()
 
@@ -198,6 +231,7 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write,
                     "output": d.get("output", 0),
                     "cache_read": d.get("cached", 0),
                     "cache_write": d.get("cache_write", 0),
+                    "by_model": d.get("by_model", {}),
                     "sessions": len(d.get("sessions", {})),
                     "v": d.get("v", ""),
                 })
@@ -242,7 +276,9 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write,
             except Exception:
                 pass
             # Carry forward session baselines so resumed sessions
-            # don't attribute their full history to the new day.
+            # don't attribute their full history to the new day. li/lcr/lcw/lout
+            # MUST carry over so the first fire of the new day for a continuing
+            # call is not mis-detected as a fresh call (which would double-count).
             baselines = {}
             for s_id, s_val in d.get("sessions", {}).items():
                 # Prune stale baselines: no metadata and no activity today
@@ -254,6 +290,7 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write,
                     "c": s_val.get("c", 0), "cw": s_val.get("cw", 0),
                     "li": s_val.get("li", 0),
                     "lcr": s_val.get("lcr", 0), "lcw": s_val.get("lcw", 0),
+                    "lout": s_val.get("lout", 0),
                     # Reset daily deltas for new day
                     "di": 0, "do": 0, "dc": 0, "dcw": 0,
                     "m": s_val.get("m", "?"), "p": s_val.get("p", "?"),
@@ -263,64 +300,108 @@ def update_daily(sid, inp, out, cu_cache_read, cu_cache_write,
                 }
             d = {"date": today, "sessions": baselines,
                  "input": 0, "output": 0, "cached": 0, "cache_write": 0,
-                 "v": _SELF_HASH}
+                 "by_model": {}, "v": _SELF_HASH}
 
+        d.setdefault("by_model", {})
         prev = d.get("sessions", {}).get(sid, {})
 
-        # Detect new API call to avoid double-counting cache values
-        # (statusline fires multiple times per call during streaming).
-        # Primary: total_input increased. Fallback: current_usage changed
-        # (catches calls where input is fully cached, so total_input stays flat).
-        prev_li = prev.get("li", 0)
-        prev_cu_cr = prev.get("lcr", 0)
-        prev_cu_cw = prev.get("lcw", 0)
-        new_call = (inp > prev_li
-                    or cu_cache_read != prev_cu_cr
-                    or cu_cache_write != prev_cu_cw)
-        prev_cr = prev.get("c", 0)
-        prev_cw = prev.get("cw", 0)
-        acc_cr = prev_cr + cu_cache_read if new_call else prev_cr
-        acc_cw = prev_cw + cu_cache_write if new_call else prev_cw
+        # Fresh (uncached, non-written) input for this call, derived from the
+        # current-context total. Robust whether or not current_usage.input_tokens
+        # is populated (it is often a near-placeholder of 1-2).
+        cu_fresh = max(0, total_in - cu_cache_read - cu_cache_write)
 
-        di = max(0, inp - prev.get("i", 0))
-        do_ = max(0, out - prev.get("o", 0))
-        d_cr = max(0, acc_cr - prev_cr)
-        d_cw = max(0, acc_cw - prev_cw)
+        prev_li = prev.get("li", 0)
+        prev_cr = prev.get("lcr", 0)
+        prev_cw = prev.get("lcw", 0)
+        prev_out = prev.get("lout", 0)
+
+        new_call = (total_in > prev_li
+                    or cu_cache_read != prev_cr
+                    or cu_cache_write != prev_cw
+                    or cu_output < prev_out)
+
+        if new_call:
+            add_fresh, add_cr, add_cw, add_out = (
+                cu_fresh, cu_cache_read, cu_cache_write, cu_output)
+        else:
+            add_fresh = add_cr = add_cw = 0
+            add_out = max(0, cu_output - prev_out)  # streaming growth within a call
 
         now = time.time()
-        d.setdefault("sessions", {})[sid] = {
-            "i": inp, "o": out, "c": acc_cr, "cw": acc_cw, "li": inp,
-            "lcr": cu_cache_read, "lcw": cu_cache_write,
-            # Daily deltas for this session (accumulated across calls today)
-            "di": prev.get("di", 0) + di,
-            "do": prev.get("do", 0) + do_,
-            "dc": prev.get("dc", 0) + d_cr,
-            "dcw": prev.get("dcw", 0) + d_cw,
-            "m": model_id, "p": project,
-            "cws": ctx_size,
-            "cpk": max(prev.get("cpk", 0), ctx_pct or 0),
-            "$": cost_usd,
-            "n": prev.get("n", 0) + (1 if new_call else 0),
-            "fs": prev.get("fs", now), "ls": now}
-        d["input"] = d.get("input", 0) + di
-        d["output"] = d.get("output", 0) + do_
-        d["cached"] = d.get("cached", 0) + d_cr
-        d["cache_write"] = d.get("cache_write", 0) + d_cw
+        s = d.setdefault("sessions", {}).setdefault(sid, {})
+        s["i"] = s.get("i", 0) + add_fresh   # session-lifetime accumulators
+        s["o"] = s.get("o", 0) + add_out
+        s["c"] = s.get("c", 0) + add_cr
+        s["cw"] = s.get("cw", 0) + add_cw
+        s["di"] = s.get("di", 0) + add_fresh  # daily deltas (reset at midnight)
+        s["do"] = s.get("do", 0) + add_out
+        s["dc"] = s.get("dc", 0) + add_cr
+        s["dcw"] = s.get("dcw", 0) + add_cw
+        s["li"] = total_in
+        s["lcr"] = cu_cache_read
+        s["lcw"] = cu_cache_write
+        s["lout"] = cu_output
+        s["m"] = model_id
+        s["p"] = project
+        s["cws"] = ctx_size
+        s["cpk"] = max(prev.get("cpk", 0), ctx_pct or 0)
+        s["$"] = cost_usd
+        s["n"] = prev.get("n", 0) + (1 if new_call else 0)
+        s["fs"] = prev.get("fs", now)
+        s["ls"] = now
+
+        d["input"] = d.get("input", 0) + add_fresh
+        d["output"] = d.get("output", 0) + add_out
+        d["cached"] = d.get("cached", 0) + add_cr
+        d["cache_write"] = d.get("cache_write", 0) + add_cw
+
+        tier = model_tier(model_id)
+        bm = d["by_model"].setdefault(
+            tier, {"input": 0, "output": 0, "cached": 0, "cache_write": 0})
+        bm["input"] += add_fresh
+        bm["output"] += add_out
+        bm["cached"] += add_cr
+        bm["cache_write"] += add_cw
 
         save(DAILY_FILE, d)
-        return (d["input"], d["output"], d["cached"], d.get("cache_write", 0),
-                acc_cr, acc_cw)
+        return d
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
 
 
 def energy_mid(fresh_in, cached_in, cache_write_in, out):
-    """Compute mid energy estimate in mWh from token counts."""
+    """Compute mid energy estimate in mWh from token counts (model-agnostic)."""
     return (fresh_in / 1000 * E_IN
             + cached_in / 1000 * E_CACHE
             + cache_write_in / 1000 * E_CW
             + out / 1000 * E_OUT)
+
+
+def energy_for_day(day):
+    """Mid energy (mWh) for one day dict, model-weighted when a per-model
+    breakdown ('by_model') is present. Any top-level tokens NOT represented in
+    by_model are priced model-agnostically as a residual — this matters on
+    mixed-format days (e.g. the per-model upgrade transition, where the morning's
+    totals were written without by_model and only later calls are per-model).
+    Legacy days (no by_model) are fully agnostic. Accepts both the live daily
+    dict (cache key 'cached') and archived history rows (key 'cache_read')."""
+    cr_total = day.get("cache_read", day.get("cached", 0))
+    bm = day.get("by_model") or {}
+    total = 0.0
+    acc_in = acc_out = acc_cr = acc_cw = 0
+    for tier, t in bm.items():
+        total += MODEL_MULTIPLIERS.get(tier, 1.0) * energy_mid(
+            t.get("input", 0), t.get("cached", 0),
+            t.get("cache_write", 0), t.get("output", 0))
+        acc_in += t.get("input", 0); acc_out += t.get("output", 0)
+        acc_cr += t.get("cached", 0); acc_cw += t.get("cache_write", 0)
+    # Residual (legacy same-day totals / unmodeled data) priced agnostically.
+    total += energy_mid(max(0, day.get("input", 0) - acc_in),
+                        max(0, cr_total - acc_cr),
+                        max(0, day.get("cache_write", 0) - acc_cw),
+                        max(0, day.get("output", 0) - acc_out))
+    return total
 
 
 def fmt_tok(n):
@@ -373,40 +454,40 @@ def load_history():
     return days
 
 
-def _sum_range(days, start, end):
-    """Sum token fields from history entries in [start, end] date range.
-    Returns (input, output, cache_read, cache_write)."""
-    inp = out = cr = cw = 0
-    for dt_str, entry in days.items():
-        if start <= dt_str <= end:
-            inp += entry.get("input", 0)
-            out += entry.get("output", 0)
-            cr += entry.get("cache_read", 0)
-            cw += entry.get("cache_write", 0)
-    return inp, out, cr, cw
+def weekly_monthly_totals(today_dict):
+    """Compute W/M token totals and (model-weighted) energy estimates.
 
-
-def weekly_monthly_totals(d_in, d_out, d_cr, d_cw):
-    """Compute W/M token totals and energy estimates."""
+    Energy is summed per day via energy_for_day(), so each day applies its own
+    per-model multipliers where available; legacy history days fall back to the
+    model-agnostic estimate. today_dict is the live daily dict from update_daily."""
     today = date.today()
     days = load_history()
+    # Inject today's live data (overrides any stale history entry for today).
+    days[today.isoformat()] = {
+        "date": today.isoformat(),
+        "input": today_dict.get("input", 0),
+        "output": today_dict.get("output", 0),
+        "cache_read": today_dict.get("cached", 0),
+        "cache_write": today_dict.get("cache_write", 0),
+        "by_model": today_dict.get("by_model"),
+    }
 
-    # Week = rolling 7 days (6 prior days from history + today's live data)
-    w_start = (today - timedelta(days=6)).isoformat()
-    yesterday = (today - timedelta(days=1)).isoformat()
-    w_inp, w_out, w_cr, w_cw = _sum_range(days, w_start, yesterday)
-    w_inp += d_in; w_out += d_out; w_cr += d_cr; w_cw += d_cw
+    end = today.isoformat()
 
-    # Month = rolling 30 days (29 prior days from history + today's live data)
-    m_start = (today - timedelta(days=29)).isoformat()
-    m_inp, m_out, m_cr, m_cw = _sum_range(days, m_start, yesterday)
-    m_inp += d_in; m_out += d_out; m_cr += d_cr; m_cw += d_cw
+    def window(start):
+        tok = 0
+        energy = 0.0
+        for ds, day in days.items():
+            if start <= ds <= end:
+                tok += (day.get("input", 0) + day.get("output", 0)
+                        + day.get("cache_read", 0) + day.get("cache_write", 0))
+                energy += energy_for_day(day)
+        return tok, energy
 
-    w_mid = energy_mid(w_inp, w_cr, w_cw, w_out)
-    m_mid = energy_mid(m_inp, m_cr, m_cw, m_out)
-
-    w_str = f"W:{fmt_tok(w_inp + w_out + w_cr + w_cw)} {fmt_nrg(w_mid)}"
-    m_str = f"M:{fmt_tok(m_inp + m_out + m_cr + m_cw)} {fmt_nrg(m_mid)}"
+    w_tok, w_e = window((today - timedelta(days=6)).isoformat())
+    m_tok, m_e = window((today - timedelta(days=29)).isoformat())
+    w_str = f"W:{fmt_tok(w_tok)} {fmt_nrg(w_e)}"
+    m_str = f"M:{fmt_tok(m_tok)} {fmt_nrg(m_e)}"
     return w_str, m_str
 
 
@@ -435,24 +516,36 @@ def main():
         data.get("workspace", {}).get("project_dir", "?"))
     cost_usd = data.get("cost", {}).get("total_cost_usd", 0)
 
-    s_in = ctx.get("total_input_tokens", 0)
-    s_out = ctx.get("total_output_tokens", 0)
-
-    # Cache data lives in current_usage (per-API-call), not at top level.
-    # We accumulate it across calls in update_daily.
+    # As of Claude Code v2.1.122, context_window.total_input_tokens is the
+    # CURRENT-CONTEXT total (input + cache_read + cache_creation of the most
+    # recent response), and total_output_tokens is that response's output —
+    # neither is a cumulative session counter anymore. We accumulate the
+    # per-call current_usage fields instead (see update_daily).
+    total_in = ctx.get("total_input_tokens", 0)
     current_usage = ctx.get("current_usage") or {}
+    cu_input = current_usage.get("input_tokens", 0)
+    cu_output = current_usage.get("output_tokens", 0)
     cu_cache_read = current_usage.get("cache_read_input_tokens", 0)
     cu_cache_write = current_usage.get("cache_creation_input_tokens", 0)
 
-    d_in, d_out, d_cr, d_cw, s_cr, s_cw = update_daily(
-        sid, s_in, s_out, cu_cache_read, cu_cache_write,
+    d = update_daily(
+        sid, total_in, cu_input, cu_output, cu_cache_read, cu_cache_write,
         model_id=model_id, project=project, ctx_size=ctx_size,
         ctx_pct=ctx_pct or 0, cost_usd=cost_usd)
-    # total_input_tokens EXCLUDES cached tokens in Claude Code's API.
-    # fresh = total_input (already fresh-only), cached is additive.
-    d_mid = energy_mid(d_in, d_cr, d_cw, d_out)
+    d_tok = (d.get("input", 0) + d.get("output", 0)
+             + d.get("cached", 0) + d.get("cache_write", 0))
+    d_mid = energy_for_day(d)  # model-weighted via d["by_model"]
 
-    q5, q7 = fetch_quota()
+    # Quota: prefer the statusline payload's rate_limits (v2.1.80+, no API call).
+    # Fall back to the undocumented OAuth usage endpoint if absent.
+    rl = data.get("rate_limits") or {}
+    q5 = (rl.get("five_hour") or {}).get("used_percentage")
+    q7 = (rl.get("seven_day") or {}).get("used_percentage")
+    if q5 is not None or q7 is not None:
+        # Keep statusline_quota_cache.json fresh — advisor.py reads only that file.
+        save(QUOTA_CACHE, {"q5": q5, "q7": q7, "ts": time.time()})
+    else:
+        q5, q7 = fetch_quota()
 
     parts = [model]
     if ctx_pct is not None:
@@ -462,9 +555,9 @@ def main():
         if q7 is not None:
             q_str += f" 7d:{q7:.0f}%"
         parts.append(q_str)
-    parts.append(f"D:{fmt_tok(d_in + d_cr + d_cw + d_out)} {fmt_nrg(d_mid)}")
+    parts.append(f"D:{fmt_tok(d_tok)} {fmt_nrg(d_mid)}")
 
-    w_str, m_str = weekly_monthly_totals(d_in, d_out, d_cr, d_cw)
+    w_str, m_str = weekly_monthly_totals(d)
     parts.append(w_str)
     parts.append(m_str)
 

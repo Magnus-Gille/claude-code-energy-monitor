@@ -89,16 +89,18 @@ This isn't a bug in ccusage — it correctly sums what's in the JSONL. The JSONL
 
 A full workday of Claude Code on Opus 4.6 produced:
 - **Statusbar totals:** 7.1M input + 3.0M output + 76.5M cached + 1.9M cache write
-- **Energy estimate (mid, revised constants):** ~5 kWh
-- **Everyday comparison:** roughly equivalent to running a fridge for 2–3 days
+- **Energy estimate (mid, revised constants):** ~9 kWh (snaps to ~10 kWh in the order-of-magnitude display)
+- **Everyday comparison:** roughly equivalent to running a fridge for ~4–5 days
 
-This is not extreme or unusual usage — it's a developer using Claude Code as their primary tool for a workday, across ~12 working sessions. With the revised constants (Feb 2026, see below), the energy cost is driven by:
-- Output token generation (~48% of energy, dominated by thinking tokens)
+This is not extreme or unusual usage — it's a developer using Claude Code as their primary tool for a workday, across ~12 working sessions. With the revised constants (Feb 2026, see below), the energy cost on this *interactive* day was driven by:
+- Output token generation (~46% of energy, dominated by thinking tokens)
 - Fresh input processing (~31% of energy)
 - Cache reads (~13% of energy, reduced from 27% after physics-derived cache discount)
-- Cache write (~8% of energy)
+- Cache write (~10% of energy)
 
-Note: The original constants (Couch 2026, pricing-derived) estimated ~10 kWh center for this day. The revised constants reduce this to ~5 kWh, primarily due to the cache read discount changing from 10x to 26x and output from 1,950 to 1,400 mWh/1k tokens.
+Note: The original constants (Couch 2026, pricing-derived) estimated ~13 kWh center for this day. The revised constants reduce this to ~9 kWh, primarily due to the cache read discount changing from 10x to 26x and output from 1,950 to 1,400 mWh/1k tokens.
+
+> **2026-05 caveat:** the 7.1M "input" figure above was collected with the pre-v2.1.122 statusline semantics. A later audit found that fresh-input counting became inflated after CC v2.1.122 and that, in heavily-cached workloads, truly-fresh input is small (most prefill work is cache creation). See the audit update at the end of this file. The output-dominated breakdown above is also specific to long *interactive* sessions; headless/automated workloads are cache-write-dominated.
 
 ## Adversarial review (debate with Codex)
 
@@ -265,3 +267,37 @@ All raw data from this investigation is available in:
 - `~/.claude/statusline_daily.json` (today's statusbar-based totals)
 - Claude Code's JSONL logs at `~/.claude/projects/`
 - `debate/` directory (adversarial review transcript, gitignored)
+
+## Audit update — 2026-05-30 (CC v2.1.157, Opus 4.8)
+
+A re-validation found that the Feb 2026 token-semantics conclusions had gone stale, because **Claude Code v2.1.122 redefined two statusbar fields**.
+
+### What changed in the payload
+
+Captured raw payloads (ENERGY_DEBUG=1 on v2.1.157) show:
+
+```
+total_input_tokens : 223213
+current_usage: { input_tokens: 2, cache_creation_input_tokens: 3730, cache_read_input_tokens: 219481 }
+                  →  2 + 3730 + 219481 = 223213   (exact)
+```
+
+- `total_input_tokens` is now `current_usage.input_tokens + cache_creation + cache_read` of the **most recent response** — the current-context total, **not** the cumulative fresh-input counter validated in Feb 2026.
+- `total_output_tokens` equals `current_usage.output_tokens` for the most recent response (per-call; resets each call), **not** a cumulative session total.
+- `current_usage.input_tokens` is a near-placeholder (1–2); genuine fresh input is `total_input − cache_read − cache_creation`.
+- New top-level fields are present: `rate_limits.{five_hour,seven_day}.used_percentage`, `effort`, `thinking`, `fast_mode`.
+
+### Impact on the monitor (now fixed)
+
+The old `update_daily` accumulated `max(0, total_input − prev)` and `max(0, total_output − prev)`, which assumed monotonic cumulative counters. Replaying 392 captured fires against independently-computed ground truth:
+
+| Token type | OLD logic | TRUTH | Error |
+|---|---|---|---|
+| fresh input | 721,457 | 13,519 | **~53× over-count** (was tracking context growth) |
+| output | 105,966 | 111,293 | under-count |
+| cache_read | 16,942,573 | 16,942,573 | exact (unaffected) |
+| cache_write | 171,595 | 171,595 | exact (unaffected) |
+
+The fix accumulates per-call `current_usage` fields, detecting call boundaries (input-side signature change **or** output reset — the latter also fixes a pre-existing miss on consecutive identical fully-cached calls) and summing each call once. The corrected logic was replay-validated to match ground truth exactly on all four token types. Net effect: the fresh-input energy share falls from a spurious ~12–15% to ~1% (real prefill work is correctly attributed to cache creation); output is no longer under-counted; cache terms are unchanged.
+
+Full constant-level discussion, new 2026 energy literature, and per-model multipliers are in [docs/energy-constants.md](docs/energy-constants.md#2026-05-30-audit-update).
