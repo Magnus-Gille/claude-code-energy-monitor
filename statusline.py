@@ -31,13 +31,15 @@ Primary sources:
 
 What this does NOT capture:
   - Training energy, embodied energy, networking
-  - Reasoning/extended thinking overhead
+  - Distinct energy weighting for reasoning/thinking tokens — they ARE counted
+    (within output tokens), but priced the same as visible output
   - Geographic carbon intensity variation
   - Actual hardware, batch sizes, or optimizations used by Anthropic
 
-NOTE: Quota fetching uses an UNDOCUMENTED Anthropic beta API endpoint
-(/api/oauth/usage with anthropic-beta: oauth-2025-04-20). This is
-subject to breaking changes or removal without notice.
+NOTE: Quota is read from the statusline payload's rate_limits fields
+(Claude Code v2.1.80+; no API call). If those are absent it falls back to
+an UNDOCUMENTED Anthropic beta endpoint (/api/oauth/usage with
+anthropic-beta: oauth-2025-04-20), which may change or disappear without notice.
 """
 
 import fcntl
@@ -378,20 +380,28 @@ def energy_mid(fresh_in, cached_in, cache_write_in, out):
 
 def energy_for_day(day):
     """Mid energy (mWh) for one day dict, model-weighted when a per-model
-    breakdown ('by_model') is present. Legacy days (collected before per-model
-    tracking) fall back to the model-agnostic estimate. Accepts both the live
-    daily dict (cache key 'cached') and archived history rows (key 'cache_read')."""
-    bm = day.get("by_model")
-    if bm:
-        total = 0.0
-        for tier, t in bm.items():
-            total += MODEL_MULTIPLIERS.get(tier, 1.0) * energy_mid(
-                t.get("input", 0), t.get("cached", 0),
-                t.get("cache_write", 0), t.get("output", 0))
-        return total
-    cr = day.get("cache_read", day.get("cached", 0))
-    return energy_mid(day.get("input", 0), cr,
-                      day.get("cache_write", 0), day.get("output", 0))
+    breakdown ('by_model') is present. Any top-level tokens NOT represented in
+    by_model are priced model-agnostically as a residual — this matters on
+    mixed-format days (e.g. the per-model upgrade transition, where the morning's
+    totals were written without by_model and only later calls are per-model).
+    Legacy days (no by_model) are fully agnostic. Accepts both the live daily
+    dict (cache key 'cached') and archived history rows (key 'cache_read')."""
+    cr_total = day.get("cache_read", day.get("cached", 0))
+    bm = day.get("by_model") or {}
+    total = 0.0
+    acc_in = acc_out = acc_cr = acc_cw = 0
+    for tier, t in bm.items():
+        total += MODEL_MULTIPLIERS.get(tier, 1.0) * energy_mid(
+            t.get("input", 0), t.get("cached", 0),
+            t.get("cache_write", 0), t.get("output", 0))
+        acc_in += t.get("input", 0); acc_out += t.get("output", 0)
+        acc_cr += t.get("cached", 0); acc_cw += t.get("cache_write", 0)
+    # Residual (legacy same-day totals / unmodeled data) priced agnostically.
+    total += energy_mid(max(0, day.get("input", 0) - acc_in),
+                        max(0, cr_total - acc_cr),
+                        max(0, day.get("cache_write", 0) - acc_cw),
+                        max(0, day.get("output", 0) - acc_out))
+    return total
 
 
 def fmt_tok(n):
@@ -531,7 +541,10 @@ def main():
     rl = data.get("rate_limits") or {}
     q5 = (rl.get("five_hour") or {}).get("used_percentage")
     q7 = (rl.get("seven_day") or {}).get("used_percentage")
-    if q5 is None and q7 is None:
+    if q5 is not None or q7 is not None:
+        # Keep statusline_quota_cache.json fresh — advisor.py reads only that file.
+        save(QUOTA_CACHE, {"q5": q5, "q7": q7, "ts": time.time()})
+    else:
         q5, q7 = fetch_quota()
 
     parts = [model]

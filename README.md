@@ -19,7 +19,7 @@ Reading left to right:
 | `W:45.3M ~20kWh` | Weekly total (rolling 7 days) |
 | `M:412M ~50kWh` | Monthly total (rolling 30 days) |
 
-Energy is **model-weighted** (Haiku ×0.3, Sonnet ×0.6, Opus ×1.0; order-of-magnitude) for today and going forward; older history days are model-agnostic. Quota is read from the statusline payload's `rate_limits` (no API call).
+Energy is **model-weighted** (Haiku ×0.3, Sonnet ×0.6, Opus ×1.0; order-of-magnitude) for today and going forward; older history days are model-agnostic. Quota prefers the statusline payload's `rate_limits` (no API call), falling back to the OAuth usage endpoint when absent.
 
 ## Installation
 
@@ -358,11 +358,11 @@ A typical day of AI-assisted coding likely falls in the 1–5 kWh range (mid est
 | Energy estimates | Yes | Yes | Yes |
 | Daily history | Yes | Yes | Yes |
 | Prompt cache tracking | Yes | Yes | Yes |
-| API quota display | Yes | No* | No* |
+| API quota display | Yes | Yes* | Yes* |
 
-\* The quota feature reads the OAuth token from the macOS Keychain using the `security` command. On Linux and Windows/WSL, the quota segments are silently omitted. Everything else works.
+\* Quota now comes primarily from the statusline payload's `rate_limits` fields (Claude Code v2.1.80+, Pro/Max), which work on every platform with no API call. The legacy fallback reads the OAuth token from the macOS Keychain via the `security` command and is macOS-only; on Linux/Windows it's simply skipped. So if your build provides `rate_limits`, quota shows everywhere; otherwise it's macOS-only.
 
-**Note:** The quota display uses an **undocumented** Anthropic beta API endpoint (`/api/oauth/usage` with `anthropic-beta: oauth-2025-04-20`). This may change or disappear without notice. The token and energy features do not depend on it.
+**Note:** The fallback quota path uses an **undocumented** Anthropic beta API endpoint (`/api/oauth/usage` with `anthropic-beta: oauth-2025-04-20`), which may change or disappear without notice. The token and energy features do not depend on it.
 
 ## Dependencies
 
