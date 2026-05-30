@@ -3,8 +3,8 @@
 **Last session:** 2026-05-30
 **Branch:** master
 
-## Completed This Session (2026-05-30) — accuracy audit + fixes
-Deep-dive audit (Claude Opus 4.8, CC v2.1.157): multi-agent research workflow (49 agents, adversarial verification) + `ENERGY_DEBUG` re-validation. **Changes staged, NOT yet committed** (7 files).
+## Completed This Session (2026-05-30) — accuracy audit + fixes → **v1.0.0**
+Deep-dive audit (Claude Opus 4.8, CC v2.1.157): multi-agent research workflow (49 agents, adversarial verification) + `ENERGY_DEBUG` re-validation. **Merged to master via PR #3 (squash `6aa2619`), Codex-reviewed, and cut as the repo's first tagged release `v1.0.0`.**
 
 - **Token accounting fix (critical).** CC **v2.1.122** redefined `context_window.total_input_tokens`/`total_output_tokens` from cumulative session counters to **current-context snapshots** (`total_input = input+cache_creation+cache_read` of latest response; `total_output` = that response's output, resets per call). The old `update_daily` delta logic was over-counting fresh input **~53×** (tracking context growth) and under-counting output; cache terms unaffected. **Rewrote `update_daily`** to accumulate per-call `current_usage`, detecting call boundaries (input-side change OR output reset — also fixes the consecutive-identical-fully-cached-call miss). Fresh input = `total_input − cache_read − cache_creation`. **Replay-validated against ground truth on 392 captured fires: exact match on all 4 token types.** Fresh-input energy share drops from spurious ~12–15% → ~1%.
 - **Per-model multipliers** (decision): Haiku ×0.3 / Sonnet ×0.6 / Opus ×1.0 (price-proxy 1:3:5, discounted for sub-linear scaling; order-of-magnitude). statusline weights today + future via `d['by_model']`; legacy history days fall back to 1.0×. stepcount mirrors with a Pi residual term. Fleet mix: Opus 56% / Sonnet 43% / Haiku 1%.
