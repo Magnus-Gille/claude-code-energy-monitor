@@ -1,7 +1,24 @@
 # Project Status
 
-**Last session:** 2026-05-30
+**Last session:** 2026-06-17
 **Branch:** master
+
+## Completed This Session (2026-06-17) — API-cost reconciliation + filed issue #4
+
+Analysis session (no code changes). Question: "what would the last 30 days have cost via API instead of the Max sub?"
+
+- **Settled answer: ~$3,650 / 30 days** (band $3.5–4k) — ~18× effective discount vs the ~$200 Max sub, *not* the 80–250× a naive transcript estimate implied. Cost is ~96% cache reads (billed 0.1×); split ~$2.0k over the light pre-ramp 22 days + ~$1.7k over the heavy last 8 days (post Max ×20 upgrade).
+- **Reconciled two wildly different estimates** (rollup-based ~$3.1k/30d vs another agent's transcript-based ~$11k/9d → implied $20–38k/30d) via a multi-agent workflow + adversarial verify. Found **two opposite-direction measurement defects**:
+  - **(A) Rollup undercounts ~15%.** `update_daily()` is fed only main-session per-render snapshots → subagent/workflow (Task/Workflow) calls contribute **zero**, and calls between renders are dropped (`captures_subagent: no`, `captures_workflow: no`).
+  - **(B) Naive transcript summation overcounts 2.21×.** CC writes one JSONL record per content block (thinking/text/each tool_use), all sharing one `requestId` + identical `message.usage`. 40,973 blocks → 19,257 real calls (53% dupes). Raw cache_read 5.12B → 2.32B deduped. **Must dedup by `requestId`.**
+- **Filed [issue #4](https://github.com/Magnus-Gille/claude-code-energy-monitor/issues/4)** capturing both fixes (rollup subagent-capture path via `sum_jsonl.py` reconciliation + document the requestId-dedup requirement in FINDINGS.md). Added to Grimnir Roadmap board.
+- Both defects were latent: (A) was flagged 2026-03-31 (Munin `enhancements-cache-analysis`) and never built; (B) is a third JSONL pitfall not yet in FINDINGS.md (which documents the opposite-direction input/output undercount).
+
+## Completed This Session (2026-05-31) — fix context percentage display
+
+- **Removed `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`** from `~/.claude/settings.json`. The flag was set in Apr 2026 to cap context to 200k for cost control. In CC v2.1.158 it no longer caps real usage (debug log showed `total_input_tokens` routinely reaching 400–600k, peak 598k) but still forces `context_window_size: 200000` in the statusline payload. Result: `used_percentage` was computed against a denominator 3–5× too small, pinning to 100% whenever actual usage exceeded 200k.
+- **No statusline.py changes needed** — `Ctx:%` is read verbatim from the payload. After removing the flag and restarting CC, Claude Code should report a 1M window and the percentage will be accurate.
+- **Follow-up (low priority):** could harden `statusline.py` to recompute `ctx_pct = total_input_tokens / context_window_size` directly so a future label/reality mismatch can't silently mislead.
 
 ## Completed This Session (2026-05-30) — accuracy audit + fixes → **v1.0.0**
 Deep-dive audit (Claude Opus 4.8, CC v2.1.157): multi-agent research workflow (49 agents, adversarial verification) + `ENERGY_DEBUG` re-validation. **Merged to master via PR #3 (squash `6aa2619`), Codex-reviewed, and cut as the repo's first tagged release `v1.0.0`.**
