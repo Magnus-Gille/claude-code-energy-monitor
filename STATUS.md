@@ -1,7 +1,17 @@
 # Project Status
 
-**Last session:** 2026-06-17
+**Last session:** 2026-06-24
 **Branch:** master
+
+## Completed This Session (2026-06-24) — external calculator comparison (aifootprintcalculator.org)
+
+Analysis session (no code changes). Helped fill in an external SV energy calculator with this user's real CC usage, then reverse-engineered its method from its JS bundle and compared to ours.
+
+- **Real 30-day usage (rollup, 2026-05-26..06-24):** output 31.7M, fresh input 8.0M, cache_read 5.77B, cache_write 140M tokens; ~3,400 prompts (estimated — only 8 days of raw transcripts survive nightly cleanup, JSONL `input_tokens` are placeholders so rollup is the better monthly source). Our model on this usage: **~2,000–2,500 kWh/yr** (Opus-anchored mult=1.0 → 2,467; fleet-mix ~0.82 → 2,023). Cache = ~77% of our estimate (read 43% + write 34%).
+- **aifootprintcalculator.org says 30,307 kWh/yr — ~12–15× our full estimate, ~50× on a per-token basis.** Internally consistent (0.02 kWh/charge × 30,307 ≈ 1.515M phone charges shown).
+- **Their method (extracted from `assets/index-*.js`):** top-down per-request. `gpuKwh = avgWhPerStandardRequest × prompts × Sr(out,22/7) × Sr(in,292/173)/1000`, `total = gpuKwh × 2.44` (PUE/overhead), `co2 = total × regionFactor` (Sweden 10.83, Anthropic-blended 509 gCO2e/kWh). `Sr(x,k)=1+(x−300)/600×(k−1)`, standard request = 300/300 tok. Per-model anchors from published data (Claude Opus ≈ 4.05 Wh/std-req, Sonnet ≈ 0.85). No cache term. Training amortization optional, off by default. Output:input weight 3.1× (ours 3.6×).
+- **Root cause of the gap:** (1) **multiplicative input×output coupling** (`n·r`) — at ~9.4k out/2.4k in per prompt the input factor 3.35× re-multiplies the whole request → 112× a standard request; no physical basis, explodes on long-context agentic prompts; (2) global **×2.44 overhead** we omit; (3) higher base anchor (~7× our GPU/300-tok figure). Their model is implicitly calibrated for short chat turns.
+- **Actionable finding for us:** the **×2.44 PUE/overhead** is a legitimate critique of our GPU-only model — we likely understate *delivered* energy (lit. PUE ~1.4–2.0; +non-GPU ~2.4). Their per-named-model published anchors are also better-sourced than our 3-tier multiplier guesses. Their lack of any cache term conversely **confirms our core thesis** (cache-aware accounting is the agentic-tool differentiator). Offered but NOT yet done: (a) `docs/` comparison note + FINDINGS.md entry, (b) prototype optional PUE factor.
 
 ## Completed This Session (2026-06-17) — API-cost reconciliation + filed issue #4
 
