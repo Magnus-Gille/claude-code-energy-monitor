@@ -36,6 +36,8 @@ _SELF_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:8]
 KNOWN_ENTRY_TYPES = {
     "user", "assistant", "progress", "system", "last-prompt",
     "file-history-snapshot", "queue-operation",
+    "mode", "permission-mode", "attachment", "ai-title",
+    "custom-title", "agent-name", "agent-color",
 }
 
 
