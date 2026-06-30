@@ -1,7 +1,18 @@
 # Project Status
 
-**Last session:** 2026-06-24
+**Last session:** 2026-06-30
 **Branch:** master
+
+## Completed This Session (2026-06-30) — m5 onboarding, generalized multi-machine sync
+
+Set up the monitor on the m5 home-inference box (3rd machine, alongside laptop + Pi) and generalized the sync mechanism so it scales to N machines instead of being Pi-specific.
+
+- **`pi_sync.sh` generalized** — now loops over a `tag:host` list (`pi:huginmunin.local`, `m5:m5`) instead of pulling a single hardcoded host. Each remote's synced files land at `<tag>_journal.jsonl`/`<tag>_daily_rollup.jsonl` in `~/.claude/` on the laptop, so multiple machines no longer collide on the same filename (the old script always wrote `pi_journal.jsonl` regardless of source — fine for one remote, broken for two). Pi's filenames are unchanged (`tag=pi`), so no migration was needed.
+- **`advisor.py`/`stepcount.py` generalized** — `load_pi_journal`/`_merge_pi_rollup` renamed to `load_remote_journals`/`_merge_remote_rollups` and now discover remote files by glob (`*_journal.jsonl`, `*_daily_rollup.jsonl`) instead of one hardcoded Pi path. Adding a 4th machine later needs zero code changes — just adding it to `REMOTE_HOSTS` in `pi_sync.sh`. `advisor.py --no-pi` kept as a CLI alias for the renamed `--no-remote`.
+- **`pi_scanner.py`**: added m5's newer JSONL entry types (`mode`, `permission-mode`, `attachment`, `ai-title`, `custom-title`, `agent-name`, `agent-color`) to `KNOWN_ENTRY_TYPES` — these aren't usage-bearing but weren't recognized, so the first scan on m5 logged a warning per entry; would have spammed syslog every 15 min via cron.
+- **m5 deployed**: repo already cloned at `~/repos/claude-code-energy-monitor` (same commit as laptop). Symlinked `~/.claude/statusline.py` → repo copy (same pattern as laptop), added `statusLine` to `~/.claude/settings.json`, added `*/15 * * * * python3 .../pi_scanner.py | logger -t pi-energy-scanner` cron (same pattern as Pi). Backfilled 4 existing sessions from m5's `~/.claude/projects/`.
+- **Architecture is hub-and-spoke, not full mesh**: laptop pulls from both Pi and m5 via cron (`*/30 * * * * pi_sync.sh`) and merges all three sources when running `advisor.py`/`stepcount.py` locally. Pi and m5 do **not** pull from each other or from the laptop — they only run the local headless scanner. If Magnus wants the combined view from the Pi or m5 directly (not just the laptop), that would need `pi_sync.sh` (or a flipped variant) deployed there too — not done, since the laptop is the practical place this gets checked.
+- **End-to-end verified**: `pi_sync.sh` run on laptop after m5 deploy shows `m5_journal.jsonl`/`m5_daily_rollup.jsonl` synced alongside the existing `pi_*` files; `stepcount.py -d` session count rose from 616→620 (the 4 backfilled m5 sessions); `advisor.load_remote_journals()` shows `machines seen: {huginmunin, m5}`.
 
 ## Completed This Session (2026-06-24) — external calculator comparison (aifootprintcalculator.org)
 
@@ -89,12 +100,13 @@ Deep-dive audit (Claude Opus 4.8, CC v2.1.157): multi-agent research workflow (4
 ## In Progress
 - **Per-model/project data collection** — symlink deployed, awaiting first full day of data to verify breakdown works. Backup at `~/.claude/statusline.py.bak` (remove once confirmed).
 
-## Deployment: Pi Energy Scanner
-- **Pi cron:** `*/15 * * * * python3 /home/magnus/repos/claude-code-energy-monitor/pi_scanner.py` (logs to syslog via `logger -t pi-energy-scanner`)
-- **Laptop cron:** `*/30 * * * * /Users/magnus/repos/claude-code-energy-monitor/pi_sync.sh` (logs via `logger -t pi-energy-sync`)
-- **Pi data files:** `~/.claude/pi_journal.jsonl` (append-only, 51 entries), `~/.claude/pi_daily_rollup.jsonl` (derived daily totals)
-- **Laptop copies:** same filenames in `~/.claude/`, synced via rsync
-- **To update scanner:** `scp pi_scanner.py huginmunin.local:~/repos/claude-code-energy-monitor/pi_scanner.py`
+## Deployment: headless energy scanner (Pi + m5)
+- **Each remote machine (Pi, m5) runs `pi_scanner.py` locally via cron:** `*/15 * * * * python3 ~/repos/claude-code-energy-monitor/pi_scanner.py 2>&1 | logger -t pi-energy-scanner`. Writes `~/.claude/pi_journal.jsonl` (append-only) + `~/.claude/pi_daily_rollup.jsonl` (derived daily totals) — local to that machine, same filenames on every remote (it's a local journal, not the synced copy).
+- **Laptop pulls from all remotes via cron:** `*/30 * * * * /Users/magnus/repos/claude-code-energy-monitor/pi_sync.sh` (logs via `logger -t pi-energy-sync`). `pi_sync.sh` loops over `REMOTE_HOSTS` (`pi:huginmunin.local`, `m5:m5`) and rsyncs each remote's journal/rollup to a per-machine destination: `~/.claude/pi_journal.jsonl`/`pi_daily_rollup.jsonl` (from Pi) and `~/.claude/m5_journal.jsonl`/`m5_daily_rollup.jsonl` (from m5).
+- **`advisor.py`/`stepcount.py` merge all synced files automatically** by globbing `*_journal.jsonl`/`*_daily_rollup.jsonl` in `~/.claude/` — adding a 4th machine only requires adding it to `REMOTE_HOSTS` in `pi_sync.sh`, no Python changes.
+- **Hub-and-spoke, not full mesh:** only the laptop merges all 3 sources. Pi and m5 each see only their own local headless data if you ran advisor.py/stepcount.py there directly.
+- **m5 interactive statusline:** `~/.claude/statusline.py` symlinked to the repo copy + `statusLine` registered in `~/.claude/settings.json` (same pattern as the laptop) — interactive Claude Code sessions on m5 now track today/week/month totals locally too, independent of the headless scanner.
+- **To update the scanner on a remote:** `ssh <host> 'cd ~/repos/claude-code-energy-monitor && git pull --ff-only'` (both Pi and m5 have the repo cloned from origin) or `scp pi_scanner.py <host>:~/repos/claude-code-energy-monitor/pi_scanner.py`.
 
 ## Next Steps
 - **Sonnet-first pilot** — baseline week in progress (Mar 27 - Apr 2). Set up scheduled trigger for daily monitoring + Telegram alerts.
