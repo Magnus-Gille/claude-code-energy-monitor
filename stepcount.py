@@ -26,7 +26,6 @@ from pathlib import Path
 CACHE_DIR = Path.home() / ".claude"
 DAILY_FILE = CACHE_DIR / "statusline_daily.json"
 HISTORY_FILE = CACHE_DIR / "statusline_history.jsonl"
-PI_ROLLUP_FILE = CACHE_DIR / "pi_daily_rollup.jsonl"
 
 # Energy constants: mWh per 1k tokens (mid estimates).
 # Imported from energy_constants.py — the single source of truth.
@@ -48,7 +47,8 @@ DAYS_SHORT = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
 
 
 def load_days():
-    """Load all days as {iso_date_str: day_dict}, including Pi data."""
+    """Load all days as {iso_date_str: day_dict}, including synced remote
+    (Pi/m5/headless) data."""
     days = {}
     if HISTORY_FILE.exists():
         for line in HISTORY_FILE.read_text().splitlines():
@@ -66,9 +66,11 @@ def load_days():
             "by_model": today.get("by_model"),
             "sessions": len(today.get("sessions", {})),
         }
-    # Merge Pi daily rollup (additive per date)
-    if PI_ROLLUP_FILE.exists():
-        for line in PI_ROLLUP_FILE.read_text().splitlines():
+    # Merge each synced remote daily rollup (additive per date). One rollup
+    # file per remote machine (pi_daily_rollup.jsonl, m5_daily_rollup.jsonl,
+    # ...) — discovered by suffix so new machines need no code change here.
+    for rollup_file in sorted(CACHE_DIR.glob("*_daily_rollup.jsonl")):
+        for line in rollup_file.read_text().splitlines():
             if not line.strip():
                 continue
             try:
@@ -97,9 +99,9 @@ def load_days():
 def energy_wh(d):
     """Midpoint energy estimate in Wh for a day, model-weighted when a per-model
     breakdown ('by_model') is present. Any top-level tokens not represented in
-    by_model (e.g. merged Pi rollup data, which has no model split) are counted
-    at the agnostic 1.0x rate as a residual. Legacy days (no by_model) are fully
-    agnostic."""
+    by_model (e.g. merged remote/headless rollup data, which has no model split)
+    are counted at the agnostic 1.0x rate as a residual. Legacy days (no
+    by_model) are fully agnostic."""
     def mwh(inp, out, cr, cw, mult=1.0):
         return mult * (inp / 1000 * E_IN + out / 1000 * E_OUT
                        + cr / 1000 * E_CACHE + cw / 1000 * E_CW)

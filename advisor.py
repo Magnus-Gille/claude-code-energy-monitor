@@ -23,16 +23,26 @@ DAILY_FILE = CACHE_DIR / "statusline_daily.json"
 HISTORY_FILE = CACHE_DIR / "statusline_history.jsonl"
 SESSION_HISTORY_FILE = CACHE_DIR / "statusline_session_history.jsonl"
 QUOTA_CACHE = CACHE_DIR / "statusline_quota_cache.json"
-PI_JOURNAL_FILE = CACHE_DIR / "pi_journal.jsonl"
-PI_ROLLUP_FILE = CACHE_DIR / "pi_daily_rollup.jsonl"
+
+
+def _remote_journal_files():
+    """All synced headless-scanner journals (one per remote machine, e.g.
+    pi_journal.jsonl, m5_journal.jsonl), discovered by suffix so new
+    machines need no code change — see remote_sync.sh."""
+    return sorted(CACHE_DIR.glob("*_journal.jsonl"))
+
+
+def _remote_rollup_files():
+    """All synced headless-scanner daily rollups, one per remote machine."""
+    return sorted(CACHE_DIR.glob("*_daily_rollup.jsonl"))
 
 
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_daily_history(include_pi=True):
-    """Load aggregate daily totals from history.jsonl + today + Pi."""
+def load_daily_history(include_remote=True):
+    """Load aggregate daily totals from history.jsonl + today + remote machines."""
     days = {}
     if HISTORY_FILE.exists():
         for line in HISTORY_FILE.read_text().splitlines():
@@ -49,8 +59,8 @@ def load_daily_history(include_pi=True):
             "cache_write": today.get("cache_write", 0),
             "sessions": len(today.get("sessions", {})),
         }
-    if include_pi:
-        _merge_pi_rollup(days)
+    if include_remote:
+        _merge_remote_rollups(days)
     return days
 
 
@@ -104,72 +114,73 @@ def load_session_history(since=None):
     return sessions
 
 
-def load_pi_journal(since=None):
-    """Load Pi invocation journal and translate to advisor session schema."""
+def load_remote_journals(since=None):
+    """Load synced remote (Pi/m5/headless) invocation journals and translate
+    to the advisor session schema."""
     sessions = []
-    if not PI_JOURNAL_FILE.exists():
-        return sessions
-    for line in PI_JOURNAL_FILE.read_text().splitlines():
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        date_str = entry.get("ts", "")[:10]
-        if since and date_str < since:
-            continue
-        # Translate Pi journal entry to advisor session schema.
-        # Pi journal entries are per-invocation, so the token values
-        # ARE the daily deltas (one entry = one invocation's full usage).
-        i = entry.get("input", 0)
-        o = entry.get("output", 0)
-        c = entry.get("cache_read", 0)
-        cw = entry.get("cache_write", 0)
-        sessions.append({
-            "date": date_str,
-            "sid": entry.get("sid", "?"),
-            "m": entry.get("model", "?"),
-            "p": entry.get("project", "?"),
-            "cws": 0,
-            "cpk": 0,
-            "$": 0,
-            "n": entry.get("turns", 1),
-            "i": i, "o": o, "c": c, "cw": cw,
-            "di": i, "do": o, "dc": c, "dcw": cw,
-            "fs": 0, "ls": 0,
-            "machine": entry.get("machine", "pi"),
-        })
+    for journal_file in _remote_journal_files():
+        default_machine = journal_file.name.removesuffix("_journal.jsonl")
+        for line in journal_file.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            date_str = entry.get("ts", "")[:10]
+            if since and date_str < since:
+                continue
+            # Translate journal entry to advisor session schema. Journal
+            # entries are per-invocation, so the token values ARE the daily
+            # deltas (one entry = one invocation's full usage).
+            i = entry.get("input", 0)
+            o = entry.get("output", 0)
+            c = entry.get("cache_read", 0)
+            cw = entry.get("cache_write", 0)
+            sessions.append({
+                "date": date_str,
+                "sid": entry.get("sid", "?"),
+                "m": entry.get("model", "?"),
+                "p": entry.get("project", "?"),
+                "cws": 0,
+                "cpk": 0,
+                "$": 0,
+                "n": entry.get("turns", 1),
+                "i": i, "o": o, "c": c, "cw": cw,
+                "di": i, "do": o, "dc": c, "dcw": cw,
+                "fs": 0, "ls": 0,
+                "machine": entry.get("machine", default_machine),
+            })
     return sessions
 
 
-def _merge_pi_rollup(days):
-    """Merge Pi daily rollup into existing daily history (additive)."""
-    if not PI_ROLLUP_FILE.exists():
-        return
-    for line in PI_ROLLUP_FILE.read_text().splitlines():
-        if not line.strip():
-            continue
-        try:
-            d = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        date_str = d["date"]
-        if date_str in days:
-            days[date_str]["input"] += d.get("input", 0)
-            days[date_str]["output"] += d.get("output", 0)
-            days[date_str]["cache_read"] += d.get("cache_read", 0)
-            days[date_str]["cache_write"] += d.get("cache_write", 0)
-            days[date_str]["sessions"] += d.get("sessions", 0)
-        else:
-            days[date_str] = {
-                "date": date_str,
-                "input": d.get("input", 0),
-                "output": d.get("output", 0),
-                "cache_read": d.get("cache_read", 0),
-                "cache_write": d.get("cache_write", 0),
-                "sessions": d.get("sessions", 0),
-            }
+def _merge_remote_rollups(days):
+    """Merge synced remote daily rollups into existing daily history
+    (additive, one rollup file per remote machine)."""
+    for rollup_file in _remote_rollup_files():
+        for line in rollup_file.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            date_str = d["date"]
+            if date_str in days:
+                days[date_str]["input"] += d.get("input", 0)
+                days[date_str]["output"] += d.get("output", 0)
+                days[date_str]["cache_read"] += d.get("cache_read", 0)
+                days[date_str]["cache_write"] += d.get("cache_write", 0)
+                days[date_str]["sessions"] += d.get("sessions", 0)
+            else:
+                days[date_str] = {
+                    "date": date_str,
+                    "input": d.get("input", 0),
+                    "output": d.get("output", 0),
+                    "cache_read": d.get("cache_read", 0),
+                    "cache_write": d.get("cache_write", 0),
+                    "sessions": d.get("sessions", 0),
+                }
 
 
 def load_quota():
@@ -539,7 +550,7 @@ def _cost_weight(i, o, c, cw):
     return i + o * 5 + c * 0.1 + cw * 1.25
 
 
-def format_breakdown(sessions, include_pi=True):
+def format_breakdown(sessions, include_remote=True):
     """Format per-project/model breakdown as terminal output."""
     lines = []
     q5, q7 = load_quota()
@@ -553,7 +564,7 @@ def format_breakdown(sessions, include_pi=True):
         lines.append(f"  Current quota: {' | '.join(parts)}")
 
     # Daily totals from top-level (accurate)
-    daily_history = load_daily_history(include_pi=include_pi)
+    daily_history = load_daily_history(include_remote=include_remote)
     today_str = date.today().isoformat()
     today_agg = daily_history.get(today_str, {})
     d_i = today_agg.get("input", 0)
@@ -678,23 +689,23 @@ SEVERITY_ICON = {
 SEVERITY_ORDER = {"alert": 0, "warning": 1, "info": 2}
 
 
-def run_analysis(days_back=7, today_only=False, include_pi=True):
+def run_analysis(days_back=7, today_only=False, include_remote=True):
     """Run all advisor rules and return sorted findings."""
-    daily_history = load_daily_history(include_pi=include_pi)
+    daily_history = load_daily_history(include_remote=include_remote)
     q5, q7 = load_quota()
 
     # Determine analysis window
     if today_only:
         sessions = load_today_sessions()
-        if include_pi:
-            sessions += load_pi_journal(
+        if include_remote:
+            sessions += load_remote_journals(
                 since=date.today().isoformat())
         analysis_days = 1
     else:
         since = (date.today() - timedelta(days=days_back)).isoformat()
         sessions = load_session_history(since=since) + load_today_sessions()
-        if include_pi:
-            sessions += load_pi_journal(since=since)
+        if include_remote:
+            sessions += load_remote_journals(since=since)
         analysis_days = days_back
 
     findings = []
@@ -766,24 +777,26 @@ def main():
                         help="number of days to analyze (default: 7)")
     parser.add_argument("--breakdown", action="store_true",
                         help="show per-project/model quota breakdown")
-    parser.add_argument("--no-pi", action="store_true",
-                        help="exclude Pi/headless data from analysis")
+    parser.add_argument("--no-remote", "--no-pi", dest="no_remote",
+                        action="store_true",
+                        help="exclude synced remote/headless data "
+                             "(Pi, m5, ...) from analysis")
     parser.add_argument("--json", action="store_true",
                         help="output findings as JSON")
     args = parser.parse_args()
-    include_pi = not args.no_pi
+    include_remote = not args.no_remote
 
     if args.breakdown:
         sessions = load_today_sessions()
-        if include_pi:
-            sessions += load_pi_journal(
+        if include_remote:
+            sessions += load_remote_journals(
                 since=date.today().isoformat())
-        print(format_breakdown(sessions, include_pi=include_pi))
+        print(format_breakdown(sessions, include_remote=include_remote))
         return
 
     findings, session_count, analysis_days = run_analysis(
         days_back=args.days, today_only=args.today,
-        include_pi=include_pi)
+        include_remote=include_remote)
 
     if args.json:
         output = [{"severity": s, "message": m} for s, m in findings]
