@@ -28,7 +28,8 @@ QUOTA_CACHE = CACHE_DIR / "statusline_quota_cache.json"
 def _remote_journal_files():
     """All synced headless-scanner journals (one per remote machine, e.g.
     pi_journal.jsonl, m5_journal.jsonl), discovered by suffix so new
-    machines need no code change — see remote_sync.sh."""
+    machines need no code change — see remote_sync.sh. Also matches
+    *_interactive_journal.jsonl from interactive_export.py."""
     return sorted(CACHE_DIR.glob("*_journal.jsonl"))
 
 
