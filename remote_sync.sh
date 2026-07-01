@@ -5,8 +5,8 @@
 # Requires: SSH access to each remote host (see REMOTE_HOSTS below).
 #
 # Each remote machine produces, locally on itself:
-#   ~/.claude/pi_journal.jsonl + pi_daily_rollup.jsonl       (headless sessions, pi_scanner.py)
-#   ~/.claude/interactive_journal.jsonl + interactive_daily_rollup.jsonl  (interactive sessions, interactive_export.py)
+#   ~/.claude/pi_journal.jsonl + pi_daily_rollup.jsonl                 (headless sessions, pi_scanner.py)
+#   ~/.claude/interactive_journal_raw.jsonl + interactive_rollup_raw.jsonl  (interactive sessions, interactive_export.py)
 # This script pulls all four down, one local copy per machine, named
 # <tag>_journal.jsonl / <tag>_daily_rollup.jsonl / <tag>_interactive_journal.jsonl /
 # <tag>_interactive_daily_rollup.jsonl so multiple machines don't overwrite each
@@ -38,9 +38,21 @@ else
 fi
 
 pull() {
-    local host="$1" remote_name="$2" local_name="$3" label="$4"
-    rsync -az "$host:~/.claude/$remote_name" "$DEST/$local_name" 2>/dev/null && \
-        echo "  $label: OK" || echo "  $label: not found"
+    local tag="$1" host="$2" remote_name="$3" local_name="$4" label="$5"
+    local rsync_err
+    rsync_err=$(rsync -az "$host:~/.claude/$remote_name" "$DEST/$local_name" 2>&1) && {
+        echo "  $label: OK"
+        return
+    }
+    local rc=$?
+    # rsync exits 23 for "some files/attrs were not transferred" — this is what
+    # a missing remote file (scanner never ran there) looks like. Anything else
+    # (255 = ssh/connection failure, etc.) is a real error, not an absent file.
+    if [[ $rc -eq 23 ]]; then
+        echo "  $label: not found ($tag scanner may not have run yet)"
+    else
+        echo "  $label: ERROR (rsync exit $rc) — $rsync_err" >&2
+    fi
 }
 
 for entry in "${REMOTE_HOSTS[@]}"; do
@@ -49,10 +61,10 @@ for entry in "${REMOTE_HOSTS[@]}"; do
 
     echo "Syncing energy data from $tag ($host)..."
 
-    pull "$host" "pi_journal.jsonl" "${tag}_journal.jsonl" "journal"
-    pull "$host" "pi_daily_rollup.jsonl" "${tag}_daily_rollup.jsonl" "rollup"
-    pull "$host" "interactive_journal.jsonl" "${tag}_interactive_journal.jsonl" "interactive journal"
-    pull "$host" "interactive_daily_rollup.jsonl" "${tag}_interactive_daily_rollup.jsonl" "interactive rollup"
+    pull "$tag" "$host" "pi_journal.jsonl" "${tag}_journal.jsonl" "journal"
+    pull "$tag" "$host" "pi_daily_rollup.jsonl" "${tag}_daily_rollup.jsonl" "rollup"
+    pull "$tag" "$host" "interactive_journal_raw.jsonl" "${tag}_interactive_journal.jsonl" "interactive journal"
+    pull "$tag" "$host" "interactive_rollup_raw.jsonl" "${tag}_interactive_daily_rollup.jsonl" "interactive rollup"
 done
 
 echo "Done."

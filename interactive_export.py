@@ -25,8 +25,15 @@ from pathlib import Path
 CLAUDE_DIR = Path.home() / ".claude"
 SESSION_HISTORY_FILE = CLAUDE_DIR / "statusline_session_history.jsonl"
 DAILY_FILE = CLAUDE_DIR / "statusline_daily.json"
-JOURNAL_FILE = CLAUDE_DIR / "interactive_journal.jsonl"
-ROLLUP_FILE = CLAUDE_DIR / "interactive_daily_rollup.jsonl"
+# Deliberately do NOT end these filenames in "_journal.jsonl" / "_daily_rollup.jsonl":
+# advisor.py/stepcount.py glob for exactly that suffix to merge in *remote* machines'
+# data, and this machine's own interactive usage is already counted via the native
+# statusline_* files above — a name that matched the glob got this machine's own
+# data double-counted locally (caught in review). remote_sync.sh reads these two
+# raw filenames directly (not by glob) and writes the synced copy under the
+# glob-matching <tag>_interactive_journal.jsonl name on the *other* machine.
+JOURNAL_FILE = CLAUDE_DIR / "interactive_journal_raw.jsonl"
+ROLLUP_FILE = CLAUDE_DIR / "interactive_rollup_raw.jsonl"
 
 
 def _machine_id():
