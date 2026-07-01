@@ -45,10 +45,15 @@ pull() {
         return
     }
     local rc=$?
-    # rsync exits 23 for "some files/attrs were not transferred" — this is what
-    # a missing remote file (scanner never ran there) looks like. Anything else
-    # (255 = ssh/connection failure, etc.) is a real error, not an absent file.
-    if [[ $rc -eq 23 ]]; then
+    # rsync exits 23 ("some files/attrs were not transferred") for a missing
+    # remote file, but also for other partial-transfer failures — permission
+    # denied on the remote read, a local write failure, etc. — that exit code
+    # alone doesn't distinguish them (confirmed: a faked rc=23 + "Permission
+    # denied" would otherwise be misreported as a benign absence, same as a
+    # real missing file). Require the actual "No such file or directory" text
+    # rsync/openrsync both emit for a genuinely absent source file; anything
+    # else at any exit code is a real error.
+    if [[ $rc -eq 23 && "$rsync_err" == *"No such file or directory"* ]]; then
         echo "  $label: not found ($tag scanner may not have run yet)"
     else
         echo "  $label: ERROR (rsync exit $rc) — $rsync_err" >&2
