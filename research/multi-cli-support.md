@@ -1,7 +1,7 @@
 # Multi-CLI Support Research
 
 **Date:** 2026-03-02
-**Status:** Codex implemented on 2026-03-05 via `codex_status.py`; Gemini remains research only
+**Status:** Codex implemented on 2026-03-05 via `codex_status.py`; Pi coding harness implemented on 2026-07-16 via `pi_status.py`; Gemini remains research only
 
 ## Goal
 
@@ -28,6 +28,16 @@ Evaluate extending the energy monitor to support Gemini CLI and OpenAI Codex CLI
 **Existing ecosystem:** `ccusage`, `codex-hud`, `tokscale`, `CodexBar` all parse the rollout JSONL successfully.
 
 **Verdict:** Straightforward integration. Implemented as `codex_status.py`, which parses rollout JSONL directly, caches per-file summaries in `~/.codex/statusline_rollout_cache.json`, and renders a companion one-line monitor for prompt/tmux/sidecar usage.
+
+## Pi coding harness — Easy
+
+**Architecture:** TypeScript terminal harness with normalized, append-only session JSONL under `~/.pi/agent/sessions/`.
+
+**Token data access:** Every persisted assistant message includes `usage.input`, `usage.output`, `usage.cacheRead`, `usage.cacheWrite`, `usage.reasoning`, and `usage.totalTokens`, plus provider and model identifiers. Reasoning is a subset of output.
+
+**Implementation:** `pi_status.py` aggregates calls by response date and deduplicates entries copied by Pi's fork/clone session operations. `pi_stepcount.py` provides shareable day/week/month summaries. Pi's native footer already handles live-session usage, so the monitor is a companion for cross-session totals rather than a replacement footer.
+
+**Limitation:** Ephemeral `--no-session` runs leave no JSONL and cannot be counted afterward. Since Pi supports many providers, the shared energy constants are a provider-agnostic proxy rather than a basis for provider comparisons.
 
 ## Gemini CLI — Moderate
 
@@ -56,14 +66,14 @@ Evaluate extending the energy monitor to support Gemini CLI and OpenAI Codex CLI
 
 ## Comparison Table
 
-| Aspect | Claude Code | Codex CLI | Gemini CLI |
-|--------|------------|-----------|------------|
-| Data access | Statusbar stdin JSON | JSONL rollout files | OTel file (opt-in) or activity JSONL |
-| Always available? | Yes | Yes (unless `--ephemeral`) | Activity logger: yes. OTel: opt-in |
-| Cache read | Yes | Yes | Yes |
-| Cache write | Yes | No | No |
-| Reasoning tokens | Bundled in output | Separate field | Separate field |
-| Cross-session storage | Built-in | None | None |
+| Aspect | Claude Code | Codex CLI | Pi harness | Gemini CLI |
+|--------|------------|-----------|------------|------------|
+| Data access | Statusbar stdin JSON | JSONL rollout files | Session JSONL | OTel file (opt-in) or activity JSONL |
+| Always available? | Yes | Unless `--ephemeral` | Unless `--no-session` | Activity logger: yes. OTel: opt-in |
+| Cache read | Yes | Yes | Yes | Yes |
+| Cache write | Yes | No | Yes | No |
+| Reasoning tokens | Bundled in output | Separate subset | Separate subset | Separate field |
+| Cross-session storage | Built-in | Session files | Session files | None |
 
 ## Architectural Implications
 
