@@ -1,8 +1,8 @@
-# Claude Code Energy Monitor
+# Coding Agent Energy Monitor
 
 A statusline script for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that shows real-time token usage and order-of-magnitude energy estimates. It tracks daily, weekly, and monthly totals, distinguishes cheap cached tokens from expensive fresh tokens, and logs history automatically.
 
-The repo now also includes `codex_status.py` for Codex CLI. Codex does not have Claude Code's custom statusline hook, so the Codex version is a companion command that reads rollout JSONL files from `~/.codex/sessions/` and prints the same style of one-line summary for a prompt, tmux status, or sidecar terminal.
+The repo also includes companion monitors for Codex CLI (`codex_status.py`) and the Pi coding harness (`pi_status.py`). Both read their harness's session JSONL and print the same style of one-line summary for a prompt, tmux status, or sidecar terminal.
 
 ```
 Opus 4.8 | Ctx:42% | 5h:29% 7d:52% | D:2.0M ~2kWh | W:45.3M ~20kWh | M:412M ~50kWh
@@ -130,7 +130,61 @@ Optional:
 - Set `CODEX_SUMMARY_ARGS="--rough-energy-estimate"` to change the summary flags.
 - The wrapper intentionally skips printing a summary for `--help`, `--version`, `completion`, `features`, `login`, `logout`, `mcp`, and `debug`.
 
-## How it works
+## Pi coding harness
+
+Pi support lives in [`pi_status.py`](pi_status.py). Pi already displays live-session token and cache usage in its footer; this companion adds daily, weekly, and monthly totals with the repository's energy proxy by reading `~/.pi/agent/sessions/`.
+
+```bash
+# Print one status line from saved Pi sessions
+python3 ./pi_status.py
+
+# Continuously refresh it in a side terminal
+python3 ./pi_status.py --watch
+
+# Emit machine-readable totals
+python3 ./pi_status.py --json
+```
+
+Example output:
+
+```text
+gpt-5.6-sol | D:512k ~200Wh | W:1.8M ~500Wh | M:4.2M ~1kWh
+```
+
+For shareable summaries:
+
+```bash
+python3 ./pi_stepcount.py
+python3 ./pi_stepcount.py -d
+python3 ./pi_stepcount.py -w
+python3 ./pi_stepcount.py -m
+python3 ./pi_stepcount.py -t
+python3 ./pi_stepcount.py --rough-energy-estimate
+python3 ./pi_stepcount.py --copy
+```
+
+Notes:
+- Pi records normalized `input`, `output`, `cacheRead`, `cacheWrite`, and `reasoning` usage on every assistant response. Reasoning is a subset of output and is not added twice.
+- Calls are assigned to the date of each assistant response, including sessions continued on later days.
+- Pi forks and clones can copy earlier entries into a new session file. The monitor deduplicates copied responses while retaining genuinely new calls on each branch.
+- Pi's internal compaction and branch-summary model requests are persisted without usage fields, so their tokens and energy cannot be recovered from session JSONL and are omitted.
+- `--no-session` runs are not persisted and therefore cannot be counted afterward.
+- Parsed responses are cached by file size and modification time in `~/.pi/agent/statusline_session_cache.json` for prompt, tmux, and watch performance.
+- Pi can use many providers. The energy values remain the same documented, provider-agnostic order-of-magnitude proxy; they are not suitable for comparing providers or models.
+- [`pi_scanner.py`](pi_scanner.py) is unrelated: its name refers to a Raspberry Pi machine running headless Claude Code jobs.
+
+Useful integrations are the same as for Codex:
+
+```bash
+# zsh right prompt
+setopt PROMPT_SUBST
+RPROMPT='$(python3 /path/to/pi_status.py 2>/dev/null)'
+
+# tmux status-right
+set -g status-right "#(python3 /path/to/pi_status.py 2>/dev/null)"
+```
+
+## How Claude Code monitoring works
 
 1. **Claude Code calls the script** on every status update (after each API call, during streaming). It pipes a JSON object with session data into stdin.
 2. **The script reads the data**, computes energy estimates, updates daily totals, and prints one line to stdout — which Claude Code renders in the status bar.

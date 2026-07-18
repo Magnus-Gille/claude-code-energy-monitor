@@ -1,7 +1,18 @@
 # Project Status
 
-**Last session:** 2026-07-01
+**Last session:** 2026-07-16
 **Branch:** master
+
+## Completed This Session (2026-07-16) — Pi coding harness support
+
+- Added `pi_status.py`, a companion status line that reads Pi's normalized assistant usage from `~/.pi/agent/sessions/` and reports day/week/month token and order-of-magnitude energy totals. Calls are attributed by response date; cache reads/writes are counted separately; reasoning remains a subset of output.
+- Added fork/clone-safe response deduplication. Pi copies earlier session entries when branching into a new file, so naïvely summing files double-counts old calls; the parser deduplicates on response identity while preserving new branch calls and session counts.
+- Added `pi_stepcount.py` for shareable period and table summaries, plus `--copy` and optional rough-energy output.
+- Updated README and multi-CLI research documentation. Clarified that the existing `pi_scanner.py` refers to a Raspberry Pi running headless Claude Code and is unrelated to the Pi coding harness.
+- Made `AGENTS.md` explicitly shared across OpenCode, Claude Code, and Pi. Pi consumes it natively and does not need a duplicate adapter file; OpenCode-only persona commands are now clearly scoped.
+- Added `test_pi_status.py` regression coverage for response-date attribution, cache fields, reasoning semantics, fork/clone deduplication, malformed lines, and zero-usage errors.
+- Independent reviews: Claude Code found no blockers in the initial pass. Codex CLI (`gpt-5.6-sol`, xhigh) then reviewed PR #8 and found four actionable items, all addressed: documented unobservable compaction/branch-summary calls, reused parsed data for `--file`, added a persistent mtime/size-keyed session cache, and corrected the multi-CLI cache-write guidance. Earlier Claude robustness findings were also addressed by preferring provider `responseId` for deduplication and making source-session attribution independent of file ordering.
+- Verification: `python3 -m unittest discover -v`; `python3 test_interactive_export.py`; Python compilation; live `pi_status.py` text/JSON and `pi_stepcount.py` day/table smoke tests; instruction audit (0 errors, 0 warnings).
 
 ## Completed This Session (2026-07-01) — full mesh between m5 and laptop
 

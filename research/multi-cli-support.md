@@ -1,7 +1,7 @@
 # Multi-CLI Support Research
 
 **Date:** 2026-03-02
-**Status:** Codex implemented on 2026-03-05 via `codex_status.py`; Gemini remains research only
+**Status:** Codex implemented on 2026-03-05 via `codex_status.py`; Pi coding harness implemented on 2026-07-16 via `pi_status.py`; Gemini remains research only
 
 ## Goal
 
@@ -28,6 +28,16 @@ Evaluate extending the energy monitor to support Gemini CLI and OpenAI Codex CLI
 **Existing ecosystem:** `ccusage`, `codex-hud`, `tokscale`, `CodexBar` all parse the rollout JSONL successfully.
 
 **Verdict:** Straightforward integration. Implemented as `codex_status.py`, which parses rollout JSONL directly, caches per-file summaries in `~/.codex/statusline_rollout_cache.json`, and renders a companion one-line monitor for prompt/tmux/sidecar usage.
+
+## Pi coding harness — Easy
+
+**Architecture:** TypeScript terminal harness with normalized, append-only session JSONL under `~/.pi/agent/sessions/`.
+
+**Token data access:** Every persisted assistant message includes `usage.input`, `usage.output`, `usage.cacheRead`, `usage.cacheWrite`, `usage.reasoning`, and `usage.totalTokens`, plus provider and model identifiers. Reasoning is a subset of output.
+
+**Implementation:** `pi_status.py` aggregates calls by response date, deduplicates entries copied by Pi's fork/clone session operations, and persistently caches parsed responses by file metadata. `pi_stepcount.py` provides shareable day/week/month summaries. Pi's native footer already handles live-session usage, so the monitor is a companion for cross-session totals rather than a replacement footer.
+
+**Limitations:** Ephemeral `--no-session` runs leave no JSONL and cannot be counted afterward. Pi's internal compaction and branch-summary model requests are persisted without usage fields, so they are also omitted. Since Pi supports many providers, the shared energy constants are a provider-agnostic proxy rather than a basis for provider comparisons.
 
 ## Gemini CLI — Moderate
 
@@ -56,14 +66,14 @@ Evaluate extending the energy monitor to support Gemini CLI and OpenAI Codex CLI
 
 ## Comparison Table
 
-| Aspect | Claude Code | Codex CLI | Gemini CLI |
-|--------|------------|-----------|------------|
-| Data access | Statusbar stdin JSON | JSONL rollout files | OTel file (opt-in) or activity JSONL |
-| Always available? | Yes | Yes (unless `--ephemeral`) | Activity logger: yes. OTel: opt-in |
-| Cache read | Yes | Yes | Yes |
-| Cache write | Yes | No | No |
-| Reasoning tokens | Bundled in output | Separate field | Separate field |
-| Cross-session storage | Built-in | None | None |
+| Aspect | Claude Code | Codex CLI | Pi harness | Gemini CLI |
+|--------|------------|-----------|------------|------------|
+| Data access | Statusbar stdin JSON | JSONL rollout files | Session JSONL | OTel file (opt-in) or activity JSONL |
+| Always available? | Yes | Unless `--ephemeral` | Unless `--no-session` | Activity logger: yes. OTel: opt-in |
+| Cache read | Yes | Yes | Yes | Yes |
+| Cache write | Yes | No | Yes | No |
+| Reasoning tokens | Bundled in output | Separate subset | Separate subset | Separate field |
+| Cross-session storage | Built-in | Session files | Session files | None |
 
 ## Architectural Implications
 
@@ -71,13 +81,13 @@ Evaluate extending the energy monitor to support Gemini CLI and OpenAI Codex CLI
 
 1. **Shared accumulation layer** — The daily JSON + history JSONL logic becomes shared code with per-CLI parsers feeding into it.
 
-2. **File watching vs stdin** — Both Codex and Gemini use file output, not stdin streams. Need `watchdog` or periodic reads for real-time monitoring. The statusline approach (stdin reader) wouldn't work for these.
+2. **File watching vs stdin** — Codex, Pi, and Gemini use file output, not stdin streams. They need file polling or watching for real-time monitoring; Claude Code's stdin statusline approach does not apply.
 
 3. **Per-model energy constants** — Each CLI uses different model families with different energy profiles. Need a constants table keyed by model name/family, not just one set of constants.
 
 4. **Unified token schema** — Different field names and semantics need normalization:
-   - Cache write: only Claude Code has it
-   - Reasoning tokens: Codex/Gemini separate them, Claude Code doesn't
+   - Cache write: Claude Code and Pi expose it; Codex and Gemini do not
+   - Reasoning tokens: Codex, Pi, and Gemini separate them; Claude Code doesn't
    - Input tokens: Codex includes cached in total, Claude Code excludes cached from `total_input_tokens`
 
 5. **Language choice** — Python remains fine. No reason to change.
