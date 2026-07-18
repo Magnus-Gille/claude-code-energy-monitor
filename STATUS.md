@@ -1,7 +1,7 @@
 # Project Status
 
 **Last session:** 2026-07-16
-**Branch:** docs/pi-harness-support
+**Branch:** master
 
 ## Completed This Session (2026-07-16) — Pi coding harness support
 
