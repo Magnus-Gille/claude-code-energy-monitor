@@ -17,11 +17,13 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from codex_status import fmt_nrg, fmt_tok
+from codex_status import fmt_nrg, fmt_tok, load_json, save_json
 from energy_constants import E_CACHE, E_CW, E_IN, E_OUT
 
 PI_DIR = Path.home() / ".pi" / "agent"
 SESSIONS_DIR = PI_DIR / "sessions"
+CACHE_FILE = PI_DIR / "statusline_session_cache.json"
+CACHE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -164,6 +166,56 @@ def parse_session(path: Path) -> list[UsageEvent]:
 _FILE_CACHE: dict[Path, tuple[int, int, list[UsageEvent]]] = {}
 
 
+def _event_to_dict(event: UsageEvent) -> dict[str, object]:
+    return {
+        "entry_id": event.entry_id,
+        "response_id": event.response_id,
+        "session_id": event.session_id,
+        "session_started_at": event.session_started_at.isoformat(),
+        "timestamp": event.timestamp.isoformat(),
+        "provider": event.provider,
+        "model": event.model,
+        "fresh_input": event.fresh_input,
+        "cached_input": event.cached_input,
+        "cache_write": event.cache_write,
+        "output": event.output,
+        "reasoning_output": event.reasoning_output,
+    }
+
+
+def _event_from_dict(data: dict) -> UsageEvent | None:
+    try:
+        session_started_at = parse_timestamp(data["session_started_at"])
+        timestamp = parse_timestamp(data["timestamp"])
+        if session_started_at is None or timestamp is None:
+            return None
+        return UsageEvent(
+            entry_id=str(data["entry_id"]),
+            response_id=str(data.get("response_id") or ""),
+            session_id=str(data["session_id"]),
+            session_started_at=session_started_at,
+            timestamp=timestamp,
+            provider=str(data.get("provider") or ""),
+            model=str(data.get("model") or "Pi"),
+            fresh_input=int(data.get("fresh_input", 0) or 0),
+            cached_input=int(data.get("cached_input", 0) or 0),
+            cache_write=int(data.get("cache_write", 0) or 0),
+            output=int(data.get("output", 0) or 0),
+            reasoning_output=int(data.get("reasoning_output", 0) or 0),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _cache_path(root: Path) -> Path:
+    try:
+        if root.resolve() == SESSIONS_DIR.resolve():
+            return CACHE_FILE
+    except OSError:
+        pass
+    return root / ".statusline_session_cache.json"
+
+
 def _events_for_file(path: Path) -> list[UsageEvent]:
     try:
         before = path.stat()
@@ -200,15 +252,48 @@ def load_events(root: Path, explicit_file: Path | None = None) -> list[UsageEven
     if explicit_file and explicit_file not in files:
         files.append(explicit_file)
 
+    cache_path = _cache_path(root)
+    cache = load_json(cache_path)
+    cached_files = cache.get("files", {}) if cache.get("version") == CACHE_VERSION else {}
+    next_cache: dict[str, dict[str, object]] = {}
+
     # Group copies first, then attribute each response to the earliest source
     # session. This keeps session counts stable even when a fork's project path
     # sorts before the original file.
     unique: dict[tuple, UsageEvent] = {}
     for path in files:
-        for event in _events_for_file(path):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        key = str(path)
+        cached = cached_files.get(key) or {}
+        events: list[UsageEvent] = []
+        if cached.get("mtime_ns") == stat.st_mtime_ns and cached.get("size") == stat.st_size:
+            for data in cached.get("events", []):
+                if isinstance(data, dict):
+                    event = _event_from_dict(data)
+                    if event is not None:
+                        events.append(event)
+        else:
+            events = _events_for_file(path)
+
+        # Populate the process-local cache too, so --file can select its active
+        # event without a second parse and --watch can reuse deserialized data.
+        _FILE_CACHE[path] = (stat.st_mtime_ns, stat.st_size, events)
+        next_cache[key] = {
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "events": [_event_to_dict(event) for event in events],
+        }
+        for event in events:
             existing = unique.get(event.dedup_key)
             if existing is None or event.session_started_at < existing.session_started_at:
                 unique[event.dedup_key] = event
+
+    next_data = {"version": CACHE_VERSION, "files": next_cache}
+    if next_data != cache:
+        save_json(cache_path, next_data)
     return list(unique.values())
 
 
@@ -256,7 +341,7 @@ def summarize_totals(totals: AggregateTotals) -> dict[str, object]:
 
 def build_payload(root: Path, explicit_file: Path | None) -> dict[str, object]:
     events = load_events(root, explicit_file)
-    active_events = parse_session(explicit_file) if explicit_file else events
+    active_events = _events_for_file(explicit_file) if explicit_file else events
     active = max(active_events, key=lambda event: event.timestamp, default=None)
     return {
         "active": {

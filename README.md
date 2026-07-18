@@ -167,7 +167,9 @@ Notes:
 - Pi records normalized `input`, `output`, `cacheRead`, `cacheWrite`, and `reasoning` usage on every assistant response. Reasoning is a subset of output and is not added twice.
 - Calls are assigned to the date of each assistant response, including sessions continued on later days.
 - Pi forks and clones can copy earlier entries into a new session file. The monitor deduplicates copied responses while retaining genuinely new calls on each branch.
+- Pi's internal compaction and branch-summary model requests are persisted without usage fields, so their tokens and energy cannot be recovered from session JSONL and are omitted.
 - `--no-session` runs are not persisted and therefore cannot be counted afterward.
+- Parsed responses are cached by file size and modification time in `~/.pi/agent/statusline_session_cache.json` for prompt, tmux, and watch performance.
 - Pi can use many providers. The energy values remain the same documented, provider-agnostic order-of-magnitude proxy; they are not suitable for comparing providers or models.
 - [`pi_scanner.py`](pi_scanner.py) is unrelated: its name refers to a Raspberry Pi machine running headless Claude Code jobs.
 

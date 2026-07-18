@@ -102,6 +102,73 @@ class PiStatusTests(unittest.TestCase):
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed.date(), date.today())
 
+    def test_explicit_file_is_not_parsed_twice(self):
+        today = date.today()
+        usage = {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "session.jsonl"
+            _write_session(target, "s", [("call", _local_timestamp(today), usage, "model")])
+            original = pi_status.parse_session
+            calls = []
+
+            def counting_parse(path):
+                calls.append(path)
+                return original(path)
+
+            pi_status._FILE_CACHE.clear()
+            pi_status.parse_session = counting_parse
+            try:
+                pi_status.build_payload(root, target)
+            finally:
+                pi_status.parse_session = original
+                pi_status._FILE_CACHE.clear()
+
+        self.assertEqual(calls, [target])
+
+    def test_persistent_cache_avoids_reparse_in_a_new_process_equivalent(self):
+        today = date.today()
+        usage = {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "session.jsonl"
+            _write_session(target, "s", [("call", _local_timestamp(today), usage, "model")])
+            pi_status._FILE_CACHE.clear()
+            pi_status.build_payload(root, None)
+            self.assertTrue((root / ".statusline_session_cache.json").exists())
+
+            original = pi_status.parse_session
+            calls = []
+
+            def counting_parse(path):
+                calls.append(path)
+                return original(path)
+
+            pi_status._FILE_CACHE.clear()
+            pi_status.parse_session = counting_parse
+            try:
+                payload = pi_status.build_payload(root, None)
+            finally:
+                pi_status.parse_session = original
+                pi_status._FILE_CACHE.clear()
+
+        self.assertEqual(calls, [])
+        self.assertEqual(payload["day"]["total_tokens"], 2)
+
+        # A changed size invalidates both persistent and process-local entries.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "session.jsonl"
+            first = ("call1", _local_timestamp(today, 10), usage, "model")
+            second = ("call2", _local_timestamp(today, 11), usage, "model")
+            _write_session(target, "s", [first])
+            pi_status._FILE_CACHE.clear()
+            pi_status.build_payload(root, None)
+            _write_session(target, "s", [first, second])
+            payload = pi_status.build_payload(root, None)
+            pi_status._FILE_CACHE.clear()
+        self.assertEqual(payload["day"]["total_tokens"], 4)
+
     def test_stepcount_renders_prebuilt_payload_without_rescanning(self):
         period = {"total_tokens": 1200, "sessions": 2, "energy_mwh": 500}
         payload = {"day": period, "week": period, "month": period}

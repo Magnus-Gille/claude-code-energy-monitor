@@ -11,8 +11,8 @@
 - Updated README and multi-CLI research documentation. Clarified that the existing `pi_scanner.py` refers to a Raspberry Pi running headless Claude Code and is unrelated to the Pi coding harness.
 - Made `AGENTS.md` explicitly shared across OpenCode, Claude Code, and Pi. Pi consumes it natively and does not need a duplicate adapter file; OpenCode-only persona commands are now clearly scoped.
 - Added `test_pi_status.py` regression coverage for response-date attribution, cache fields, reasoning semantics, fork/clone deduplication, malformed lines, and zero-usage errors.
-- Independent review: Claude Code found no blockers. Its robustness findings were addressed by preferring provider `responseId` for deduplication, making source-session attribution independent of file ordering, adding an in-process per-file watch cache, avoiding duplicate step-counter parses, and expanding explicit-file/timezone tests.
-- Verification: `python3 -m unittest test_pi_status.py test_interactive_export.py`; Python compilation; live `pi_status.py` text/JSON and `pi_stepcount.py` day/table smoke tests; instruction audit (0 errors, 0 warnings).
+- Independent reviews: Claude Code found no blockers in the initial pass. Codex CLI (`gpt-5.6-sol`, xhigh) then reviewed PR #8 and found four actionable items, all addressed: documented unobservable compaction/branch-summary calls, reused parsed data for `--file`, added a persistent mtime/size-keyed session cache, and corrected the multi-CLI cache-write guidance. Earlier Claude robustness findings were also addressed by preferring provider `responseId` for deduplication and making source-session attribution independent of file ordering.
+- Verification: `python3 -m unittest discover -v`; `python3 test_interactive_export.py`; Python compilation; live `pi_status.py` text/JSON and `pi_stepcount.py` day/table smoke tests; instruction audit (0 errors, 0 warnings).
 
 ## Completed This Session (2026-07-01) — full mesh between m5 and laptop
 
