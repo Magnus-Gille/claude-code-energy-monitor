@@ -1,7 +1,39 @@
 # Project Status
 
-**Last session:** 2026-08-10
-**Branch:** master
+**Last session:** 2026-09-03
+**Branch:** feat/usage-attribution-m0
+
+## Completed This Session (2026-09-03) — cross-harness `why`
+
+- Added `why.py`, a stateless attribution command for Claude Code and Codex. It accepts a local
+  calendar date or trailing-hour window and ranks usage by project, thread kind, entrypoint, agent,
+  exact model, effort, and session. Text and JSON output are supported; no ledger or cache is written.
+- Claude collection scans main and subagent transcripts, filters by response timestamp, and
+  deduplicates streamed content-block rows by `requestId` using the maximum of each token field. For
+  a full calendar day it reports the older statusline counter's output/cache-read coverage.
+- Codex collection uses per-turn `last_token_usage` rather than session totals and attributes each
+  event from the latest `turn_context`. This fixes the old calculator's session-start-day bucketing
+  and exposes CLI, exec, automation, subagent, and Codex Desktop origins from the shared rollouts.
+- Live verification found another Codex invariant the design had missed: identical cumulative token
+  snapshots are sometimes emitted repeatedly, including with repeated non-zero deltas. They are now
+  deduplicated. A cumulative counter can also reset inside one rollout; reconciliation therefore
+  treats the file as monotonic segments rather than comparing only with its final snapshot.
+- Confirmed that current Codex rollouts record `turn_context.payload.effort` per turn, resolving the
+  open T0.1b question. Corrected stale cache-write documentation.
+- Conductor review corrected local-time handling so historical calendar days use the UTC offset for
+  the selected date (including DST boundaries), not the offset in effect when the command runs.
+- Verification: 20 discovery tests pass; the standalone interactive-export regression passes; all
+  top-level Python modules compile; `git diff --check` passes. Twenty current real Codex rollouts
+  reconciled 2,116 deduplicated calls exactly across 21 cumulative counter segments. Live text and
+  JSON smoke tests passed for both harnesses.
+- Review disclosure: the required M5 implementation leaf returned tests for a fabricated schema and
+  was rejected as `wrong`. A later read-only M5 review with `qwen3-coder-next-80b` was `partial`: one
+  of eight hypotheses exposed a real low-severity missing-`cwd` fallback bug, fixed with a red/green
+  regression; the other seven were rejected against the code and observed schema. A third Claude
+  Code review attempt had no tools or persistence but still returned no review after 103 seconds;
+  although Opus was requested, its result metadata reported `claude-haiku-4-5`. Conductor review
+  found no remaining blocker.
+- Deliberately out of scope: no ledger, persistence, sync, or energy-model changes.
 
 ## Completed This Session (2026-08-10) — usage attribution design
 

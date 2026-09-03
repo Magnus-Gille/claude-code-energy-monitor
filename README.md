@@ -21,6 +21,33 @@ Reading left to right:
 
 Energy is **model-weighted** (Haiku ×0.3, Sonnet ×0.6, Opus ×1.0; order-of-magnitude) for today and going forward; older history days are model-agnostic. Quota prefers the statusline payload's `rate_limits` (no API call), falling back to the OAuth usage endpoint when absent.
 
+## Explain a spike across Claude and Codex
+
+`why.py` reads the retained Claude Code transcripts and Codex rollouts directly and ranks the calls
+that consumed a time window. It groups by project, main thread vs subagent, entrypoint, agent, exact
+model, effort, and session. Codex Desktop calls are included when they are present in the shared
+`~/.codex/sessions/` directory.
+
+```bash
+# Both harnesses, trailing 24 hours
+python3 why.py
+
+# A short burst, or one local calendar day
+python3 why.py --hours 0.5
+python3 why.py --date 2026-09-03
+
+# Narrow to one harness or emit structured output
+python3 why.py --harness codex --limit 10
+python3 why.py --hours 6 --json
+```
+
+The command is stateless: it writes no ledger or cache. Claude requests are deduplicated by
+`requestId` using the maximum of each streamed token field; Codex uses each turn's
+`last_token_usage` delta and the event timestamp, while discarding repeated cumulative snapshots,
+so resumed sessions land on the day when the call actually happened. For a full Claude calendar day
+it also compares transcript totals with the older statusline counter and reports the latter's
+coverage.
+
 ## Installation
 
 **30-second setup** — paste this into Claude Code:
@@ -80,7 +107,7 @@ set -g status-right "#(python3 /path/to/codex_status.py 2>/dev/null)"
 
 Notes:
 - Codex rollout logs expose total input, cached input, output, reasoning output, context window, and 5h/7d rate-limit usage.
-- Unlike Claude Code, Codex rollout logs do **not** expose cache-write tokens, so the Codex energy estimate treats cache write as zero.
+- Current Codex rollouts expose cache-write tokens. `why.py` reports them; the older energy status scripts do not yet apply a distinct cache-write energy constant.
 - Parsed rollout summaries are cached in `~/.codex/statusline_rollout_cache.json` to keep prompt-time execution reasonably fast.
 
 ### Codex step counter

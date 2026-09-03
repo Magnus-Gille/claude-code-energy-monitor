@@ -76,6 +76,7 @@ The user's question can be answered with one command and no stored state. Ship t
 front of a real user, and let its output shape the schema rather than the reverse.
 
 ### T0.1 — Stateless attribution command
+**Implemented:** 2026-09-03 in the shared `why.py` command; awaiting user review of the output shape.
 **Files:** `why.py` (new, top level, self-contained)
 **Scope:** Read `~/.claude/projects/**/*.jsonl` including `<session>/subagents/agent-*.jsonl` for a
 given date or the last N hours. Reduce by `requestId` taking the **maximum per token field** (see
@@ -89,19 +90,24 @@ names the top contributors for a chosen window; a second run produces identical 
 with the user before E1 starts.
 
 ### T0.1b — Stateless attribution command for Codex
+**Implemented:** 2026-09-03 in the shared `why.py` command; awaiting user review of the output shape.
 **Files:** `why_codex.py` (new, top level, self-contained) or a `--harness codex` mode of T0.1
 **Scope:** Same output shape as T0.1, over `~/.codex/sessions/**/rollout-*.jsonl`. Sum
 `payload.info.last_token_usage` **per-turn deltas** — not `total_token_usage`, which is cumulative
-and would multiply-count. Group and rank by session, model (`turn_context.payload.model`), provider
+and would multiply-count. Deduplicate repeated events whose full `total_token_usage` snapshot is
+unchanged; live rollouts emit these during non-call UI/status events, sometimes with a repeated
+non-zero `last_token_usage`. Treat a decreasing cumulative snapshot as a new counter segment rather
+than lost usage. Group and rank by session, model (`turn_context.payload.model`), provider
 (`session_meta.payload.model_provider`), and thread origin from
 `session_meta.payload.source.subagent.thread_spawn.{parent_thread_id, depth, agent_nickname}` plus
 `thread_source ∈ {user, subagent, automation}`.
-**Verify first:** whether an effort or reasoning-level setting is recorded per turn. It was confirmed
-for Claude Code but **not** for Codex, and the "did I leave an expensive setting on" question depends
-on it. If it is absent, say so in the output rather than omitting the dimension silently.
+**Verified 2026-09-03:** Codex records `turn_context.payload.effort` per turn on the current local
+format. The command attributes each subsequent token event to the latest turn context and reports
+`unknown` rather than guessing when the field is absent.
 **Also verify:** whether the SQLite stores alongside the rollouts are authoritative (see T9.1).
-**Acceptance:** summed per-turn deltas reconcile against the final `total_token_usage` for a session;
-a burst window can be listed with its top contributors; running twice produces identical output.
+**Acceptance:** summed, deduplicated per-turn deltas reconcile against the terminal cumulative total
+of every counter segment in a session; a burst window can be listed with its top contributors;
+running twice produces identical output.
 
 ### T0.2 — Resolve the billing grain before any schema is frozen
 **Files:** a findings note; no production code

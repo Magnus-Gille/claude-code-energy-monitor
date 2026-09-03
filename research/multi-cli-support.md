@@ -103,7 +103,7 @@ default), which is the same shape as Claude Code's OpenTelemetry surface.
 3. **Per-model energy constants** — Each CLI uses different model families with different energy profiles. Need a constants table keyed by model name/family, not just one set of constants.
 
 4. **Unified token schema** — Different field names and semantics need normalization:
-   - Cache write: Claude Code and Pi expose it; Codex and Gemini do not
+   - Cache write: Claude Code, Codex, and Pi expose it; Gemini does not
    - Reasoning tokens: Codex, Pi, and Gemini separate them; Claude Code doesn't
    - Input tokens: Codex includes cached in total, Claude Code excludes cached from `total_input_tokens`
 

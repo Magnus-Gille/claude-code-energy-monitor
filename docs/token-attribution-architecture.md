@@ -490,6 +490,11 @@ already maps the normalisation problem; the ledger is where it lands.
   as "the 5-hour window" would mislabel weekly quota as five-hour. SQLite state exists alongside the
   rollouts and is actively written; its role is **unverified**, so the collector must confirm which
   store is authoritative before relying on the JSONL.
+  Live verification on 2026-09-03 found that identical cumulative token snapshots can be emitted
+  more than once, including with a repeated non-zero `last_token_usage`; collectors must discard
+  those duplicates. Cumulative counters can also decrease within one rollout, after which deltas
+  reconcile against a new segment. Summed deltas therefore reconcile against the terminal total of
+  each monotonic counter segment, not necessarily the file's last snapshot alone.
 - **Pi** — per-turn `message.usage.{input, output, cacheRead, cacheWrite, reasoning, totalTokens}`
   plus `message.provider`, `message.api` and `message.model`, and a per-call `usage.cost` breakdown
   Pi computes locally. Pi is the clearest demonstration of why `provider` and `pool` are per call
