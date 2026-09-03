@@ -21,9 +21,26 @@ Evaluate extending the energy monitor to support Gemini CLI and OpenAI Codex CLI
 - `total_tokens`
 
 **What's missing vs Claude Code:**
-- No cache-write tracking (only reads)
+- ~~No cache-write tracking (only reads)~~ — **corrected 2026-08-10, see below**
 - No built-in statusline hook inside the Codex TUI
 - `--ephemeral` flag suppresses rollout files
+
+**Correction (2026-08-10, verified against a live rollout file):** Codex now records cache writes and
+sub-agent structure. `payload.info.{last,total}_token_usage` contains
+`input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`,
+`reasoning_output_tokens`, `total_tokens` — so the "no cache-write tracking" limitation above, and
+the comparison table's "Cache write: No" row for Codex, are both out of date. Rollouts also carry
+`payload.rate_limits.{primary,secondary}` (`used_percent`, `window_minutes`, `resets_at`),
+`credits.{has_credits,unlimited,balance}`, `session_meta.payload.model_provider`, and
+`session_meta.payload.source.subagent.thread_spawn.{parent_thread_id,depth,agent_nickname}` plus
+`thread_source ∈ {user,subagent,automation}`.
+
+Identify rate-limit windows by `window_minutes`, not by whether they appear in `primary` or
+`secondary` — a live file inspected during this check had the weekly window (`10080`) in `primary`
+with `secondary: null`.
+
+Codex additionally supports OTLP export via an `[otel]` block in `config.toml` (disabled by
+default), which is the same shape as Claude Code's OpenTelemetry surface.
 
 **Existing ecosystem:** `ccusage`, `codex-hud`, `tokscale`, `CodexBar` all parse the rollout JSONL successfully.
 
@@ -71,7 +88,7 @@ Evaluate extending the energy monitor to support Gemini CLI and OpenAI Codex CLI
 | Data access | Statusbar stdin JSON | JSONL rollout files | Session JSONL | OTel file (opt-in) or activity JSONL |
 | Always available? | Yes | Unless `--ephemeral` | Unless `--no-session` | Activity logger: yes. OTel: opt-in |
 | Cache read | Yes | Yes | Yes | Yes |
-| Cache write | Yes | No | Yes | No |
+| Cache write | Yes | Yes (since 2026-08 check) | Yes | No |
 | Reasoning tokens | Bundled in output | Separate subset | Separate subset | Separate field |
 | Cross-session storage | Built-in | Session files | Session files | None |
 
@@ -86,7 +103,7 @@ Evaluate extending the energy monitor to support Gemini CLI and OpenAI Codex CLI
 3. **Per-model energy constants** — Each CLI uses different model families with different energy profiles. Need a constants table keyed by model name/family, not just one set of constants.
 
 4. **Unified token schema** — Different field names and semantics need normalization:
-   - Cache write: Claude Code and Pi expose it; Codex and Gemini do not
+   - Cache write: Claude Code, Codex, and Pi expose it; Gemini does not
    - Reasoning tokens: Codex, Pi, and Gemini separate them; Claude Code doesn't
    - Input tokens: Codex includes cached in total, Claude Code excludes cached from `total_input_tokens`
 

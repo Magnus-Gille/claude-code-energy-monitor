@@ -1,7 +1,145 @@
 # Project Status
 
-**Last session:** 2026-07-16
-**Branch:** master
+**Last session:** 2026-09-03
+**Branch:** feat/usage-attribution-m0
+
+## Completed This Session (2026-09-03) — cross-harness `why`
+
+- Added `why.py`, a stateless attribution command for Claude Code and Codex. It accepts a local
+  calendar date or trailing-hour window and ranks usage by project, thread kind, entrypoint, agent,
+  exact model, effort, and session. Text and JSON output are supported; no ledger or cache is written.
+- Claude collection scans main and subagent transcripts, filters by response timestamp, and
+  deduplicates streamed content-block rows by `requestId` using the maximum of each token field. For
+  a full calendar day it reports the older statusline counter's output/cache-read coverage.
+- Codex collection uses per-turn `last_token_usage` rather than session totals and attributes each
+  event from the latest `turn_context`. This fixes the old calculator's session-start-day bucketing
+  and exposes CLI, exec, automation, subagent, and Codex Desktop origins from the shared rollouts.
+- Live verification found another Codex invariant the design had missed: identical cumulative token
+  snapshots are sometimes emitted repeatedly, including with repeated non-zero deltas. They are now
+  deduplicated. A cumulative counter can also reset inside one rollout; reconciliation therefore
+  treats the file as monotonic segments rather than comparing only with its final snapshot.
+- Confirmed that current Codex rollouts record `turn_context.payload.effort` per turn, resolving the
+  open T0.1b question. Corrected stale cache-write documentation.
+- Conductor review corrected local-time handling so historical calendar days use the UTC offset for
+  the selected date (including DST boundaries), not the offset in effect when the command runs.
+- Verification: 20 discovery tests pass; the standalone interactive-export regression passes; all
+  top-level Python modules compile; `git diff --check` passes. Twenty current real Codex rollouts
+  reconciled 2,116 deduplicated calls exactly across 21 cumulative counter segments. Live text and
+  JSON smoke tests passed for both harnesses.
+- Review disclosure: the required M5 implementation leaf returned tests for a fabricated schema and
+  was rejected as `wrong`. A later read-only M5 review with `qwen3-coder-next-80b` was `partial`: one
+  of eight hypotheses exposed a real low-severity missing-`cwd` fallback bug, fixed with a red/green
+  regression; the other seven were rejected against the code and observed schema. A third Claude
+  Code review attempt had no tools or persistence but still returned no review after 103 seconds;
+  although Opus was requested, its result metadata reported `claude-haiku-4-5`. Conductor review
+  found no remaining blocker.
+- Committed as `4d7c59d` and published for review in PR #9. GitHub reports no configured CI checks
+  for the branch; the verification above was run locally before publication.
+- Deliberately out of scope: no ledger, persistence, sync, or energy-model changes.
+
+## Completed This Session (2026-08-10) — usage attribution design
+
+Design session, no code changes. Question: "where did my tokens go?" — after burning half a weekly
+allowance in ~30 minutes across several parallel agents, with no way to tell whether the cause was a
+runaway agent, an expensive setting, or something running unattended on another machine.
+
+- **Measured the coverage gap that motivates the work.** Compared the monitor's own totals against a
+  `requestId`-deduplicated sum of every call in the local transcripts (7-day retention, 3 days with
+  activity). On a quiet single-session day coverage was **100%** (24,900 output tokens both sides);
+  across the whole window it was **44% of output and 43% of cache reads** (185,162 vs 420,056;
+  23.8M vs 55.8M), and the worst single day recovered only **10% of cache reads**. The monitor is
+  exact when the workload is simple and blind exactly when it is complex.
+- **Located the missing mass.** Subagents were 29% of output and 34% of cache reads;
+  non-interactive runs (`entrypoint: sdk-cli`) were 41% of output and 35% of cache reads. Both are
+  structurally invisible to a statusline-driven collector, which only ever sees the main thread's
+  latest response. The split moves with workload, so it is not a correction factor that could be
+  applied to an aggregate after the fact. This confirms and quantifies
+  [issue #4](https://github.com/Magnus-Gille/claude-code-energy-monitor/issues/4).
+- **Found two live attribution defects.** A session stores one "current model", so model-switching
+  sessions misattribute; and unknown model ids fall through to the most expensive tier — `fable`
+  was being counted as Opus, and `haiku` never appeared at all because it was only ever used by
+  subagents.
+- **Re-validated the stale token-accounting findings.** On v2.1.226 the documented "transcript output
+  excludes thinking, expect ~3×" gap **no longer holds** (matched within 1% on a full day, 0.99–1.12×
+  per session), and `input_tokens ≤ 1` has fallen from 75–93% to **6%** of deduplicated calls.
+  `FINDINGS.md` is now wrong on both points and is ticketed for correction.
+- **Verified the available data surfaces** rather than designing against memory. Transcripts now
+  carry `agentId` / `attributionAgent` (exact subagent identity), top-level `effort`, `entrypoint`,
+  `service_tier`, `speed`, and the nested 5m/1h cache-write split — but Anthropic documents the
+  format as internal and unstable. OpenTelemetry is the documented, supported, complete surface
+  (`claude_code.token.usage` and the `api_request` event carry model, all four token types, cost,
+  request id, effort, speed and subagent attribution, for headless runs too). The statusline payload
+  remains the **only** documented local read of subscription quota
+  (`rate_limits.{five_hour,seven_day}` with `resets_at`). The separate per-model weekly limit is not
+  programmatically observable at all.
+- **Wrote [`docs/token-attribution-architecture.md`](docs/token-attribution-architecture.md)** — the
+  data model changes from a daily aggregate to a per-call ledger deduplicated on
+  `(provider, request id)`, plus budget pools and meter readings. Because meter readings are
+  account-global while the ledger is per-machine, unattributed burn on another machine becomes
+  *detectable*. Harness- and provider-agnostic by construction: Claude Code, Codex, Pi and future
+  harnesses are collectors; Anthropic (subscription or API), OpenAI, OpenRouter and self-hosted
+  models are pools differing only in how their meter is read.
+- **Corrected `research/multi-cli-support.md` on Codex**, verified directly against a live rollout
+  file. It recorded "no cache-write tracking"; `cache_write_input_tokens` is in fact present in both
+  `last_token_usage` and `total_token_usage`. Codex also now records sub-agent spawn structure
+  (`source.subagent.thread_spawn.*`, `thread_source`), `model_provider`, credits balance, and
+  supports OTLP export. One trap worth remembering: rate-limit windows must be identified by
+  `window_minutes`, **not** by whether they land in `primary` or `secondary` — the file inspected had
+  the weekly window (10080) in `primary` with `secondary: null`.
+- **Wrote [`docs/token-attribution-epics.md`](docs/token-attribution-epics.md)** — 11 epics across 6
+  milestones, ticket-level, scoped for an implementing agent. Milestone 0 is a deliberately
+  throwaway single script that answers the original question from transcripts with no
+  infrastructure, so the output format is validated against a real user before the schema, sync
+  protocol and remaining epics are built on top of it.
+- **Ran an adversarial review of the draft and rewrote what it broke.** Four findings were verified
+  against live data and changed the design:
+  - **Content-block lines do NOT carry identical usage.** 199 of 583 multi-line `requestId`s differ —
+    early lines hold a placeholder `output_tokens` (2–4), only the terminating line has the real
+    value (`4 → 4 → 254` in one case). Last-write-wins would let a placeholder win permanently when a
+    scheduled collector reads mid-turn. Dedup is now **max per token field**, verified safe: last
+    line equals per-field max on 694/694 request ids.
+  - **The quota-regression idea is dead.** `used_percentage` decreased *without a window reset* 214
+    times (5h) and 42 times (7d) over 3.6 days — the windows roll, so Δ is `burn added − burn
+    expired`. It is also integer-quantized and the four token types are collinear. A four-way fit
+    would return negative coefficients and confidently blame an invisible machine. Replaced with a
+    single scalar on fixed price-ratio weights, heavily gated.
+  - **`resets_at` is a Unix epoch integer**, not an ISO-8601 string.
+  - **Meter sampling is useless where it matters most**: median gap between readings 2 s, p90 12 s,
+    **max 20.3 hours** — dense while you type, absent during exactly the unattended burn the tool
+    exists to catch. Coverage reporting is therefore the permanent answer, not a placeholder.
+  - Also fixed: `fidelity` must travel on the record or cross-machine merge is undefined; Gemini's
+    reasoning tokens are **additive**, not a subset, and a validator cannot catch the mistake; OTel's
+    per-call data is in the **log events**, not the token counter metric; `duration_ms` was missing,
+    without which "several agents in parallel" is not computable.
+- **Checked the design against the actual incident and re-sequenced it.** The burn described in the
+  voice memo was on the **ChatGPT/Codex** subscription, not Claude Code — the Codex rollouts show the
+  weekly window swinging 20% → 99% → 1% over three days with readings dropping to 0% around 08-08
+  22:10, the signature of a plan being cancelled and replaced. Every milestone had been sequenced
+  around Claude Code because that is where the evidence and existing instrumentation were, which
+  would have meant four milestones of work before anything could speak to the triggering episode.
+  Three corrections applied:
+  - **Codex moved from milestone 4 to milestone 0** (new `T0.1b`). Its per-call data is in some
+    respects better than Claude Code's — per-turn deltas rather than snapshots, explicit reasoning
+    split, cache writes, `model_provider`, and real subagent spawn structure. Open item: whether an
+    effort/reasoning level is recorded per turn is **confirmed for Claude Code but not for Codex**.
+  - **Spike attribution now keys off the ledger's own token burn rate, not the meter curve**
+    (`T7.6`). This is the highest-value rule and needs no calibration at all: for a concentrated
+    burst, "everything that ran between 14:02 and 14:31, ranked" is a complete answer.
+  - **New ticket `T3.5` for meter-series reconstruction.** Raw readings cannot be concatenated in
+    timestamp order: **162 distinct `resets_at` values for one weekly window in three days**, nine
+    sessions publishing simultaneously, and a naive merge showing **+83 percentage points in 1.1
+    seconds** of pure artefact. `resets_at` on a rolling window slides continuously and is **not** a
+    window identifier — `T6.2` was rewritten to use explicit trailing durations instead.
+- **Not done:** nothing implemented; no GitHub issues filed. The architecture is for review first —
+  filing the ticket set is the next step once it is agreed. Two questions block schema freeze:
+  whether `message.usage.iterations[]` means the billing grain is finer than `requestId`, and whether
+  quota readings are genuinely account-global.
+- **Verification:** `python3 -m unittest discover` (7 tests) and `test_interactive_export.py` pass;
+  all modules compile. No functional code changed this session.
+
+## Open observation
+
+- [Overlapping `remote_sync.sh` runs](docs/remote-sync-overlap-observation-2026-08-02.md) records the 2026-08-02 process inspection: approximately 110 overlapping process entries and 74 SSH/rsync workers, with likely missing locking and transfer timeouts. No processes were terminated and no behavior was changed.
 
 ## Completed This Session (2026-07-16) — Pi coding harness support
 
