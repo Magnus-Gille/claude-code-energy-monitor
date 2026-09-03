@@ -33,6 +33,8 @@
   Code review attempt had no tools or persistence but still returned no review after 103 seconds;
   although Opus was requested, its result metadata reported `claude-haiku-4-5`. Conductor review
   found no remaining blocker.
+- Committed as `4d7c59d` and published for review in PR #9. GitHub reports no configured CI checks
+  for the branch; the verification above was run locally before publication.
 - Deliberately out of scope: no ledger, persistence, sync, or energy-model changes.
 
 ## Completed This Session (2026-08-10) — usage attribution design
