@@ -1,6 +1,6 @@
 # Observation: overlapping `remote_sync.sh` runs
 
-**Observed:** 2026-08-02 on the laptop, during a process inspection.  
+**Observed:** 2026-08-02 on the laptop, during a process inspection.
 **Status:** observation only; no processes were terminated and no behavior was changed.
 
 ## What was observed
