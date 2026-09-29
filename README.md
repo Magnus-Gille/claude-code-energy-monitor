@@ -104,6 +104,13 @@ energy-monitor rate <session-id> --unit review --thread claude:agent:<id> --outc
 Costs are API-equivalent list prices, not what was paid; unknown cost prints `n/a`. Once outcomes exist,
 `session` also shows cost per passed result per model. Details and limits: [docs/sessions.md](docs/sessions.md).
 
+## Fixed context overhead
+
+`energy-monitor overhead --refresh` reports the floor tokens of a session's first request, the sizes of
+instruction files, skills lists and skill bodies, and an API-equivalent estimate of re-reading that floor on
+every call. Only sizes, names, counts and token counts are stored, never content. Component tokens are
+character counts divided by 4 (an estimate). See [docs/overhead.md](docs/overhead.md).
+
 ## Install the history and Tokenatlas CLI
 
 Python 3.10 or newer is required. `pipx` keeps the command isolated from other Python tools:

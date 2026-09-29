@@ -66,6 +66,11 @@ def main(argv=None):
         else:
             sub.add_argument('--unit');sub.add_argument('--thread',action='append',default=[])
             sub.add_argument('--outcome',choices=sessions.OUTCOMES);sub.add_argument('--note',default='')
+    overhead=commands.add_parser('overhead',help='Fixed context overhead: floor tokens, instruction and skill sizes.')
+    overhead.add_argument('--refresh',action='store_true',help='Rescan the default session roots first.')
+    overhead.add_argument('--harness',choices=('claude','codex','pi','opencode'))
+    overhead.add_argument('--since',help='Inclusive ISO timestamp of the session start.')
+    overhead.add_argument('--json',action='store_true')
     commands.add_parser('doctor',help='Show source availability, import errors and known coverage limits.')
     args=parser.parse_args(argv)
     try:
@@ -83,6 +88,9 @@ def main(argv=None):
             if start and end and start>=end:raise ValueError('--start must precede --end')
             if args.html and args.html.expanduser().resolve()==args.db.expanduser().resolve():
                 raise ValueError('HTML output must not replace the history database')
+        if args.command=='overhead':
+            from usage import overhead as _overhead
+            return _overhead.run(args)
         if args.command not in ('refresh','import') and not args.db.expanduser().is_file():
             raise ValueError('history database does not exist; run refresh first')
         if args.command=='rate' and (args.unit or args.thread or args.outcome) and not (args.unit and args.thread and args.outcome):
