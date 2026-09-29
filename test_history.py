@@ -397,5 +397,64 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual([row['harness'] for row in h.records(session='pi:session')],['pi'])
             self.assertEqual({row['harness'] for row in h.records(session='session')},{'claude','pi'})
 
+class HistoryReviewTests(unittest.TestCase):
+    def test_normalize_rejects_non_string_metadata(self):
+        secret = {'prompt': 'SECRET'}
+        item = normalize(record(provider=secret, model=secret, effort=['SECRET'], agent=secret,
+                                entrypoint=secret, thread_kind=secret, session_id=secret,
+                                turn_id=secret, cwd=secret, parent_session_id=secret,
+                                harness_version=secret), 'm')
+        self.assertNotIn('SECRET', json.dumps(item))
+        self.assertEqual(normalize(record(harness_version=3), 'm')['harness_version'], '3')
+        self.assertEqual((item['model'], item['effort'], item['session']), (None, None, 'unknown'))
+        self.assertEqual(normalize(record(model='x' * 300), 'm')['model'], None)
+
+    def test_total_token_counters_survive_persistence(self):
+        item = normalize(record(raw_usage={'input_tokens': 1, 'output_tokens': 1,
+                                           'total_input_tokens': 7, 'total_output_tokens': 3}), 'm')
+        self.assertEqual(item['raw_usage']['total_input_tokens'], 7)
+        self.assertEqual(item['raw_usage']['total_output_tokens'], 3)
+
+    def test_copied_request_owner_is_earliest_then_stored_regardless_of_ids(self):
+        early = datetime(2026, 9, 3, 10, tzinfo=timezone.utc)
+        late = datetime(2026, 9, 3, 11, tzinfo=timezone.utc)
+        def obs(session, ts, parent=None):
+            return normalize(record(session_id=session, timestamp=ts, parent_session_id=parent), 'm')
+        for first, second in (('aaa', 'zzz'), ('zzz', 'aaa')):
+            with self.subTest(first=first):
+                self.assertEqual(merge_observations(obs(first, early), obs(second, early))['session'], first)
+                self.assertEqual(merge_observations(obs(first, early), obs(second, late))['session'], first)
+                self.assertEqual(merge_observations(obs(first, late), obs(second, early))['session'], second)
+        merged = merge_observations(obs('zzz', early, 'zzz'), obs('aaa', late, None))
+        self.assertEqual((merged['session'], merged['parent_session']), ('zzz', 'zzz'))
+
+    def test_hour_buckets_are_ordered_by_instant_across_dst_fall_back(self):
+        rows = [normalize(record(str(i), timestamp=ts, raw_usage={
+                    'input_tokens': 1, 'cache_read_input_tokens': 0,
+                    'cache_creation_input_tokens': 0, 'output_tokens': 1}), 'm')
+                for i, ts in enumerate((datetime(2026, 10, 25, 1, 30, tzinfo=timezone.utc),
+                                        datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc),
+                                        datetime(2026, 10, 25, 2, 30, tzinfo=timezone.utc)))]
+        for granularity in ('hour', 'minute'):
+            times = [b['time'] for b in summarize(rows, granularity, 'Europe/Stockholm')['buckets']]
+            self.assertEqual([t[11:16] + t[19:] for t in times],
+                             ['02:00+02:00', '02:00+01:00', '03:00+01:00'] if granularity == 'hour'
+                             else ['02:30+02:00', '02:30+01:00', '03:30+01:00'])
+
+    def test_all_unknown_field_reports_null_not_zero(self):
+        item = normalize(record(raw_usage={'input_tokens': 1, 'output_tokens': 1}), 'm')
+        totals = summarize([item])['totals']
+        self.assertIsNone(totals['known_token_fields']['cache_write'])
+        self.assertIsNone(totals['known_token_fields']['reasoning'])
+        self.assertEqual(totals['known_token_fields']['output'], 1)
+
+    def test_opencode_output_survives_absent_reasoning(self):
+        base = dict(harness='opencode', provider='test')
+        usage = {'input': 1, 'cache': {'read': 0, 'write': 0}, 'output': 4}
+        item = normalize(record(raw_usage=usage, **base), 'm')
+        self.assertEqual((item['tokens']['output'], item['tokens']['reasoning']), (4, None))
+        item = normalize(record(raw_usage=dict(usage, reasoning=3), **base), 'm')
+        self.assertEqual((item['tokens']['output'], item['tokens']['reasoning']), (7, 3))
+
 
 if __name__=='__main__':unittest.main()

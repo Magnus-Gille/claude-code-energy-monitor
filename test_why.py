@@ -285,5 +285,80 @@ class ClaudeAttributionTests(unittest.TestCase):
         self.assertEqual(parsed_winter.utcoffset(), timedelta(hours=1))
 
 
+class ClaudeMetadataReviewTests(unittest.TestCase):
+    def setUp(self):
+        self.start = datetime(2026, 9, 3, tzinfo=timezone.utc)
+        self.end = datetime(2026, 9, 4, tzinfo=timezone.utc)
+        self.usage = {"input_tokens": 1, "output_tokens": 2}
+
+    def collect(self, files):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, rows in files.items():
+                _write_jsonl(root / name, rows)
+            return why.collect_claude(root, self.start, self.end)
+
+    def test_non_string_or_oversized_metadata_is_never_persisted(self):
+        secret = {"prompt": "SECRET"}
+        row = _claude_row("2026-09-03T12:00:00Z", "req", self.usage, sessionId=secret,
+                          entrypoint=secret, effort=["SECRET"], cwd=secret, turnId=secret,
+                          attributionAgent=secret, agentId=secret, parentSessionId=secret)
+        row["message"]["model"] = secret
+        for hostile in (row, dict(row, entrypoint="x" * 300, effort="a\nb")):
+            records = self.collect({"project/hostile.jsonl": [hostile]})
+            self.assertEqual(len(records), 1)
+            record = records[0]
+            self.assertNotIn("SECRET", repr(record))
+            self.assertEqual((record.model, record.effort, record.entrypoint, record.agent), ("unknown",) * 3 + ("main",))
+            self.assertEqual(record.session_id, "hostile")
+            self.assertIsNone(record.cwd)
+            self.assertIsNone(record.parent_session_id)
+
+    def test_later_sparse_row_keeps_earlier_metadata(self):
+        full = _claude_row("2026-09-03T12:00:00Z", "req", {"input_tokens": 5, "output_tokens": 1},
+                           turnId="turn-1", version="1.2.3", attributionAgent="Explore")
+        sparse = {"type": "assistant", "timestamp": "2026-09-03T12:00:05Z", "requestId": "req",
+                  "message": {"usage": {"input_tokens": 5, "output_tokens": 9}}}
+        for rows in ([full, sparse], [sparse, full]):
+            record = self.collect({"project/session-main.jsonl": rows})[0]
+            self.assertEqual((record.model, record.effort, record.entrypoint), ("claude-test", "high", "cli"))
+            self.assertEqual((record.session_id, record.cwd, record.turn_id), ("session-main", "/work/project-one", "turn-1"))
+            self.assertEqual((record.agent, record.harness_version), ("Explore", "1.2.3"))
+            self.assertEqual(record.output, 9)
+            self.assertEqual(record.timestamp, datetime(2026, 9, 3, 12, 0, 5, tzinfo=timezone.utc))
+
+    def test_copied_request_session_owner_is_earliest_row_then_first_seen(self):
+        def files(first_ts, second_ts, first="aaa", second="zzz"):
+            return {"p/a.jsonl": [_claude_row(first_ts, "req", self.usage, sessionId=first)],
+                    "p/b.jsonl": [_claude_row(second_ts, "req", self.usage, sessionId=second)]}
+        early, late = "2026-09-03T12:00:00Z", "2026-09-03T12:00:09Z"
+        self.assertEqual(self.collect(files(early, late))[0].session_id, "aaa")
+        self.assertEqual(self.collect(files(late, early))[0].session_id, "zzz")
+        self.assertEqual(self.collect(files(early, early))[0].session_id, "aaa")
+        self.assertEqual(self.collect(files(early, early, "zzz", "aaa"))[0].session_id, "zzz")
+
+    def test_subagent_paths_link_to_parent_session(self):
+        row = _claude_row("2026-09-03T12:00:00Z", "req-1", self.usage, agentId="a1")
+        row.pop("sessionId")
+        journal = [{"type": "system", "timestamp": "2026-09-03T12:00:00Z", "message": {"content": "note"}}]
+        files = {
+            "proj/parent-uuid/subagents/agent-a1.jsonl": [row],
+            "proj/parent-uuid/subagents/workflows/wf_9/agent-a2.jsonl":
+                [dict(row, requestId="req-2", sessionId="parent-uuid")],
+            "proj/parent-uuid/subagents/workflows/wf_9/journal.jsonl": journal,
+            "proj/top-session.jsonl": [dict(row, requestId="req-3", agentId=None)],
+        }
+        records = {r.call_id: r for r in self.collect(files)}
+        self.assertEqual(sorted(records), ["req-1", "req-2", "req-3"])
+        for call_id in ("req-1", "req-2"):
+            self.assertEqual((records[call_id].session_id, records[call_id].parent_session_id,
+                              records[call_id].thread_kind), ("parent-uuid", "parent-uuid", "subagent"))
+        self.assertEqual((records["req-3"].session_id, records["req-3"].parent_session_id), ("top-session", None))
+
+    def test_explicit_parent_session_field_wins_over_path(self):
+        row = _claude_row("2026-09-03T12:00:00Z", "req", self.usage, agentId="a1", parentSessionId="explicit")
+        record = self.collect({"proj/dir-session/subagents/agent-a1.jsonl": [row]})[0]
+        self.assertEqual(record.parent_session_id, "explicit")
+
 if __name__ == "__main__":
     unittest.main()

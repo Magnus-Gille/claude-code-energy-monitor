@@ -65,7 +65,7 @@ class ReleaseArtifactTests(unittest.TestCase):
             command = environment / ("Scripts/energy-monitor.exe" if os.name == "nt" else "bin/energy-monitor")
             clean_env = dict(os.environ)
             clean_env.pop("PYTHONPATH", None)
-            run([python, "-m", "pip", "install", "--no-deps", built[0]], work, clean_env)
+            run([python, "-m", "pip", "install", built[0]], work, clean_env)
 
             version = run([command, "--version"], work, clean_env).stdout.strip()
             self.assertEqual(version, f"energy-monitor {__version__}")

@@ -101,5 +101,26 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(len(list(Path(tmp).iterdir())), 1)
 
 
+class ReportReviewTests(unittest.TestCase):
+    def test_lone_surrogate_renders_and_writes(self):
+        report = build_report([observation(project_id='/work/\ud800')], {}, redact=False)
+        html = render_report(report)
+        with tempfile.TemporaryDirectory() as tmp:
+            write_report(Path(tmp) / 'r.html', html)
+            self.assertTrue((Path(tmp) / 'r.html').is_file())
+
+    def test_redacted_report_only_shows_public_provider_and_model_names(self):
+        rows = [observation('a', provider='m5', model='qwen3-coder', origin='cli'),
+                observation('b', provider='inference-gille', model='gpt-oss-120b', origin='my-host-tui'),
+                observation('c', provider='anthropic', model='claude-opus-5-5'),
+                observation('d', provider='openai', model='gpt-5.6-luna', effort='xhigh')]
+        html = render_report(build_report(rows, {}))
+        for private in ('m5', 'inference-gille', 'qwen3-coder', 'gpt-oss-120b', 'my-host-tui'):
+            self.assertNotIn(private, html)
+        for public in ('anthropic', 'claude-opus-5-5', 'openai', 'gpt-5.6-luna', 'xhigh'):
+            self.assertIn(public, html)
+        private = render_report(build_report(rows, {}, redact=False))
+        self.assertIn('inference-gille', private)
+
 if __name__ == '__main__':
     unittest.main()

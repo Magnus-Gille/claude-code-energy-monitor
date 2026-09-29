@@ -10,6 +10,17 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from usage.history import ALL_FIELDS
 
+PUBLIC_NAMES = dict(
+    provider=frozenset('anthropic openai openai-codex openrouter opencode berget google mistral'.split()),
+    origin=frozenset(('cli', 'claude-desktop', 'sdk-cli', 'sdk-py', 'sdk-ts', 'codex-tui', 'codex_cli_rs',
+                      'codex_exec', 'Codex Desktop', 'codex_work_desktop', 'vscode')),
+    effort=frozenset('none minimal low medium high xhigh max ultra auto'.split()),
+    harness=frozenset('claude codex pi opencode'.split()),
+    thread_kind=frozenset('main subagent automation'.split()),
+    turn_confidence=frozenset('observed derived absent'.split()),
+)
+CONSERVATIVE_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._: -]{0,120}')
+
 
 def build_report(records, source_status, timezone_name='Europe/Stockholm', redact=True):
     zone = ZoneInfo(timezone_name)
@@ -30,16 +41,20 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
         if counts[label] > 1:
             seen[label] += 1
             labels[key] = f'{label} · {seen[label]}'
-    def metadata(kind, value):
-        if value is None:
-            return None
-        if redact and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._: -]{0,120}', str(value)):
-            return alias(kind, str(value))
-        return value
+    def metadata(kind, value, record=None):
+        if value is None or not redact:
+            return value
+        if kind == 'model':
+            public = record.get('provider') in PUBLIC_NAMES['provider'] and CONSERVATIVE_NAME.fullmatch(str(value))
+        elif record is None:
+            public = CONSERVATIVE_NAME.fullmatch(str(value))
+        else:
+            public = isinstance(value, str) and value in PUBLIC_NAMES[kind]
+        return value if public else alias(kind, str(value))
     rows = []
     for record in records:
         dt = datetime.fromisoformat(record['ts']).astimezone(zone)
-        row = {key: metadata(key, record.get(key)) for key in
+        row = {key: metadata(key, record.get(key), record) for key in
                ('harness', 'provider', 'model', 'effort', 'thread_kind', 'origin', 'turn_confidence')}
         for key, kind in (('id', 'Observation'), ('session', 'Session'),
                            ('parent_session', 'Session'), ('turn_id', 'Tur'), ('agent', 'Agent')):
@@ -80,7 +95,7 @@ def render_report(report, template=None):
         template = Path(__file__).with_name('report_template.html').read_text(encoding='utf-8')
     if template.count('__USAGE_DATA__') != 1:
         raise ValueError('report template must contain exactly one data placeholder')
-    payload = json.dumps(report, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+    payload = json.dumps(report, ensure_ascii=True, separators=(',', ':'), allow_nan=False)
     for char, escaped in (('&', '\\u0026'), ('<', '\\u003c'), ('>', '\\u003e'),
                           ('\u2028', '\\u2028'), ('\u2029', '\\u2029')):
         payload = payload.replace(char, escaped)

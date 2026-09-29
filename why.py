@@ -315,6 +315,14 @@ def _first_text(mapping: dict, *keys: str) -> str | None:
     return None
 
 
+def _meta_text(*values: object, default: str | None = None, limit: int = 256) -> str | None:
+    """First plain, bounded, printable string; anything else never reaches storage."""
+    for value in values:
+        if isinstance(value, str) and 0 < len(value) <= limit and value.isprintable():
+            return value
+    return default
+
+
 def _explicit_turn_id(row: dict, message: dict) -> str | None:
     return _first_text(
         row,
@@ -362,6 +370,13 @@ def collect_claude(
     calls: dict[str, dict] = {}
     for path in _paths_for(root, "*.jsonl", start, paths):
         is_subagent_path = "subagents" in path.parts
+        if is_subagent_path and path.name == "journal.jsonl":
+            continue
+        subagent_index = path.parts.index("subagents") if is_subagent_path else 0
+        path_session = _meta_text(path.parts[subagent_index - 1] if subagent_index else None) \
+            if is_subagent_path else None
+        fallback_session = path_session or _meta_text(path.stem, default="unknown")
+        fallback_project = _claude_project_fallback(path, root)
         last_user_turn: str | None = None
         for line_number, row in _read_json_lines(path, strict=strict):
             message = _mapping(row.get("message"))
@@ -369,7 +384,7 @@ def collect_claude(
             timestamp = parse_iso_timestamp(row.get("timestamp"))
             row_uuid = _first_text(row, "uuid", "id")
             if _is_genuine_user_row(row):
-                last_user_turn = row_uuid or _stable_hash({
+                last_user_turn = _meta_text(row_uuid) or _stable_hash({
                     "session": row.get("sessionId"),
                     "timestamp": row.get("timestamp"),
                     "line": line_number,
@@ -377,7 +392,7 @@ def collect_claude(
             if not isinstance(usage, dict) or timestamp is None:
                 continue
             request_id = _first_text(row, "requestId")
-            session_id = str(row.get("sessionId") or "unknown")
+            session_id = _meta_text(row.get("sessionId"), default=fallback_session)
             id_synthetic = False
             if not request_id:
                 request_id = _first_text(message, "id")
@@ -407,9 +422,13 @@ def collect_claude(
                 ),
                 "raw_usage": _sanitize_usage(usage) or {},
             }
+            parent_session_id = _meta_text(
+                row.get("parentSessionId"), row.get("parent_session_id"), path_session)
             existing = calls.get(key)
             if existing is None:
-                existing = {**values, "timestamp": timestamp}
+                existing = {**values, "timestamp": timestamp, "_first": timestamp,
+                            "session_id": session_id, "parent_session_id": parent_session_id,
+                            "_fallback": (fallback_project, _claude_project_id(path, root))}
                 calls[key] = existing
             else:
                 for token_field in ("fresh_input", "cache_read", "cache_write", "output", "reasoning"):
@@ -418,37 +437,37 @@ def collect_claude(
                     existing.get("raw_usage", {}), values["raw_usage"]
                 )
                 existing["timestamp"] = max(existing["timestamp"], timestamp)
+                # A copied request belongs to the session of its earliest row; equal
+                # timestamps keep the first one seen, independent of session ids.
+                if timestamp < existing["_first"]:
+                    existing.update(_first=timestamp, session_id=session_id,
+                                    parent_session_id=parent_session_id)
 
-            # Dimensions should be stable for a request; prefer the latest row
-            # when a streamed record becomes more complete.
-            if timestamp >= existing["timestamp"]:
-                agent_id = row.get("agentId")
-                explicit_turn = _explicit_turn_id(row, message)
-                parent_session_id = _first_text(
-                    row, "parentSessionId", "parent_session_id"
-                )
-                cwd_value = row.get("cwd") if isinstance(row.get("cwd"), str) else None
-                fallback_project = _claude_project_fallback(path, root)
-                derived_turn = None if is_subagent_path else last_user_turn
-                existing.update({
-                    "session_id": session_id,
-                    "model": str(message.get("model") or "unknown"),
-                    "effort": str(row.get("effort") or "unknown"),
-                    "project": _project_name(row.get("cwd"), fallback_project),
-                    "project_id": cwd_value or _claude_project_id(path, root),
-                    "cwd": cwd_value,
-                    "turn_id": explicit_turn or derived_turn,
-                    "turn_confidence": "observed" if explicit_turn else (
-                        "derived" if derived_turn else "absent"
-                    ),
-                    "parent_session_id": parent_session_id,
-                    "harness_version": _first_text(row, "version")
-                    or _first_text(message, "version"),
-                    "entrypoint": str(row.get("entrypoint") or "unknown"),
-                    "thread_kind": "subagent" if agent_id or is_subagent_path else "main",
-                    "agent": str(row.get("attributionAgent") or agent_id or "main"),
-                    "id_synthetic": id_synthetic,
-                })
+            # Merge dimensions per field: the latest valid value wins, but a sparse
+            # streaming row never erases what an earlier row established.
+            agent_id = row.get("agentId")
+            explicit_turn = _meta_text(_explicit_turn_id(row, message))
+            derived_turn = None if is_subagent_path else last_user_turn
+            cwd_value = _meta_text(row.get("cwd"), limit=4096)
+            turn = explicit_turn or derived_turn
+            latest = timestamp >= existing["timestamp"]
+            for name, value in {
+                "model": _meta_text(message.get("model")),
+                "effort": _meta_text(row.get("effort")),
+                "project": _project_name(cwd_value) if cwd_value else None,
+                "project_id": cwd_value,
+                "cwd": cwd_value,
+                "turn_id": turn,
+                "turn_confidence": None if turn is None else "observed" if explicit_turn else "derived",
+                "harness_version": _meta_text(row.get("version"), message.get("version")),
+                "entrypoint": _meta_text(row.get("entrypoint")),
+                "thread_kind": "subagent" if agent_id or is_subagent_path else None,
+                "agent": _meta_text(row.get("attributionAgent"), agent_id),
+            }.items():
+                if value is not None and (latest or existing.get(name) is None):
+                    existing[name] = value
+            if latest or "id_synthetic" not in existing:
+                existing["id_synthetic"] = id_synthetic
 
     records = []
     for call_id, values in calls.items():
@@ -460,6 +479,15 @@ def collect_claude(
         ) <= 0 and not _raw_usage_requires_record(values.get("raw_usage", {}),
             ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')):
             continue
+        fallback_project, fallback_id = values.pop("_fallback")
+        del values["_first"]
+        for name, default in (
+            ("model", "unknown"), ("effort", "unknown"), ("entrypoint", "unknown"),
+            ("agent", "main"), ("thread_kind", "main"), ("cwd", None), ("turn_id", None),
+            ("turn_confidence", "absent"), ("harness_version", None),
+            ("project", fallback_project), ("project_id", fallback_id),
+        ):
+            values.setdefault(name, default)
         records.append(
             AttributionRecord(
                 harness="claude", provider="anthropic", call_id=call_id, **values
@@ -471,13 +499,11 @@ def collect_claude(
 def _codex_thread(source: object, thread_source: object) -> tuple[str, str, str | None]:
     if isinstance(source, dict) and isinstance(source.get("subagent"), dict):
         subagent = source["subagent"]
-        spawn = subagent.get("thread_spawn") or {}
-        agent = spawn.get("agent_nickname") or spawn.get("agent_role")
-        if not agent and subagent.get("other"):
-            agent = subagent["other"]
-        parent = spawn.get("parent_thread_id")
-        return "subagent", str(agent or "subagent"), str(parent) if parent else None
-    source_name = str(thread_source or source or "main")
+        spawn = _mapping(subagent.get("thread_spawn"))
+        agent = _meta_text(spawn.get("agent_nickname"), spawn.get("agent_role"),
+                           subagent.get("other"), default="subagent")
+        return "subagent", agent, _meta_text(spawn.get("parent_thread_id"))
+    source_name = _meta_text(thread_source, source, default="main")
     if source_name in {"subagent", "automation"}:
         return source_name, source_name, None
     return "main", "main", None
@@ -522,13 +548,14 @@ def collect_codex(
             {},
         )
         session_id_value = _first_text(meta_payload, "id")
+        session_id_value = _meta_text(session_id_value)
         session_id = session_id_value or "unknown"
         has_session_meta = session_id_value is not None
-        provider = str(meta_payload.get("model_provider") or "openai")
+        provider = _meta_text(meta_payload.get("model_provider"), default="openai")
         originator = "unknown"
         source: object = meta_payload.get("source") or "unknown"
         thread_source: object = meta_payload.get("thread_source")
-        cwd: object = meta_payload.get("cwd")
+        cwd: object = _meta_text(meta_payload.get("cwd"), limit=4096)
         model = "unknown"
         effort = "unknown"
         current_turn_id: str | None = None
@@ -537,35 +564,25 @@ def collect_codex(
         last_total_signature = None
         counter_segment = 0
         harness_version = _first_text(meta_payload, "cli_version", "version")
-        originator = str(
-            meta_payload.get("originator")
-            or (source if isinstance(source, str) else None)
-            or thread_source
-            or originator
-        )
+        originator = _meta_text(meta_payload.get("originator"), source, thread_source, default=originator)
 
         for line_number, row in rows:
             payload = _mapping(row.get("payload"))
             row_type = row.get("type")
             if row_type == "session_meta":
-                session_id = str(payload.get("id") or session_id)
-                provider = str(payload.get("model_provider") or provider)
+                session_id = _meta_text(payload.get("id"), default=session_id)
+                provider = _meta_text(payload.get("model_provider"), default=provider)
                 source = payload.get("source") or source
                 thread_source = payload.get("thread_source") or thread_source
-                originator = str(
-                    payload.get("originator")
-                    or (source if isinstance(source, str) else None)
-                    or thread_source
-                    or originator
-                )
-                cwd = payload.get("cwd") or cwd
+                originator = _meta_text(payload.get("originator"), source, thread_source, default=originator)
+                cwd = _meta_text(payload.get("cwd"), default=cwd, limit=4096)
                 harness_version = _first_text(payload, "cli_version", "version") or harness_version
                 continue
             if row_type == "turn_context":
-                model = str(payload.get("model") or "unknown")
-                effort = str(payload.get("effort") or payload.get("reasoning_effort") or "unknown")
-                cwd = payload.get("cwd") or cwd
-                explicit_turn = _codex_event_turn_id(row, payload)
+                model = _meta_text(payload.get("model"), default="unknown")
+                effort = _meta_text(payload.get("effort"), payload.get("reasoning_effort"), default="unknown")
+                cwd = _meta_text(payload.get("cwd"), default=cwd, limit=4096)
+                explicit_turn = _meta_text(_codex_event_turn_id(row, payload))
                 current_turn_id = explicit_turn or pending_turn_id
                 turn_confidence = "observed" if explicit_turn else (
                     "derived" if pending_turn_id else "absent"
@@ -575,11 +592,11 @@ def collect_codex(
             if row_type != "event_msg" or payload.get("type") != "token_count":
                 event_type = payload.get("type")
                 if event_type == "task_started":
-                    current_turn_id = _codex_event_turn_id(row, payload)
+                    current_turn_id = _meta_text(_codex_event_turn_id(row, payload))
                     pending_turn_id = current_turn_id
                     turn_confidence = "derived" if current_turn_id else "absent"
                 elif event_type in {"user_message", "user_input", "message"}:
-                    current_turn_id = _codex_event_turn_id(row, payload) or _codex_user_event_identity(row, payload)
+                    current_turn_id = _meta_text(_codex_event_turn_id(row, payload), _codex_user_event_identity(row, payload))
                     pending_turn_id = current_turn_id
                     turn_confidence = "derived" if current_turn_id else "absent"
                 continue
@@ -698,10 +715,12 @@ def collect_pi(
     for path in _paths_for(root, "*.jsonl", start, paths):
         rows = list(_read_json_lines(path, strict=strict))
         session = next((row for _, row in rows if row.get("type") == "session"), {})
-        session_id = str(session.get("id") or path.stem)
+        session_id = _meta_text(session.get("id"), path.stem, default="unknown")
         session_started = parse_iso_timestamp(session.get("timestamp"))
-        cwd = session.get("cwd") if isinstance(session.get("cwd"), str) else None
-        harness_version = str(session.get("version")) if session.get("version") is not None else None
+        cwd = _meta_text(session.get("cwd"), limit=4096)
+        version = session.get("version")
+        harness_version = str(version) if isinstance(version, int) and not isinstance(version, bool) \
+            else _meta_text(version, limit=64)
         for _, row in rows:
             message = _mapping(row.get("message"))
             usage = message.get("usage")
@@ -711,7 +730,7 @@ def collect_pi(
             if timestamp is None:
                 continue
             raw_usage = _sanitize_usage(usage) or {}
-            provider = str(message.get("provider") or "unknown")
+            provider = _meta_text(message.get("provider"), default="unknown")
             response_id = _first_text(message, "responseId", "response_id")
             id_synthetic = response_id is None
             call_id = response_id or "synthetic:" + _stable_hash({
@@ -730,7 +749,7 @@ def collect_pi(
                 continue
             candidate = {
                 "timestamp": timestamp, "session_id": session_id, "call_id": call_id,
-                "model": str(message.get("model") or "unknown"), "effort": "unknown",
+                "model": _meta_text(message.get("model"), default="unknown"), "effort": "unknown",
                 "project": _project_name(cwd), "project_id": cwd or "unknown", "cwd": cwd,
                 "turn_id": None, "turn_confidence": "absent", "parent_session_id": None,
                 "harness_version": harness_version, "entrypoint": "unknown",
@@ -833,18 +852,17 @@ def collect_opencode(
         call_id = str(row["id"] or "synthetic:" + _stable_hash({
             "session": row["session_id"], "timestamp": timestamp.isoformat(), "usage": raw_usage,
         }))
-        cwd = _mapping(data.get("path")).get("cwd")
-        if not isinstance(cwd, str) or not cwd:
-            cwd = row["directory"] if isinstance(row["directory"], str) else None
-        parent = str(row["parent_id"]) if row["parent_id"] else None
-        turn_id = _first_text(data, "parentID", "parentId")
+        cwd = _meta_text(_mapping(data.get("path")).get("cwd"), row["directory"], limit=4096)
+        parent = _meta_text(row["parent_id"])
+        turn_id = _meta_text(_first_text(data, "parentID", "parentId"))
         records.append(AttributionRecord(
-            harness="opencode", provider=str(data.get("providerID") or "unknown"),
-            timestamp=timestamp, session_id=str(row["session_id"]), call_id=call_id,
-            model=str(data.get("modelID") or "unknown"), effort=str(data.get("variant") or "unknown"),
+            harness="opencode", provider=_meta_text(data.get("providerID"), default="unknown"),
+            timestamp=timestamp, session_id=_meta_text(row["session_id"], default="unknown"), call_id=call_id,
+            model=_meta_text(data.get("modelID"), default="unknown"),
+            effort=_meta_text(data.get("variant"), default="unknown"),
             project=_project_name(cwd), project_id=cwd or "unknown", cwd=cwd,
             entrypoint="unknown", thread_kind="subagent" if parent else "main",
-            agent=str(data.get("agent") or "unknown"), turn_id=turn_id,
+            agent=_meta_text(data.get("agent"), default="unknown"), turn_id=turn_id,
             turn_confidence="observed" if turn_id else "absent", parent_session_id=parent,
             harness_version=str(row["version"]) if row["version"] is not None else None,
             raw_usage=raw_usage, id_synthetic=not bool(row["id"]), **values,

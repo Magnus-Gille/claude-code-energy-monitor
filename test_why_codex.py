@@ -281,5 +281,26 @@ class CodexAttributionTests(unittest.TestCase):
         self.assertNotEqual(records[0].call_id, records[1].call_id)
 
 
+class CodexHostileMetadataTests(unittest.TestCase):
+    def test_non_string_metadata_is_never_persisted(self):
+        secret = {"prompt": "SECRET"}
+        meta = _meta(session_id=secret, source={"subagent": {"thread_spawn": {
+            "agent_nickname": secret, "parent_thread_id": secret}}}, originator=secret)
+        meta["payload"].update(model_provider=secret, cwd=secret)
+        counts = {"input_tokens": 10, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 2}
+        rows = [meta, {"timestamp": "2026-09-03T10:00:00Z", "type": "turn_context",
+                       "payload": {"model": secret, "effort": secret, "cwd": secret, "turn_id": secret}},
+                _tokens("2026-09-03T10:00:01Z", 1, counts, counts)]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-x.jsonl"
+            _write_rollout(path, rows)
+            records = why.collect_codex(Path(tmp), datetime(2026, 9, 3, tzinfo=timezone.utc),
+                                        datetime(2026, 9, 4, tzinfo=timezone.utc))
+        self.assertEqual(len(records), 1)
+        self.assertNotIn("SECRET", repr(records[0]))
+        record = records[0]
+        self.assertEqual((record.provider, record.model, record.effort, record.entrypoint),
+                         ("openai", "unknown", "unknown", "unknown"))
+
 if __name__ == "__main__":
     unittest.main()

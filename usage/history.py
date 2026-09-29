@@ -47,6 +47,7 @@ def clean_usage(raw):
     allowed = ('input_tokens', 'output_tokens', 'cache_read_input_tokens',
                'cache_creation_input_tokens', 'cached_input_tokens',
                'cache_write_input_tokens', 'reasoning_output_tokens', 'total_tokens',
+               'total_input_tokens', 'total_output_tokens',
                'input', 'output', 'reasoning', 'cacheRead', 'cacheWrite', 'totalTokens')
     result = {k: counter(raw[k]) for k in allowed if k in raw}
     for name, keys in (('cache_creation', ('ephemeral_5m_input_tokens', 'ephemeral_1h_input_tokens')),
@@ -106,9 +107,10 @@ def normalize(record, machine):
                       reasoning=raw.get('reasoning'))
     elif record.harness == 'opencode':
         output, reasoning = raw.get('output'), raw.get('reasoning')
+        if output is not None and reasoning is not None:
+            output += reasoning
         tokens = dict(fresh_input=raw.get('input'), cache_read=raw.get('cache', {}).get('read'),
-                      cache_write=raw.get('cache', {}).get('write'),
-                      output=output + reasoning if output is not None and reasoning is not None else None,
+                      cache_write=raw.get('cache', {}).get('write'), output=output,
                       reasoning=reasoning)
     else:
         raise ValueError(f'unsupported harness {record.harness}')
@@ -132,22 +134,28 @@ def normalize(record, machine):
            for i, a in enumerate(snapshots) for b in snapshots[i + 1:]):
         warnings.append('iteration_layout_changed')
     project_id = getattr(record, 'project_id', '') or None
+    text = why._meta_text
+    model, effort = text(record.model, default='unknown'), text(record.effort, default='unknown')
+    version = getattr(record, 'harness_version', None)
+    version = str(version) if isinstance(version, int) and not isinstance(version, bool) else text(version, limit=64)
     return {
         'v': VERSION, 'kind': 'usage_observation', 'id': record.call_id,
         'id_synthetic': getattr(record, 'id_synthetic', False),
         'ts': record.timestamp.astimezone(timezone.utc).isoformat(), 'machine': machine,
-        'harness': record.harness, 'provider': record.provider,
-        'harness_version': getattr(record, 'harness_version', None),
+        'harness': record.harness, 'provider': text(record.provider, default='unknown'),
+        'harness_version': version,
         'collector': f'why-history@{COLLECTOR_VERSION}',
         'source_type': {'claude':'transcript','codex':'rollout','pi':'session','opencode':'database'}[record.harness],
-        'session': record.session_id, 'parent_session': getattr(record, 'parent_session_id', None),
+        'session': text(record.session_id, default='unknown'),
+        'parent_session': text(getattr(record, 'parent_session_id', None)),
         'session_started_at': (getattr(record, 'session_started_at', None).astimezone(timezone.utc).isoformat()
                                if getattr(record, 'session_started_at', None) else None),
-        'thread_kind': record.thread_kind, 'agent': record.agent, 'origin': record.entrypoint,
-        'model': None if record.model == 'unknown' else record.model,
-        'effort': None if record.effort == 'unknown' else record.effort,
+        'thread_kind': text(record.thread_kind, default='unknown'),
+        'agent': text(record.agent, default='unknown'), 'origin': text(record.entrypoint, default='unknown'),
+        'model': None if model == 'unknown' else model, 'effort': None if effort == 'unknown' else effort,
         'project_id': project_id, 'project_label': record.project,
-        'cwd': getattr(record, 'cwd', None), 'turn_id': getattr(record, 'turn_id', None),
+        'cwd': text(getattr(record, 'cwd', None), limit=4096),
+        'turn_id': text(getattr(record, 'turn_id', None)),
         'turn_confidence': getattr(record, 'turn_confidence', 'absent'),
         'tokens': tokens, 'raw_usage': raw, 'duration_ms': None,
         'accounting_basis': 'request_top_level', 'billing_verified': False,
@@ -174,6 +182,10 @@ def merge_observations(a, b):
     for k, v in other.items():
         if result.get(k) in (None, '', 'unknown', 'absent') and v not in (None, '', 'unknown', 'absent'):
             result[k] = v
+    if result['harness'] == 'claude' and a['session'] != b['session']:
+        # The earliest copy owns a request; on equal time keep the stored one (a).
+        owner = b if b['ts'] < a['ts'] else a
+        result['session'], result['parent_session'] = owner['session'], owner['parent_session']
     raw = merge_usage(a['raw_usage'], b['raw_usage'])
     # Re-normalize coherent raw counters rather than merge derived fresh input.
     from types import SimpleNamespace
@@ -423,7 +435,8 @@ def summarize(records, granularity='day', timezone_name='UTC'):
                     ambiguous_identity_observations=len(ambiguous),
                     ambiguous_identity_tokens=sum(ambiguous_fields[k] for k in FIELDS),
                     ambiguous_identity_token_fields=ambiguous_fields,
-                    known_token_fields=known, missing_fields=missing, complete=complete)
+                    known_token_fields={k:known[k] if not rows or missing[k] < len(rows) else None for k in ALL_FIELDS},
+                    missing_fields=missing, complete=complete)
     buckets = {}
     for record in records:
         dt = datetime.fromisoformat(record['ts']).astimezone(zone)
@@ -434,6 +447,8 @@ def summarize(records, granularity='day', timezone_name='UTC'):
         else:
             label = dt.replace(second=0, microsecond=0).isoformat()
         buckets.setdefault(label,[]).append(record)
+    def instant(label):
+        return label if granularity == 'day' else datetime.fromisoformat(label).astimezone(timezone.utc).isoformat()
     groups = {}
     for key in ('harness','provider','origin','project_id','session','turn_id','model','effort','thread_kind'):
         entries = {}
@@ -445,5 +460,5 @@ def summarize(records, granularity='day', timezone_name='UTC'):
         groups[key] = [dict(name=name, **aggregate(rows)) for name, rows in sorted(
             entries.items(),key=lambda pair:(-aggregate(pair[1])['known_tokens'],pair[0]))]
     return dict(timezone=timezone_name, granularity=granularity, totals=aggregate(records),
-                buckets=[dict(time=label,**aggregate(rows)) for label,rows in sorted(buckets.items())],
+                buckets=[dict(time=label,**aggregate(rows)) for label,rows in sorted(buckets.items(),key=lambda pair:instant(pair[0]))],
                 groups=groups, coverage_complete=False, billing_verified=False)
