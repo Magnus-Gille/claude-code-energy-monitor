@@ -1,4 +1,5 @@
 """Session trees, outcome ratings and cost per passed result; local only, no network or LLM calls."""
+import errno
 import json
 import os
 import re
@@ -406,6 +407,15 @@ def render(result, eff, retrieved):
     return '\n'.join(lines)
 
 
+def _descriptor_problem(info):
+    """Why an opened outcomes file is not private (not a regular file, foreign owner, loose mode); else None."""
+    if not stat.S_ISREG(info.st_mode) or not _owned_by_current_user(info):
+        return 'must be a regular file owned by this user'
+    if not _has_private_permissions(info):
+        return 'permissions must be 0600'
+    return None
+
+
 def _outcomes_problem(path):
     """Why an outcomes file is not private (symlink, not a regular file, foreign owner, loose mode); else None."""
     try:
@@ -414,23 +424,31 @@ def _outcomes_problem(path):
         return None
     if stat.S_ISLNK(info.st_mode):
         return 'must not be a symlink'
-    if not stat.S_ISREG(info.st_mode) or not _owned_by_current_user(info):
-        return 'must be a regular file owned by this user'
-    if not _has_private_permissions(info):
-        return 'permissions must be 0600'
-    return None
+    return _descriptor_problem(info)
 
 
 def append_outcome(path, item):
     """Atomic single-write append; a new file is created 0600, an existing one must already be private."""
     data = (json.dumps(item, sort_keys=True) + '\n').encode()
+    flags = os.O_WRONLY | os.O_APPEND | getattr(os, 'O_CLOEXEC', 0)
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL, 0o600)
+        fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        problem = _outcomes_problem(path)
+        # Validate the descriptor we actually opened, not the path, so a swap cannot slip past the check.
+        try:
+            fd = os.open(path, flags | getattr(os, 'O_NOFOLLOW', 0))
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                raise ValueError('outcomes file must not be a symlink') from None
+            raise
+        try:
+            problem = _descriptor_problem(os.fstat(fd))
+        except BaseException:
+            os.close(fd)
+            raise
         if problem:
+            os.close(fd)
             raise ValueError(f'outcomes file {problem}') from None
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | getattr(os, 'O_NOFOLLOW', 0))
     try:
         os.write(fd, data)
     finally:

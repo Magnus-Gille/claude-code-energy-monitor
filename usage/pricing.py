@@ -133,20 +133,23 @@ def price_observation(obs, table):
             assumptions.append(_STANDARD_CLAUDE)
         elif speed != 'standard':
             return unpriced(f'unknown speed {speed}')
-        geo, tier = tariff.get('inference_geo'), tariff.get('service_tier')
+        geo = tariff.get('inference_geo')
         if geo == 'us':
             if 'multiplier' not in (modifiers.get('inference_geo=us') or {}):
                 return unpriced('inference_geo=us price missing')
             multiplier = modifiers['inference_geo=us']['multiplier']
         elif geo not in (None, 'not_available', 'global'):
             return unpriced(f'unknown inference_geo {geo}')
+    tariff = obs.get('tariff') or {}
+    if 'service_tier' in tariff:
+        tier = tariff['service_tier']
         if tier not in (None, 'standard'):
             if f'service_tier={tier}' not in modifiers:
                 return unpriced(f'unknown service_tier {tier}')
-            if speed == 'fast' or long_applies:
+            if (claude and tariff.get('speed') == 'fast') or long_applies:
                 return unpriced(f'service_tier {tier} with fast mode or long context is not priced')
             prices = {k: modifiers[f'service_tier={tier}'].get(k) for k in PRICE_KEYS}
-    else:
+    elif not claude:
         assumptions.append(_STANDARD_OTHER)
     if context_unknown:
         prices = dict.fromkeys(PRICE_KEYS)

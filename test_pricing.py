@@ -143,6 +143,27 @@ class PriceObservationTests(unittest.TestCase):
         r = self.price(obs(model='claude-tier', fresh=M, tariff={'speed': 'standard', 'service_tier': 'batch'}), table)
         self.assertAlmostEqual(r['cost'], 2.0)
 
+    def test_non_claude_service_tier_is_resolved_from_tariff(self):
+        flex = dict(GPT, model='gpt-flex', aliases=[], modifiers={'service_tier=flex': dict(input=1.0, cache_read=0.25, output=5.0)})
+        table = dict(TABLE, models=TABLE['models'] + [flex])
+        codex = dict(harness='codex', provider='openai', model='gpt-flex')
+        r = self.price(obs(**codex, fresh=100_000, out=100_000, tariff={'service_tier': 'standard'}), table)
+        self.assertEqual((r['status'], r['assumptions']), ('priced', []))
+        self.assertAlmostEqual(r['cost'], 1.2)
+        r = self.price(obs(**codex, fresh=100_000, out=100_000, tariff={'service_tier': None}), table)
+        self.assertEqual((r['status'], r['assumptions']), ('priced', []))
+        r = self.price(obs(**codex, fresh=100_000, out=100_000, tariff={'service_tier': 'flex'}), table)
+        self.assertEqual(r['status'], 'priced')
+        self.assertAlmostEqual(r['cost'], 0.6)  # 0.1M*1 + 0.1M*5
+        r = self.price(obs(**codex, fresh=M, tariff={'service_tier': 'batch'}), table)
+        self.assertEqual((r['status'], r['reason']), ('unpriced', 'unknown service_tier batch'))
+        r = self.price(obs(**codex, fresh=300_000, raw={'input_tokens': 300_000}, tariff={'service_tier': 'flex'}), table)
+        self.assertEqual(r['status'], 'unpriced')
+        self.assertIn('service_tier flex', r['reason'])
+        for tariff in (None, {}):
+            r = self.price(obs(**codex, fresh=100_000, out=100_000, tariff=tariff), table)
+            self.assertEqual((r['status'], r['assumptions']), ('assumed', ['service tier not recorded; priced as standard']))
+
     def test_unknown_model_local_provider_and_free_model(self):
         r = self.price(obs(model='claude-nope', fresh=5))
         self.assertEqual((r['status'], r['cost'], r['reason']), ('unpriced', None, 'no list price for anthropic/claude-nope'))

@@ -289,6 +289,29 @@ class OutcomeFileSafetyTests(unittest.TestCase):
             found = sessions.load_outcomes(self.path, 'S')
         self.assertEqual(len(found), 1); self.assertIn('0600', err.getvalue())
 
+    def test_validation_happens_on_the_opened_descriptor(self):
+        self.path.write_text(json.dumps(self.item) + '\n'); self.path.chmod(0o600)
+        real_fstat = os.fstat
+        loose = lambda fd: os.stat_result((stat.S_IFREG | 0o644,) + tuple(real_fstat(fd))[1:])
+        with patch('usage.sessions.os.lstat', side_effect=AssertionError('path-based check')), \
+                patch('usage.sessions.os.fstat', side_effect=loose):
+            with self.assertRaisesRegex(ValueError, '0600'):
+                sessions.append_outcome(self.path, self.item)
+        self.assertEqual(len(self.path.read_text().splitlines()), 1)
+
+    def test_file_swapped_after_a_path_check_is_still_refused(self):
+        target = Path(self.tmp.name) / 'target'; target.write_text('x\n'); target.chmod(0o600)
+        self.path.write_text(json.dumps(self.item) + '\n'); self.path.chmod(0o600)
+        real_open = os.open
+        def swapping_open(path, flags, *a):
+            if not flags & os.O_CREAT and not self.path.is_symlink():
+                self.path.unlink(); self.path.symlink_to(target)  # replaced just before the open
+            return real_open(path, flags, *a)
+        with patch('usage.sessions.os.open', side_effect=swapping_open):
+            with self.assertRaisesRegex(ValueError, 'symlink'):
+                sessions.append_outcome(self.path, self.item)
+        self.assertEqual(target.read_text(), 'x\n')
+
     def test_symlink_refused_for_append_but_warned_for_read(self):
         target = Path(self.tmp.name) / 'target.jsonl'
         target.write_text(json.dumps(self.item) + '\n'); target.chmod(0o600)

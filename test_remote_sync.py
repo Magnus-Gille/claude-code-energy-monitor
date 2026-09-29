@@ -11,7 +11,7 @@ STUB = '#!/bin/bash\necho "{name} $*" >> "$STUB_LOG"\n{body}\n'
 
 
 class RemoteSyncTest(unittest.TestCase):
-    def run_script(self, hosts, mv_fails_first=False):
+    def run_script(self, hosts, mv_fails_first=False, rm_fails=False):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -20,6 +20,7 @@ class RemoteSyncTest(unittest.TestCase):
         log = root / 'log'
         counter = root / 'mv_count'
         bodies = {'ssh': 'exit 0', 'rsync': 'exit 0', 'energy-monitor': 'exit 0', 'scp': 'touch "${@: -1}"',
+                  'rm': 'exit 1' if rm_fails else 'exit 0',
                   'mv': (f'if [ ! -e "{counter}" ]; then touch "{counter}"; exit 1; fi; exit 0'
                          if mv_fails_first else 'exit 0')}
         for name, body in bodies.items():
@@ -48,6 +49,13 @@ class RemoteSyncTest(unittest.TestCase):
         self.assertIn('Syncing energy data from b (h2)', proc.stdout)
         self.assertIn('history: OK', proc.stdout)
         self.assertIn('energy-monitor import', log)
+
+    def test_failing_rm_cleanup_does_not_stop_next_host(self):
+        proc, log = self.run_script('a:h1 b:h2', mv_fails_first=True, rm_fails=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('cannot store snapshot for a', proc.stderr)
+        self.assertIn('Syncing energy data from b (h2)', proc.stdout)
+        self.assertIn('history: OK', proc.stdout)
 
 
 if __name__ == '__main__':

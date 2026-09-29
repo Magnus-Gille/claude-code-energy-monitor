@@ -91,14 +91,14 @@ sync_history() {
         return 0
     fi
     if ! err=$(scp -q -- "$host:.local/state/agentmon/snapshot.sqlite3" "$remote_dir/$tag.sqlite3.part" 2>&1); then
-        rm -f "$remote_dir/$tag.sqlite3.part"
+        rm -f -- "$remote_dir/$tag.sqlite3.part" 2>/dev/null || true
         echo "  history: ERROR scp failed for $tag: $err" >&2
         return 0
     fi
     # Under set -e an unguarded failure here would abort the whole loop, not just this host.
     if ! err=$(chmod 600 "$remote_dir/$tag.sqlite3.part" 2>&1 &&
                mv -f "$remote_dir/$tag.sqlite3.part" "$remote_dir/$tag.sqlite3" 2>&1); then
-        rm -f "$remote_dir/$tag.sqlite3.part"
+        rm -f -- "$remote_dir/$tag.sqlite3.part" 2>/dev/null || true
         echo "  history: ERROR cannot store snapshot for $tag: $err" >&2
         return 0
     fi
