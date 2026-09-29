@@ -1,6 +1,6 @@
 # Fixed context overhead
 
-`energy-monitor overhead [--refresh] [--harness H] [--since ISO] [--json]` shows how much fixed context a
+`tokenatlas overhead [--refresh] [--harness H] [--since ISO] [--json]` shows how much fixed context a
 session carries: the system prompt, tool lists, instruction files (AGENTS.md/CLAUDE.md), the skills list, MCP
 instructions, and skill bodies when a skill is used. `--refresh` rescans the default session roots first.
 

@@ -1,6 +1,6 @@
 # Session trees and outcomes
 
-`energy-monitor session <id>` reads the saved history (no source logs, no network) and prints one
+`tokenatlas session <id>` reads the saved history (no source logs, no network) and prints one
 root session as a tree, with tokens and API-equivalent cost per node and per model.
 Costs are list-price equivalents, not what was paid. Unknown cost prints `n/a`, never 0; a `≥`
 marks a lower bound (unfinal Claude subagent output, incomplete rows, or unpriced observations).
@@ -35,7 +35,7 @@ Outcomes are `pass`, `partial`, `redo`, `wrong`. Legacy `v: 0` lines are read to
 without `outcome` skipped). Malformed lines are counted and reported, never fatal. If a unit is rated
 twice the last line wins.
 
-`energy-monitor rate <id>` lists the thread keys (`claude:agent:<id>`, `claude:workflow:<run>`,
+`tokenatlas rate <id>` lists the thread keys (`claude:agent:<id>`, `claude:workflow:<run>`,
 `<harness>:<session>`); `rate <id> --unit U --thread KEY [--thread KEY…] --outcome pass [--note T]`
 appends one line (mode 0600, single append) and prints it.
 

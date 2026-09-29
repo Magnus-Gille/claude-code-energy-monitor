@@ -9,9 +9,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
-from usage import __version__
+from tokenatlas import __version__
 
 
 ROOT = Path(__file__).resolve().parent
@@ -43,10 +44,10 @@ class ReleaseArtifactTests(unittest.TestCase):
             work = Path(tmp)
             source = work / "source"
             source.mkdir()
-            for name in ("pyproject.toml", "README.md", "LICENSE", "why.py"):
+            for name in ("pyproject.toml", "README.md", "LICENSE"):
                 shutil.copy2(ROOT / name, source / name)
             shutil.copytree(
-                ROOT / "usage", source / "usage",
+                ROOT / "tokenatlas", source / "tokenatlas",
                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
             )
 
@@ -58,17 +59,30 @@ class ReleaseArtifactTests(unittest.TestCase):
             ], work)
             built = list(wheels.glob("*.whl"))
             self.assertEqual(len(built), 1)
+            with zipfile.ZipFile(built[0]) as archive:
+                names = archive.namelist()
+                self.assertIn("tokenatlas/why.py", names)
+                self.assertIn("tokenatlas/report_template.html", names)
+                self.assertIn("tokenatlas/prices.json", names)
+                self.assertNotIn("why.py", names)
+                entry_points = archive.read(next(n for n in names if n.endswith("entry_points.txt"))).decode()
+            self.assertIn("tokenatlas = tokenatlas.__main__:main", entry_points)
+            self.assertIn("energy-monitor = tokenatlas.__main__:main", entry_points)
 
             environment = work / "venv"
             run([sys.executable, "-m", "venv", environment], work)
             python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-            command = environment / ("Scripts/energy-monitor.exe" if os.name == "nt" else "bin/energy-monitor")
+            command = environment / ("Scripts/tokenatlas.exe" if os.name == "nt" else "bin/tokenatlas")
+            alias = environment / ("Scripts/energy-monitor.exe" if os.name == "nt" else "bin/energy-monitor")
             clean_env = dict(os.environ)
             clean_env.pop("PYTHONPATH", None)
             run([python, "-m", "pip", "install", built[0]], work, clean_env)
 
             version = run([command, "--version"], work, clean_env).stdout.strip()
-            self.assertEqual(version, f"energy-monitor {__version__}")
+            self.assertEqual(version, f"tokenatlas {__version__}")
+            legacy = run([alias, "--version"], work, clean_env)
+            self.assertEqual(legacy.stdout.strip(), f"tokenatlas {__version__}")
+            self.assertEqual(legacy.stderr.strip(), "energy-monitor is deprecated; use tokenatlas")
 
             logs = work / "logs"
             logs.mkdir()
@@ -113,14 +127,14 @@ class ReleaseArtifactTests(unittest.TestCase):
                 python, "-m", "pip", "install", "--no-deps", "--force-reinstall", built[0],
             ], work, clean_env)
             self.assertEqual(run([command, "--version"], work, clean_env).returncode, 0)
-            run([python, "-m", "pip", "uninstall", "-y", "claude-code-energy-monitor"], work, clean_env)
+            run([python, "-m", "pip", "uninstall", "-y", "tokenatlas"], work, clean_env)
             probe = run([
-                python, "-c", "import importlib.util; print(importlib.util.find_spec('usage'))",
+                python, "-c", "import importlib.util; print(importlib.util.find_spec('tokenatlas'))",
             ], work, clean_env)
             self.assertEqual(probe.stdout.strip(), "None")
             self.assertTrue(database.is_file())
 
-            destination = os.environ.get("ENERGY_MONITOR_SMOKE_REPORT")
+            destination = os.environ.get("TOKENATLAS_SMOKE_REPORT")
             if destination:
                 shutil.copy2(report, destination)
 

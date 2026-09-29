@@ -12,8 +12,8 @@
 # <tag>_interactive_daily_rollup.jsonl so multiple machines don't overwrite each
 # other. advisor.py/stepcount.py merge all of them by globbing *_journal.jsonl /
 # *_daily_rollup.jsonl — no further code change needed to add a machine here.
-# When energy-monitor is installed on a remote it also snapshots its history DB, which is
-# copied to ~/.local/state/agentmon/remote/<tag>.sqlite3 and merged with `energy-monitor import`
+# When tokenatlas (or the deprecated energy-monitor) is installed on a remote it also snapshots its history DB, which is
+# copied to ~/.local/state/tokenatlas/remote/<tag>.sqlite3 and merged with `tokenatlas import`
 # (see docs/remote-machines.md). Hosts without it print "history: not installed on <tag>".
 # A remote with no headless scanner (or no interactive use) just reports "not found"
 # for the files it doesn't produce.
@@ -24,13 +24,13 @@
 # cron pulling only from the laptop:
 #   REMOTE_HOSTS_OVERRIDE="laptop:magnus-macbook-air" /path/to/remote_sync.sh
 #
-# ENERGY_MONITOR_DB (optional): if set and non-empty, the local import goes into that database
-# (`energy-monitor --db "$ENERGY_MONITOR_DB" import ...`) instead of the default one, e.g. to try
+# TOKENATLAS_DB (optional; ENERGY_MONITOR_DB is still honoured as a fallback): if set and non-empty,
+# the local import goes into that database (`tokenatlas --db "$TOKENATLAS_DB" import ...`) instead of the default one, e.g. to try
 # the sync without touching your real history.
 
 set -euo pipefail
 
-# Cron has a minimal PATH, and pipx/venv installs link energy-monitor into ~/.local/bin.
+# Cron has a minimal PATH, and pipx/venv installs link tokenatlas into ~/.local/bin.
 export PATH="$HOME/.local/bin:$PATH"
 
 DEST="$HOME/.claude"
@@ -76,29 +76,29 @@ pull() {
     fi
 }
 
-# Merge the remote machine's history database (energy-monitor snapshot -> scp -> local import).
+# Merge the remote machine's history database (tokenatlas snapshot -> scp -> local import).
 # Any failure is reported for this host only; the loop continues with the next one.
 sync_history() {
     local tag="$1" host="$2"
-    local state="$HOME/.local/state/agentmon" remote_dir
+    local state="$HOME/.local/state/tokenatlas" remote_dir
     remote_dir="$state/remote"
     # Non-interactive ssh has a minimal PATH too, so each remote call prepends ~/.local/bin.
     # Single quotes: the remote shell expands $HOME and ~, not this one.
-    if ! ssh -- "$host" 'PATH="$HOME/.local/bin:$PATH"; command -v energy-monitor' >/dev/null 2>&1; then
+    if ! ssh -- "$host" 'PATH="$HOME/.local/bin:$PATH"; command -v tokenatlas || command -v energy-monitor' >/dev/null 2>&1; then
         echo "  history: not installed on $tag"
         return 0
     fi
-    if ! command -v energy-monitor >/dev/null 2>&1; then
-        echo "  history: ERROR energy-monitor is not installed locally" >&2
+    if ! command -v tokenatlas >/dev/null 2>&1; then
+        echo "  history: ERROR tokenatlas is not installed locally" >&2
         return 0
     fi
     { mkdir -p "$remote_dir" && chmod 700 "$remote_dir"; } || { echo "  history: ERROR cannot create $remote_dir" >&2; return 0; }
     local err
-    if ! err=$(ssh -- "$host" 'PATH="$HOME/.local/bin:$PATH" energy-monitor snapshot ~/.local/state/agentmon/snapshot.sqlite3' 2>&1 >/dev/null); then
+    if ! err=$(ssh -- "$host" 'PATH="$HOME/.local/bin:$PATH"; c=$(command -v tokenatlas || command -v energy-monitor) && "$c" snapshot ~/.local/state/tokenatlas/snapshot.sqlite3' 2>&1 >/dev/null); then
         echo "  history: ERROR snapshot failed on $tag: $err" >&2
         return 0
     fi
-    if ! err=$(scp -q -- "$host:.local/state/agentmon/snapshot.sqlite3" "$remote_dir/$tag.sqlite3.part" 2>&1); then
+    if ! err=$(scp -q -- "$host:.local/state/tokenatlas/snapshot.sqlite3" "$remote_dir/$tag.sqlite3.part" 2>&1); then
         rm -f -- "$remote_dir/$tag.sqlite3.part" 2>/dev/null || true
         echo "  history: ERROR scp failed for $tag: $err" >&2
         return 0
@@ -111,8 +111,9 @@ sync_history() {
         return 0
     fi
     local db_args=()
-    [[ -n "${ENERGY_MONITOR_DB:-}" ]] && db_args=(--db "$ENERGY_MONITOR_DB")
-    if err=$(energy-monitor "${db_args[@]+"${db_args[@]}"}" import "$remote_dir/$tag.sqlite3" --label "$tag" 2>&1 >/dev/null); then
+    local db="${TOKENATLAS_DB:-${ENERGY_MONITOR_DB:-}}"
+    [[ -n "$db" ]] && db_args=(--db "$db")
+    if err=$(tokenatlas "${db_args[@]+"${db_args[@]}"}" import "$remote_dir/$tag.sqlite3" --label "$tag" 2>&1 >/dev/null); then
         echo "  history: OK"
     else
         echo "  history: ERROR import failed for $tag: $err" >&2

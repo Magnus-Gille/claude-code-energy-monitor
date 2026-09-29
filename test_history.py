@@ -11,8 +11,8 @@ from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
-from usage.history import History, _encode, _decode, _owned_by_current_user, normalize, summarize, merge_observations
-from why import AttributionRecord
+from tokenatlas.history import History, _encode, _decode, _owned_by_current_user, normalize, summarize, merge_observations
+from tokenatlas.why import AttributionRecord
 from test_why_harnesses import create_opencode_db, pi_message, write_pi_session
 
 
@@ -79,7 +79,7 @@ class HistoryTests(unittest.TestCase):
             self.assertTrue(_owned_by_current_user(type('Info',(),{'st_uid':123})()))
 
     def test_invalid_iteration_container_does_not_claim_completeness(self):
-        import why
+        from tokenatlas import why
         for invalid in ('bad', {'type':'message','output_tokens':999}):
             raw=why._sanitize_usage({'input_tokens':1,'output_tokens':2,
                 'cache_read_input_tokens':0,'cache_creation_input_tokens':0,'iterations':invalid})
@@ -146,14 +146,14 @@ class HistoryTests(unittest.TestCase):
             onerror(PermissionError('unreadable child directory'))
             return []
         with History(self.db) as h:
-            with patch('usage.history.os.walk', side_effect=denied_walk):
+            with patch('tokenatlas.history.os.walk', side_effect=denied_walk):
                 result=h.refresh('claude',source.parent)
             self.assertEqual(result['status'],'partial')
             self.assertEqual(result['read_errors'],1)
             self.assertIsNone(result['last_success'])
 
     def test_iteration_replay_does_not_invent_raw_snapshots(self):
-        from usage.history import merge_usage
+        from tokenatlas.history import merge_usage
         first={'iterations':[{'type':'message','input_tokens':10,'output_tokens':5}]}
         second={'iterations':[{'type':'message','input_tokens':5,'output_tokens':10}]}
         merged=merge_usage(first,second)
@@ -177,7 +177,7 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(h.records(),[])
 
     def test_invalid_iteration_entries_are_not_dropped_into_complete_totals(self):
-        import why
+        from tokenatlas import why
         raw=why._sanitize_usage({'input_tokens':1,'output_tokens':2,
             'cache_read_input_tokens':0,'cache_creation_input_tokens':0,'iterations':[None]})
         self.assertEqual(raw['iterations'],[{}])
@@ -194,7 +194,7 @@ class HistoryTests(unittest.TestCase):
     def test_concurrent_imports_lose_no_records(self):
         first=self.root/'one/a.jsonl';second=self.root/'two/b.jsonl'
         write_claude(first,'one');write_claude(second,'two')
-        command=[sys.executable,'-B','-m','usage','--db',str(self.db),'refresh','--harness','claude','--root']
+        command=[sys.executable,'-B','-m','tokenatlas','--db',str(self.db),'refresh','--harness','claude','--root']
         children=[subprocess.Popen(command+[str(p.parent)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) for p in (first,second)]
         results=[(p, p.communicate(timeout=30)) for p in children]
         for p, (out,err) in results:
@@ -205,7 +205,7 @@ class HistoryTests(unittest.TestCase):
     def test_refresh_failure_rolls_back_observations_and_checkpoint(self):
         source=self.root/'logs/a.jsonl';write_claude(source)
         with History(self.db) as h:
-            with patch('usage.history.normalize', side_effect=RuntimeError('injected normalization failure')):
+            with patch('tokenatlas.history.normalize', side_effect=RuntimeError('injected normalization failure')):
                 with self.assertRaisesRegex(RuntimeError,'injected'):
                     h.refresh('claude', source.parent)
             self.assertEqual(h.records(),[])
@@ -469,7 +469,7 @@ class HistoryReviewTests(unittest.TestCase):
         self.assertEqual(normalize(record(model='x' * 300), 'm')['model'], None)
 
     def test_iteration_model_and_type_are_bounded_printable_strings(self):
-        import why
+        from tokenatlas import why
         raw = {'input_tokens': 1, 'output_tokens': 1, 'iterations': [
             {'type': 'message', 'model': 'x' * 300}, {'type': {'p': 'SECRET'}, 'model': 'ok-model'}]}
         item = normalize(record(raw_usage=raw), 'm')
@@ -516,7 +516,7 @@ class HistoryReviewTests(unittest.TestCase):
         self.assertFalse(merged['output_final'])
 
     def test_collector_version_change_invalidates_file_fingerprints(self):
-        import usage.history as history
+        import tokenatlas.history as history
         self.assertGreaterEqual(history.COLLECTOR_VERSION, 5)
 
     def test_total_token_counters_survive_persistence(self):
@@ -604,7 +604,7 @@ class HistoryReviewTests(unittest.TestCase):
 
 def _v1_database(path, records, files):
     """Write a schema v1 database (JSON text observations, text-keyed sources) as the old code did."""
-    from usage.history import _key
+    from tokenatlas.history import _key
     connection = sqlite3.connect(str(path))
     for sql in (
         'CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',

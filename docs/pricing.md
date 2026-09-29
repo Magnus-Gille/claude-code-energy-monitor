@@ -34,7 +34,7 @@ A missing price or dimension is never defaulted or zeroed. Costs are summed per 
 
 ## Updating the table
 
-Edit `usage/prices.json` (schema 1, USD/EUR per million tokens). Give each model its `source_url` and
+Edit `tokenatlas/prices.json` (schema 1, USD/EUR per million tokens). Give each model its `source_url` and
 `retrieved_on`, and keep the top-level `retrieved_on` current. Run `python3 -m unittest test_pricing`; `load_prices`
 rejects negative prices and missing keys. History is never re-priced silently: costs are computed at report time
 from the table in use, and reports show that table's `retrieved_on`.

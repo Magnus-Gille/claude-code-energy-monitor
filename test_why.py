@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-import why
+from tokenatlas import why
 
 
 def _write_jsonl(path, rows):

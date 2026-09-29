@@ -1,0 +1,450 @@
+#!/usr/bin/env python3
+"""Regenerate the TokenAtlas product-page demo: synthetic logs, a report and screenshots.
+
+Usage: python3 scripts/demo.py OUTDIR [--seed N] [--no-screens] [--shared]
+
+Everything is fictional. Logs are written under a temporary HOME in the exact on-disk formats the collectors
+read (Claude Code, Codex, Pi, OpenCode), then the real `python3 -m tokenatlas` CLI runs against that HOME. No real
+user logs or state are read. Stdlib only; Playwright is used only for the PNGs (skipped with --no-screens).
+"""
+import argparse
+import html
+import json
+import os
+import random
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+PLAYWRIGHT_DEFAULT = '/Users/magnus/.npm/_npx/705bc6b22212b352/node_modules/playwright'
+PROJECTS = {'acme': '/Users/demo/code/acme-api', 'shop': '/Users/demo/code/webshop', 'docs': '/Users/demo/code/docs-site'}
+WORDS = ('lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore '
+         'magna aliqua enim ad minim veniam quis nostrud exercitation ullamco laboris nisi aliquip ex ea commodo '
+         'consequat duis aute irure in reprehenderit voluptate velit esse cillum fugiat nulla pariatur').split()
+ORCH = 'demo-orchestrated'
+
+
+def utc(day, hh, mm=0):
+    return datetime(2026, 9, day, hh, mm, tzinfo=timezone.utc)
+
+
+def iso(dt):
+    return dt.strftime('%Y-%m-%dT%H:%M:%S.') + f'{dt.microsecond // 1000:03d}Z'
+
+
+def lorem(rng, chars):
+    out, size = [], 0
+    while size < chars:
+        word = rng.choice(WORDS)
+        out.append(word)
+        size += len(word) + 1
+    return ' '.join(out)[:chars]
+
+
+def hexid(rng, n):
+    return ''.join(rng.choice('0123456789abcdef') for _ in range(n))
+
+
+def write_jsonl(path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+
+
+# ----- Claude Code -----------------------------------------------------------------------------------------
+
+def attachments(rng, t, sid, cwd, common, main=True):
+    def att(kind, **fields):
+        return {'type': 'attachment', 'timestamp': iso(t), 'uuid': hexid(rng, 12), 'sessionId': sid, 'cwd': cwd,
+                'attachment': {'type': kind, **fields}, **common}
+    rows = [att('prompt_snapshot', systemPrompt=lorem(rng, rng.randint(24000, 30000)))]
+    rows.append(att('instructions', files=[
+        {'path': f'{cwd}/CLAUDE.md', 'content': lorem(rng, rng.randint(2500, 6000))},
+        {'path': '/Users/demo/.claude/CLAUDE.md', 'content': lorem(rng, rng.randint(1500, 3500))}]))
+    if main:
+        count = rng.randint(14, 32)
+        rows.append(att('skill_listing', skillCount=count, content=lorem(rng, count * rng.randint(220, 300))))
+        rows.append(att('mcp_instructions_delta', addedNames=['github', 'playwright'],
+                        addedBlocks=[lorem(rng, rng.randint(1500, 3000)), lorem(rng, rng.randint(1200, 2500))]))
+        rows.append(att('deferred_tools_delta', addedNames=[f'tool_{i}' for i in range(12)],
+                        addedLines=[lorem(rng, 90) for _ in range(12)]))
+    return rows
+
+
+def claude_thread(rng, t0, n, model, effort, sid, cwd, *, floor, gap, out_range=(180, 2200), entrypoint='cli',
+                  agent=None, main=True, skill=None, prompt_every=7):
+    """One Claude transcript: attachment rows, then n streamed assistant calls with a growing cached context."""
+    common = {'entrypoint': entrypoint, 'version': '2.3.0', 'isSidechain': agent is not None}
+    if agent:
+        common.update(agentId=agent[0], attributionAgent=agent[1])
+    rows = attachments(rng, t0, sid, cwd, common, main)
+    t, ctx = t0 + timedelta(seconds=1), 0
+    pending = skill
+    for i in range(n):
+        t += timedelta(seconds=rng.randint(*gap))
+        if i % prompt_every == 0 and not agent:
+            rows.append({'type': 'user', 'timestamp': iso(t), 'uuid': hexid(rng, 12), 'sessionId': sid, 'cwd': cwd,
+                         'message': {'role': 'user', 'content': f'Demo prompt {i // prompt_every + 1}: ' + lorem(rng, 80)},
+                         **common})
+            t += timedelta(seconds=2)
+        delta = floor if i == 0 else rng.randint(400, 7000) if rng.random() > .2 else rng.randint(9000, 16000)
+        read, ctx = ctx, ctx + delta
+        out = rng.randint(*out_range)
+        split = ({'ephemeral_5m_input_tokens': 0, 'ephemeral_1h_input_tokens': delta} if i == 0
+                 else {'ephemeral_5m_input_tokens': delta, 'ephemeral_1h_input_tokens': 0})
+        usage = {'input_tokens': rng.randint(1, 6), 'cache_creation_input_tokens': delta, 'cache_read_input_tokens': read,
+                 'output_tokens': out, 'cache_creation': split, 'service_tier': 'standard', 'speed': 'standard'}
+        content = [{'type': 'text', 'text': lorem(rng, 60)}]
+        if pending and i == 3:
+            content.append({'type': 'tool_use', 'id': 'toolu_' + hexid(rng, 10), 'name': 'Skill', 'input': {'skill': pending}})
+        rows.append({'type': 'assistant', 'timestamp': iso(t), 'requestId': 'req_' + hexid(rng, 14), 'uuid': hexid(rng, 12),
+                     'sessionId': sid, 'cwd': cwd, 'effort': effort, **common,
+                     'message': {'id': 'msg_' + hexid(rng, 14), 'role': 'assistant', 'model': model,
+                                 'stop_reason': 'tool_use' if i < n - 1 and rng.random() > .25 else 'end_turn',
+                                 'usage': usage, 'content': content}})
+        if pending and i == 3:
+            tool_id = content[-1]['id']
+            rows.append({'type': 'user', 'isMeta': True, 'sourceToolUseID': tool_id, 'timestamp': iso(t + timedelta(seconds=1)),
+                         'uuid': hexid(rng, 12), 'sessionId': sid, 'cwd': cwd,
+                         'message': {'role': 'user', 'content': '---\nname: ' + pending + '\n---\n' + lorem(rng, rng.randint(4000, 7000))},
+                         **common})
+            pending = None
+        ctx += out
+    return rows, t
+
+
+def subagent_path(base, sid, agent_id, wf=None):
+    return base / sid / 'subagents' / (f'workflows/{wf}/' if wf else '') / f'agent-{agent_id}.jsonl'
+
+
+def claude_session(w, rng, key, sid, t0, n, model, subs=(), skill=None, gap=(40, 200)):
+    """A main session plus subagents; subs are (offset_min, agent type, n_calls, workflow run or None)."""
+    cwd = PROJECTS[key]
+    base = w['claude'] / cwd.replace('/', '-')
+    effort = 'high' if 'opus' in model else 'medium'
+    rows, end = claude_thread(rng, t0, n, model, effort, sid, cwd, floor=rng.randint(21000, 27000), gap=gap, skill=skill)
+    write_jsonl(base / f'{sid}.jsonl', rows)
+    ids = []
+    for offset, kind, calls, wf in subs:
+        agent_id = 'a' + hexid(rng, 16)
+        sub_rows, sub_end = claude_thread(rng, t0 + timedelta(minutes=offset), calls, 'claude-sonnet-5-5', 'medium', sid, cwd,
+                                          floor=rng.randint(9000, 14000), gap=(12, 45), agent=(agent_id, kind), main=False,
+                                          out_range=(300, 3200))
+        write_jsonl(subagent_path(base, sid, agent_id, wf), sub_rows)
+        ids.append((agent_id, kind))
+        end = max(end, sub_end)
+    return ids, end
+
+
+# ----- Codex -----------------------------------------------------------------------------------------------
+
+SKILL_BODY = '---\nname: {name}\ndescription: demo skill\n---\n# {name}\n{text}'
+
+
+def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, skill=None, gap=(30, 150)):
+    cwd = PROJECTS[key]
+    exec_run = kind == 'exec'
+    source = ({'subagent': {'thread_spawn': {'parent_thread_id': parent, 'agent_nickname': kind, 'agent_role': 'worker'}}}
+              if parent else 'exec' if exec_run else 'cli')
+    stamp = t0.strftime('%Y-%m-%dT%H-%M-%S')
+    path = w['codex'] / t0.strftime('%Y/%m/%d') / f'rollout-{stamp}-{sid}.jsonl'
+    t = t0
+    def row(ts, typ, payload, **extra):
+        return {'timestamp': iso(ts), 'type': typ, 'payload': payload, **extra}
+    rows = [row(t, 'session_meta', {'id': sid, 'timestamp': iso(t), 'cwd': cwd, 'model_provider': 'openai', 'source': source,
+                                    'originator': 'codex_exec' if exec_run else 'codex-tui', 'cli_version': '0.9.2',
+                                    'base_instructions': {'text': lorem(rng, rng.randint(22000, 30000))}})]
+    rows.append(row(t, 'response_item', {'type': 'message', 'role': 'developer', 'content': [
+        {'type': 'input_text', 'text': '<permissions>' + lorem(rng, 600) + '</permissions>\n<skills_instructions>'
+         + lorem(rng, rng.randint(5000, 9000)) + '</skills_instructions>'}]}))
+    rows.append(row(t, 'response_item', {'type': 'message', 'role': 'user', 'content': [
+        {'type': 'input_text', 'text': '<INSTRUCTIONS>' + lorem(rng, rng.randint(3000, 6000)) + '</INSTRUCTIONS>\n<environment_context>'
+         + lorem(rng, 300) + '</environment_context>'}]}))
+    total, ctx, ordinal = dict.fromkeys(('input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens'), 0), 0, 0
+    for i in range(n):
+        t += timedelta(seconds=rng.randint(*gap))
+        model = models[min(i * len(models) // n, len(models) - 1)]
+        if i % 6 == 0:
+            rows.append(row(t, 'event_msg', {'type': 'task_started', 'turn_id': f'turn-{sid}-{i // 6}'}))
+            rows.append(row(t, 'event_msg', {'type': 'user_message', 'message': f'Demo prompt {i // 6 + 1}: ' + lorem(rng, 70)}))
+        rows.append(row(t, 'turn_context', {'model': model, 'effort': rng.choice(('medium', 'high')), 'cwd': cwd}))
+        if skill and i == 2:
+            call = 'call_' + hexid(rng, 8)
+            rows.append(row(t, 'response_item', {'type': 'custom_tool_call', 'name': 'exec', 'call_id': call,
+                                                 'input': f'cat /Users/demo/.codex/skills/{skill}/SKILL.md'}))
+            rows.append(row(t, 'response_item', {'type': 'custom_tool_call_output', 'call_id': call,
+                                                 'output': SKILL_BODY.format(name=skill, text=lorem(rng, rng.randint(3000, 5000)))}))
+        delta = rng.randint(12500, 16000) if i == 0 else rng.randint(300, 6000) if rng.random() > .2 else rng.randint(8000, 15000)
+        prev, ctx = ctx, ctx + delta
+        out = rng.randint(250, 2400)
+        last = {'input_tokens': ctx, 'cached_input_tokens': prev, 'cache_write_input_tokens': 0, 'output_tokens': out,
+                'reasoning_output_tokens': int(out * rng.uniform(.25, .6)), 'total_tokens': ctx + out}
+        for name in total:
+            total[name] += last[name]
+        total_tokens = total['input_tokens'] + total['output_tokens']
+        ordinal += 1
+        rows.append(row(t, 'event_msg', {'type': 'token_count', 'info': {'last_token_usage': last,
+                        'total_token_usage': {**total, 'total_tokens': total_tokens}}}, ordinal=ordinal))
+        ctx += out
+    write_jsonl(path, rows)
+    return t
+
+
+# ----- Pi and OpenCode -------------------------------------------------------------------------------------
+
+def pi_session(w, rng, sid, key, t0, n, provider, model):
+    cwd = PROJECTS[key]
+    rows = [{'type': 'session', 'version': 3, 'id': sid, 'timestamp': iso(t0), 'cwd': cwd}]
+    t, ctx = t0, 0
+    for i in range(n):
+        t += timedelta(seconds=rng.randint(30, 160))
+        delta = rng.randint(9000, 13000) if i == 0 else rng.randint(300, 5000)
+        read, ctx = (0, ctx + delta) if i == 0 else (ctx, ctx + delta)
+        out = rng.randint(200, 1800)
+        usage = {'input': delta if i == 0 else rng.randint(20, 300), 'cacheRead': read, 'cacheWrite': 0 if i == 0 else delta,
+                 'output': out, 'reasoning': int(out * .3)}
+        usage['totalTokens'] = sum(usage[k] for k in ('input', 'cacheRead', 'cacheWrite', 'output'))
+        rows.append({'type': 'message', 'id': f'{sid}-{i}', 'timestamp': iso(t),
+                     'message': {'role': 'assistant', 'provider': provider, 'model': model, 'responseId': f'resp_{sid}_{i}',
+                                 'usage': usage, 'content': lorem(rng, 60)}})
+        ctx += out
+    write_jsonl(w['pi'] / f'{t0:%Y-%m-%dT%H-%M-%S}_{sid}.jsonl', rows)
+
+
+def opencode_db(path, rng):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    con.executescript("""
+        CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT, directory TEXT NOT NULL,
+            version TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+        CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER,
+            time_updated INTEGER, data TEXT);""")
+    specs = [('oc-webshop-1', None, 'shop', utc(9, 8, 5), 14, 'openai', 'gpt-5.6-terra', 'build'),
+             ('oc-webshop-1-explore', 'oc-webshop-1', 'shop', utc(9, 8, 20), 8, 'openai', 'gpt-5.6-terra', 'explore'),
+             ('oc-docs-1', None, 'docs', utc(19, 11, 30), 10, 'opencode', 'big-pickle', 'build')]
+    for sid, parent, key, t0, n, provider, model, agent in specs:
+        cwd = PROJECTS[key]
+        ms0 = int(t0.timestamp() * 1000)
+        con.execute('INSERT INTO session VALUES (?,?,?,?,?,?,?)', (sid, 'demo-project-' + key, parent, cwd, '1.18.32', ms0, ms0 + n * 90000))
+        ctx = 0
+        for i in range(n):
+            created = ms0 + (i + 1) * rng.randint(40000, 110000)
+            delta = rng.randint(11000, 15000) if i == 0 else rng.randint(300, 4500)
+            read, ctx = ctx, ctx + delta
+            out = rng.randint(200, 1600)
+            tokens = {'input': delta if i == 0 else rng.randint(10, 200), 'output': out, 'reasoning': int(out * .25),
+                      'cache': {'read': read, 'write': 0 if i == 0 else delta}}
+            tokens['total'] = tokens['input'] + tokens['output'] + tokens['reasoning'] + read + tokens['cache']['write']
+            data = {'role': 'assistant', 'providerID': provider, 'modelID': model, 'agent': agent, 'variant': 'high',
+                    'time': {'created': created, 'completed': created + 4000}, 'path': {'cwd': cwd, 'root': cwd}, 'tokens': tokens}
+            con.execute('INSERT INTO message VALUES (?,?,?,?,?)', (f'{sid}-m{i}', sid, created, created + 4000, json.dumps(data)))
+            ctx += out
+        if sid == 'oc-webshop-1':
+            skill = {'type': 'tool', 'tool': 'skill', 'state': {'input': {'name': 'brainstorming'}, 'output': lorem(rng, 2600)}}
+            con.execute('INSERT INTO part VALUES (?,?,?,?,?,?)', (f'{sid}-p1', f'{sid}-m2', sid, ms0 + 200000, ms0 + 200000, json.dumps(skill)))
+    con.commit()
+    con.close()
+
+
+# ----- Build the synthetic HOME ----------------------------------------------------------------------------
+
+def build_home(home, seed):
+    rng = random.Random(seed)
+    w = {'claude': home / '.claude/projects', 'codex': home / '.codex/sessions', 'pi': home / '.pi/agent/sessions'}
+    sonnet, opus = 'claude-sonnet-5-5', 'claude-opus-5-5'
+    S = lambda offset, kind, calls, wf=None: (offset, kind, calls, wf)  # noqa: E731
+    claude = [
+        ('demo-acme-01', 'acme', utc(2, 7, 15), 55, sonnet, [], None),
+        ('demo-acme-02', 'acme', utc(8, 6, 40), 70, opus, [S(20, 'Explore', 16)], 'brainstorming'),
+        ('demo-acme-04', 'acme', utc(29, 8, 0), 38, sonnet, [], None),
+        ('demo-shop-01', 'shop', utc(3, 12, 30), 62, opus, [S(30, 'implementer', 22)], None),
+        ('demo-shop-02', 'shop', utc(10, 7, 0), 48, sonnet, [S(10, 'Explore', 12), S(25, 'implementer', 20)], None),
+        ('demo-shop-03', 'shop', utc(16, 13, 10), 80, opus, [S(30, 'researcher', 14, 'wf_2f81c'), S(31, 'researcher', 13, 'wf_2f81c'),
+                                                             S(60, 'implementer', 24)], 'writing-plans'),
+        ('demo-shop-04', 'shop', utc(23, 6, 30), 40, sonnet, [], None),
+        ('demo-docs-01', 'docs', utc(4, 9, 0), 30, sonnet, [], None),
+        ('demo-docs-02', 'docs', utc(15, 8, 20), 36, sonnet, [S(8, 'Explore', 10)], None),
+        ('demo-docs-03', 'docs', utc(21, 12, 0), 44, opus, [S(15, 'implementer', 18)], None),
+        ('demo-docs-04', 'docs', utc(28, 7, 30), 28, sonnet, [], None),
+    ]
+    for sid, key, t0, n, model, subs, skill in claude:
+        claude_session(w, rng, key, sid, t0, n, model, subs, skill)
+    # The showcase session: an opus conductor, three implementers, one Explore and an inferred headless Codex child.
+    t0 = utc(24, 9, 5)
+    subs = [(4, 'Explore', 14, None), (14, 'implementer', 26, None), (16, 'implementer', 30, None), (48, 'implementer', 34, None)]
+    ids, _ = claude_session(w, rng, 'acme', ORCH, t0, 44, opus, subs, 'brainstorming', gap=(60, 220))
+    codex_rollout(w, rng, 'codex-orch-review', 'acme', t0 + timedelta(minutes=76), 22, ['gpt-6-sol'], kind='exec')
+    # Other Codex rollouts, kept clear of the showcase window and cwd so only the review is inferred.
+    luna, sol = 'gpt-5.6-luna', 'gpt-6-sol'
+    codex = [('cx-acme-01', 'acme', utc(1, 8, 10), 40, [luna], 'tui', None, None),
+             ('cx-shop-01', 'shop', utc(2, 9, 20), 55, [luna], 'tui', None, 'pdf'),
+             ('cx-docs-01', 'docs', utc(7, 12, 0), 30, [luna], 'tui', None, None),
+             ('cx-acme-02', 'acme', utc(9, 7, 30), 45, [sol], 'tui', None, None),
+             ('cx-acme-02-worker', 'acme', utc(9, 7, 50), 14, [luna], 'Ada', 'cx-acme-02', None),
+             ('cx-shop-02', 'shop', utc(11, 13, 0), 60, [luna], 'tui', None, None),
+             ('cx-docs-02', 'docs', utc(14, 6, 50), 32, [luna], 'tui', None, None),
+             ('cx-acme-03', 'acme', utc(17, 10, 40), 50, [sol], 'tui', None, None),
+             ('cx-acme-03-worker', 'acme', utc(17, 11, 5), 16, [luna], 'Grace', 'cx-acme-03', None),
+             ('cx-shop-03', 'shop', utc(18, 8, 0), 42, [luna], 'tui', None, None),
+             ('cx-docs-03', 'docs', utc(22, 9, 30), 34, [sol, luna], 'tui', None, None),
+             ('cx-acme-ci', 'acme', utc(25, 6, 0), 12, [luna], 'exec', None, None),
+             ('cx-shop-ci', 'shop', utc(25, 11, 0), 14, [luna], 'exec', None, None),
+             ('cx-docs-ci', 'docs', utc(29, 6, 20), 10, [luna], 'exec', None, None)]
+    for sid, key, t0_, n, models, kind, parent, skill in codex:
+        codex_rollout(w, rng, sid, key, t0_, n, models, kind=kind, parent=parent, skill=skill)
+    pi_session(w, rng, 'pi-acme-01', 'acme', utc(5, 8, 30), 26, 'openai-codex', luna)
+    pi_session(w, rng, 'pi-shop-01', 'shop', utc(12, 9, 10), 32, 'openrouter', 'qwen/qwen3-coder')
+    pi_session(w, rng, 'pi-docs-01', 'docs', utc(18, 7, 45), 20, 'openrouter', 'z-ai/glm-5.3')
+    pi_session(w, rng, 'pi-shop-02', 'shop', utc(26, 10, 0), 28, 'openai-codex', luna)
+    opencode_db(home / '.local/share/opencode/opencode.db', rng)
+    return ids
+
+
+def outcomes(path, agent_ids):
+    (explore,), impl = [i for i, k in agent_ids if k == 'Explore'], [i for i, k in agent_ids if k == 'implementer']
+    ag = lambda i: {'harness': 'claude', 'agent_id': i}  # noqa: E731
+    units = [('map-endpoints', [ag(explore), ag(impl[0])], 'pass', 'Endpoint inventory and first handler port'),
+             ('migrate-schema', [ag(impl[1])], 'pass', 'Migration applied and tests green'),
+             ('rewrite-auth-tests', [ag(impl[2])], 'partial', 'Two flaky cases left'),
+             ('cross-model-review', [{'harness': 'codex', 'session': 'codex-orch-review'}], 'pass', 'Review found no blockers')]
+    lines = [{'v': 1, 'root_session': ORCH, 'unit': u, 'threads': t, 'outcome': o, 'note': n, 'ts': '2026-09-24T12:30:00Z'}
+             for u, t, o, n in units]
+    path.write_text(''.join(json.dumps(x, sort_keys=True) + '\n' for x in lines))
+    path.chmod(0o600)
+
+
+# ----- Run the CLI -----------------------------------------------------------------------------------------
+
+def cli(env, db, *args):
+    proc = subprocess.run([sys.executable, '-m', 'tokenatlas', '--db', str(db), *args], cwd=ROOT, env=env,
+                          capture_output=True, text=True)
+    if proc.returncode:
+        raise SystemExit(f'tokenatlas {" ".join(args)} failed ({proc.returncode}):\n{proc.stderr}{proc.stdout}')
+    return proc.stdout
+
+
+def terminal_html(title, text):
+    return f"""<!doctype html><meta charset="utf-8"><style>
+html{{background:#0b1020}}html,body{{margin:0;background:#0b1020;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}}
+body{{padding:28px;width:1144px;min-height:644px;display:flex;flex-direction:column;justify-content:center}}
+.win{{background:#11172b;border:1px solid #2a3350;border-radius:12px;overflow:hidden;box-shadow:0 12px 40px #0008}}
+.bar{{display:flex;gap:8px;align-items:center;padding:11px 14px;background:#1a2138;border-bottom:1px solid #2a3350;color:#8e9ac0;font-size:12px}}
+.dot{{width:12px;height:12px;border-radius:50%}}
+pre{{margin:0;padding:16px 18px;color:#d5dcf2;font-size:11.5px;line-height:1.5;white-space:pre}}
+</style><div class="win" id="win"><div class="bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span style="margin-left:10px">{html.escape(title)}</span></div>
+<pre>{html.escape(text)}</pre></div>"""
+
+
+def trim_session(text):
+    """Cost caveat, tree, per-model table and efficiency; drops the coordination line."""
+    lines = text.split('\n')
+    keep = lines[2:]
+    out, skip = [], False
+    for l in keep:
+        if l.startswith('Coordination'):
+            skip = True
+        elif skip and l.startswith(('Unassigned', 'Efficiency')):
+            skip = False
+        if not skip:
+            out.append(l)
+    return '$ tokenatlas session ' + ORCH + '\n' + lines[0] + '\n' + '\n'.join(out).rstrip()
+
+
+def trim_overhead(text):
+    lines = text.split('\n')
+    end = next((i for i, l in enumerate(lines) if l.startswith('Fixed context overhead')), len(lines))
+    table = [l for l in lines[2:end] if l.strip() and not l.startswith(('excluded', 'claude subagents'))]
+    detail, seen = [], 0
+    for l in lines[end + 1:]:
+        if re.match(r'^(claude|codex|pi|opencode):', l):
+            seen += 1
+            if seen > 2:
+                break
+        if seen and (re.match(r'^(claude|codex):', l) or l.startswith('  ') and 'recurring' not in l):
+            detail.append(l)
+    return '$ tokenatlas overhead --refresh\n' + '\n'.join(table) + '\n\n' + '\n'.join(detail).rstrip()
+
+
+def run_screens(report, shots, outdir, work):
+    module = os.environ.get('PLAYWRIGHT_MODULE') or PLAYWRIGHT_DEFAULT
+    env = {**os.environ, 'PLAYWRIGHT_MODULE': module}
+    cmd = ['node', str(ROOT / 'scripts/demo_screens.cjs'), str(report), str(outdir)] + [str(s) for s in shots]
+    proc = subprocess.run(cmd, env=env, capture_output=True, text=True, cwd=work)
+    if proc.returncode:
+        raise SystemExit(f'screenshots failed:\n{proc.stderr}{proc.stdout}')
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    ap.add_argument('outdir', type=Path)
+    ap.add_argument('--seed', type=int, default=7)
+    ap.add_argument('--no-screens', action='store_true', help='Skip the Playwright screenshots.')
+    ap.add_argument('--shared', action='store_true', help='Redact project labels and session ids in the HTML report (default keeps them; the data is fictional).')
+    args = ap.parse_args(argv)
+    outdir = args.outdir.resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='tokenatlas-demo-') as tmp:
+        tmp = Path(tmp)
+        home, state = tmp / 'home', tmp / 'state'
+        home.mkdir()
+        (state / 'tokenatlas').mkdir(parents=True)
+        ids = build_home(home, args.seed)
+        db, outc = state / 'tokenatlas' / 'history.sqlite3', state / 'tokenatlas' / 'outcomes.jsonl'
+        outcomes(outc, ids)
+        # USERPROFILE is what Path.home() reads on Windows; SYSTEMROOT is needed there by Python itself.
+        env = {'PATH': os.environ.get('PATH', ''), 'HOME': str(home), 'USERPROFILE': str(home),
+               'XDG_STATE_HOME': str(state), 'TZ': 'Europe/Stockholm', 'PYTHONDONTWRITEBYTECODE': '1',
+               **{k: os.environ[k] for k in ('SYSTEMROOT',) if k in os.environ}}
+        for harness in ('claude', 'codex', 'pi', 'opencode'):
+            cli(env, db, 'refresh', '--harness', harness)
+        overhead_text = cli(env, db, 'overhead', '--refresh')
+        session_text = cli(env, db, 'session', ORCH, '--outcomes', str(outc))
+        session_json = json.loads(cli(env, db, 'session', ORCH, '--outcomes', str(outc), '--json'))
+        report = outdir / 'demo-report.html'
+        report_args = ['report', '--html', str(report)] + ([] if args.shared else ['--private'])
+        cli(env, db, *report_args)
+        (outdir / 'session.txt').write_text(session_text + '\n')
+        (outdir / 'overhead.txt').write_text(overhead_text + '\n')
+        sys.path.insert(0, str(ROOT))
+        from tokenatlas.history import History
+        counts = {}
+        with History(db) as history:
+            history.connection.execute('BEGIN')
+            for item in history.records():
+                slot = counts.setdefault(item['harness'], {'observations': 0, 'sessions': set(), 'first': item['ts'], 'last': item['ts']})
+                slot['observations'] += 1
+                slot['sessions'].add(item['session'])
+                slot['first'], slot['last'] = min(slot['first'], item['ts']), max(slot['last'], item['ts'])
+        nodes = []
+        def walk(node):
+            nodes.append(node)
+            for child in node['children']:
+                walk(child)
+        walk(session_json['root'])
+        summary = {'seed': args.seed, 'harnesses': {h: {'observations': c['observations'], 'sessions': len(c['sessions']), 'first': c['first'], 'last': c['last']}
+                                                    for h, c in sorted(counts.items())},
+                   'session': {'id': ORCH, 'subagent_nodes': sum(n['kind'] == 'subagent' for n in nodes),
+                               'workflow_nodes': sum(n['kind'] == 'workflow' for n in nodes),
+                               'inferred_children': sum(n['link'] == 'inferred' for n in nodes),
+                               'total_tokens': session_json['total']['total'], 'cost': session_json['total']['cost']},
+                   'report': str(report)}
+        (outdir / 'demo-summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
+        if not args.no_screens:
+            shots = tmp / 'shots'
+            shots.mkdir()
+            (shots / 'session.html').write_text(terminal_html('tokenatlas session', trim_session(session_text)))
+            (shots / 'overhead.html').write_text(terminal_html('tokenatlas overhead', trim_overhead(overhead_text)))
+            run_screens(report, [shots / 'session.html', shots / 'overhead.html'], outdir, tmp)
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

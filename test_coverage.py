@@ -10,9 +10,9 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-import why
-from usage.__main__ import main
-from usage.history import History
+from tokenatlas import why
+from tokenatlas.__main__ import main
+from tokenatlas.history import History
 from test_history import _v1_database, write_claude
 
 
@@ -270,7 +270,7 @@ class RemoteSyncScriptTests(unittest.TestCase):
         script = Path(__file__).with_name('remote_sync.sh')
         self.assertEqual(subprocess.run(['bash', '-n', str(script)]).returncode, 0)
         text = script.read_text()
-        for needle in ('command -v energy-monitor', 'snapshot', 'history: not installed on', 'import'):
+        for needle in ('command -v tokenatlas', 'snapshot', 'history: not installed on', 'import'):
             self.assertIn(needle, text)
 
 

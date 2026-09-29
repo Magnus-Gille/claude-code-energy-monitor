@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from usage.pricing import load_prices, price_observation, summarize_costs
+from tokenatlas.pricing import load_prices, price_observation, summarize_costs
 
 REF = {'source_url': 'https://example.test/prices', 'retrieved_on': '2026-09-01', 'notes': ''}
 CLAUDE = dict(provider='anthropic', model='claude-x', aliases=['claude-x-alias'], currency='USD', input=4.0,
