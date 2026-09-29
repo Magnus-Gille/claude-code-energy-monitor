@@ -59,10 +59,17 @@ const playwright = require(process.env.PLAYWRIGHT_MODULE || '/usr/local/lib/node
     await page.setViewportSize({width:390,height:844});
      await page.screenshot({path:path.join(screenshotDir,'energy-report-mobile.png'),fullPage:false});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'mobile overflow');
-    const texts=await page.evaluate(()=>['total-label','total','total-note','cache','cache-note','observations','sessions-count','output','reasoning','selection','quality'].map(id=>[id,document.getElementById(id).textContent]));
-    const T=Object.fromEntries(texts);assert.match(T['total-label'],/^Tokens totalt/);assert.equal(T['total-note'],'Input + cache (läst och skrivet) + output');assert.match(T.cache,/^(Okänd|\d+,\d %)$/);assert.match(T['sessions-count'],/^i .* sessioner$/);assert.match(T.selection,/ anrop · /);assert.ok(/^varav reasoning |^Reasoning ingår; andel okänd$/.test(T.reasoning));
+    const texts=await page.evaluate(()=>['total-label','total','total-note','cache','cache-note','output','reasoning','selection','quality'].map(id=>[id,document.getElementById(id).textContent]));
+    const T=Object.fromEntries(texts);assert.match(T['total-label'],/^Totalt( \(minst\))?$/);assert.match(T['total-note'],/^[\d\s\u00a0\u202f]+ anrop · [\d\s\u00a0\u202f]+ sessioner$/);assert.match(T['cache-note'],/^(—|\d+,\d % av all input)$/);assert.match(T.output,/./);assert.match(T.selection,/ anrop · /);assert.ok(/^varav reasoning |^inkl\. reasoning$/.test(T.reasoning));
+    const cards=await page.evaluate(()=>[...document.querySelectorAll('.kpis .kpi')].map(k=>({label:k.querySelector('.label').textContent,title:k.querySelector('.value').title,text:k.querySelector('.value').textContent})));
+    assert.deepEqual(cards.map(c=>c.label.replace(/ \(minst\)$/,'')),['Totalt','Input','Cache write','Cache read','Output']);
+    const exact=t=>{const m=/^([\d\s\u00a0\u202f]+) tokens/.exec(t);assert.ok(m,'title '+t);return Number(m[1].replace(/\D/g,''))};
+    const parts=cards.slice(1).map(c=>c.text==='Okänt'?0:exact(c.title));
+    assert.equal(parts.reduce((x,y)=>x+y,0),exact(cards[0].title),'four categories sum to total');
+    assert.equal(exact(cards[0].title),await page.evaluate(()=>UsageReport.aggregate(UsageReport.getSelected()).known_tokens));
+    assert.deepEqual(await page.evaluate(()=>[...document.querySelectorAll('.legend span')].map(s=>s.textContent)),['Input','Cache write','Cache read','Output']);
     assert.equal(await page.evaluate(()=>[UsageReport.short(43812345678),UsageReport.short(136500000),UsageReport.short(12345)].join('|')),'43,8 mdr|136,5 milj.|'+(12345).toLocaleString('sv-SE'));
     assert.deepEqual(errors,[]);assert.deepEqual(requests,[]);
-    console.log(JSON.stringify({pass:true,browser:browserName,records:check.records,known_tokens:check.actual,network_requests:requests.length,console_errors:errors.length,checks:'totals, cache comparisons, bucket conservation, filters, empty state, zoom, drilldown, export, mobile overflow'}));
+    console.log(JSON.stringify({pass:true,browser:browserName,records:check.records,known_tokens:check.actual,network_requests:requests.length,console_errors:errors.length,checks:'summary cards, legend, totals, cache comparisons, bucket conservation, filters, empty state, zoom, drilldown, export, mobile overflow'}));
   } finally {await browser.close()}
 })().catch(e=>{console.error(e);process.exitCode=1});

@@ -94,7 +94,7 @@ class ReportTests(unittest.TestCase):
     def test_template_uses_neutral_copy_and_cache_comparison_mounts(self):
         html = render_report(build_report([], {}))
         self.assertIn('<h1>Tokenanvändning</h1>', html)
-        for label in ('Tokens totalt', 'Cache-träffar', 'Anrop', 'Output-tokens'):
+        for label in ('Totalt', 'Input', 'Cache write', 'Cache read', 'Output'):
             self.assertIn(label, html)
         self.assertIn('id="cache-comparisons"', html)
         for dimension in ('session', 'harness', 'model', 'project_id'):
