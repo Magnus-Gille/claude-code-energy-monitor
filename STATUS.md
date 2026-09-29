@@ -1,11 +1,45 @@
-# Current state — 2026-09-29
+# Current state — 2026-09-29 (after the 1.2.0 merge)
 
-`feat/history-a1` is committed and under pull-request review as the 1.2.0 release candidate:
-durable multi-harness history (#10), the offline Tokenatlas report (#11), and Pi/OpenCode history
-import (history part of #14). Hosted CI and an independent cross-model review are the remaining
-gates. Next delivery after merge: per-session model breakdown with list-price cost (#12 core).
+1.2.0 is merged to `master` as `cb0e5ed` (#19). It contains durable multi-harness history for Claude
+Code, Codex, Pi, and OpenCode, and the offline Tokenatlas report. #10 and #11 are closed. #14 now
+covers only its benchmark part. The release tag and package publication have not happened and need
+the owner's approval.
+
+Next: D2, a per-session model breakdown with list-price cost (#12 core). It includes recovering Claude
+subagent output that transcripts record only as a lower bound (N1).
 
 # Project Status
+
+## Session — 2026-09-29: review fixes and merge of 1.2.0
+
+- Review fixes: the Windows `tzdata`/`USERPROFILE` CI failures, bounded metadata strings, and
+  per-field Claude metadata merge. Claude subagent and workflow observations now link to their parent
+  session. DST-ordered buckets, and shared-report allowlists for provider, origin, effort, and public
+  model families.
+- Declined with real-data evidence:
+  - cross-file Codex dedup (0 of 10,746 sessions span two files);
+  - Codex rows without an ordinal (0 of 360,729);
+  - naive timestamps (0 of 475,244);
+  - sub-millisecond timestamps (0 of 380,213).
+- N1, a new finding: Claude Code subagent transcripts often lack a request's final usage row. On the
+  owner's machine that was 1,555 of 3,150 subagent requests, 209 of 219 workflow-agent requests, and
+  0 of 3,283 main-thread requests. Those observations are flagged `output_not_final` with lower-bound
+  output.
+- Size, measured on 379,401 real observations:
+  - history database: 990 MB → 140 MB (schema 2 with automatic migration);
+  - Tokenatlas: 270 MB → 10.5 MB (a gzip-compressed columnar payload);
+  - load time: about 10 s → about 2 s;
+  - `report --html`: 53 s → 15 s.
+
+  Migrated records, fresh imports, and rebuilt report records were compared with the schema 1 output
+  and are identical.
+- The Tokenatlas summary cards follow the standard split: Totalt · Input · Cache write · Cache read ·
+  Output.
+- Verification: CI is green on Linux, macOS, Windows, Chromium, and WebKit, and 104 tests pass.
+- Delegation:
+  - implementation leaves on Sonnet 5.5;
+  - four read-only `gpt-5.6-luna` xhigh reviews through the headless Codex CLI;
+  - the conductor reproduced every finding and did every real-data check itself.
 
 ## Continued implementation — 2026-09-26
 
