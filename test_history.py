@@ -1,0 +1,401 @@
+import json
+import os
+import sqlite3
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+from datetime import datetime, timezone
+from pathlib import Path
+
+from usage.history import History, _owned_by_current_user, normalize, summarize, merge_observations
+from why import AttributionRecord
+from test_why_harnesses import create_opencode_db, pi_message, write_pi_session
+
+
+def record(call_id='req', **overrides):
+    args = dict(harness='claude', provider='anthropic',
+                timestamp=datetime(2026, 9, 3, 10, tzinfo=timezone.utc),
+                session_id='session', call_id=call_id, model='test-model', effort='high',
+                project='app', entrypoint='cli', thread_kind='main', agent='main',
+                fresh_input=10, cache_read=20, cache_write=0, output=5, reasoning=0)
+    args.update(overrides)
+    return AttributionRecord(**args)
+
+
+def write_claude(path, request='req', output=5):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows=[{'type':'user','uuid':'prompt-1','message':{'role':'user','content':'PRIVATE PROMPT'}},
+          {'type':'assistant','uuid':'response-'+request,'requestId':request,
+           'sessionId':'session','cwd':'/work/client/app','version':'test-version',
+           'timestamp':'2026-09-03T10:00:00Z','message':{'id':'msg-'+request,'model':'test-model',
+             'usage':{'input_tokens':10,'cache_read_input_tokens':20,
+                      'cache_creation_input_tokens':0,'output_tokens':output}}}]
+    path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+
+
+class HistoryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root=Path(self.tmp.name)
+        self.db=self.root/'state/history.sqlite3'
+
+    def test_zero_or_empty_partial_usage_is_retained_as_unknown(self):
+        for usage in ({'output_tokens': 0}, {}):
+            with self.subTest(usage=usage):
+                source=self.root/'logs/a.jsonl';write_claude(source)
+                rows=[json.loads(x) for x in source.read_text().splitlines()]
+                rows[-1]['message']['usage']=usage
+                source.write_text(''.join(json.dumps(x)+'\n' for x in rows))
+                with History(self.db) as h:
+                    h.refresh('claude',source.parent)
+                    self.assertEqual(len(h.records()),1)
+                    self.assertFalse(h.records()[0]['complete'])
+                    self.assertIn('missing_token_fields',h.records()[0]['warnings'])
+
+    def test_ownership_check_degrades_safely_without_posix_getuid(self):
+        with patch.object(os,'getuid',None,create=True):
+            self.assertTrue(_owned_by_current_user(type('Info',(),{'st_uid':123})()))
+
+    def test_invalid_iteration_container_does_not_claim_completeness(self):
+        import why
+        for invalid in ('bad', {'type':'message','output_tokens':999}):
+            raw=why._sanitize_usage({'input_tokens':1,'output_tokens':2,
+                'cache_read_input_tokens':0,'cache_creation_input_tokens':0,'iterations':invalid})
+            item=normalize(record(raw_usage=raw),'m')
+            self.assertFalse(item['complete'])
+            self.assertIn('invalid_iteration',item['warnings'])
+
+    def test_missing_tokens_are_unknown_and_iterations_not_assumed_complete(self):
+        item=normalize(record(), 'machine')
+        self.assertIsNone(item['tokens']['fresh_input'])
+        self.assertIsNone(item['tokens']['reasoning'])
+        self.assertFalse(item['complete'])
+        raw={'input_tokens':10,'cache_read_input_tokens':20,'cache_creation_input_tokens':0,'output_tokens':5,
+             'iterations':[{'type':'message','output_tokens':5}, {'type':'advisor_message','model':'other','output_tokens':40}]}
+        item=normalize(record(raw_usage=raw), 'machine')
+        self.assertIn('nontrivial_iterations',item['warnings'])
+        self.assertFalse(item['complete'])
+        self.assertEqual(item['raw_usage']['iterations'][1]['output_tokens'],40)
+
+    def test_import_is_idempotent_copies_and_retention_preserve_history(self):
+        source=self.root/'claude/project/a.jsonl';write_claude(source)
+        with History(self.db) as h:
+            first=h.refresh('claude',source.parent.parent)
+            second=h.refresh('claude',source.parent.parent)
+            self.assertEqual(first['files_parsed'],1)
+            self.assertEqual(second['files_parsed'],0)
+            duplicate=source.with_name('copy.jsonl');duplicate.write_bytes(source.read_bytes())
+            h.refresh('claude',source.parent.parent)
+            self.assertEqual(len(h.records()),1)
+            self.assertEqual(len(h.records()[0]['sources']),2)
+            self.assertNotIn('PRIVATE PROMPT',json.dumps(h.records()))
+            source.unlink();duplicate.unlink()
+            h.refresh('claude',source.parent.parent)
+            self.assertEqual(len(h.records()),1)
+            self.assertGreater(h.doctor()['missing_source_files'],0)
+        if os.name != 'nt':
+            self.assertEqual(stat.S_IMODE(self.db.stat().st_mode),0o600)
+            self.assertEqual(stat.S_IMODE(self.db.parent.stat().st_mode),0o700)
+
+    def test_streaming_update_never_regresses_and_partial_line_is_retried(self):
+        source=self.root/'logs/a.jsonl';write_claude(source,output=1)
+        with History(self.db) as h:
+            h.refresh('claude',source.parent)
+            write_claude(source,output=10)
+            with source.open('a') as f:f.write('{"type":')
+            result=h.refresh('claude',source.parent)
+            self.assertEqual(result['partial_lines'],1)
+            self.assertEqual(h.records()[0]['tokens']['output'],10)
+            self.assertEqual(h.refresh('claude',source.parent)['files_parsed'],1)
+            write_claude(source,output=2)
+            h.refresh('claude',source.parent)
+            self.assertEqual(h.records()[0]['tokens']['output'],10)
+
+    def test_missing_root_is_visible_not_zero_coverage(self):
+        with History(self.db) as h:
+            result=h.refresh('codex',self.root/'absent')
+            self.assertEqual(result['status'],'missing')
+            self.assertIsNone(result['last_success'])
+            self.assertFalse(h.doctor()['coverage_complete'])
+
+    def test_unreadable_directory_is_partial_not_success(self):
+        source=self.root/'logs/a.jsonl';write_claude(source)
+        def denied_walk(root, onerror):
+            onerror(PermissionError('unreadable child directory'))
+            return []
+        with History(self.db) as h:
+            with patch('usage.history.os.walk', side_effect=denied_walk):
+                result=h.refresh('claude',source.parent)
+            self.assertEqual(result['status'],'partial')
+            self.assertEqual(result['read_errors'],1)
+            self.assertIsNone(result['last_success'])
+
+    def test_iteration_replay_does_not_invent_raw_snapshots(self):
+        from usage.history import merge_usage
+        first={'iterations':[{'type':'message','input_tokens':10,'output_tokens':5}]}
+        second={'iterations':[{'type':'message','input_tokens':5,'output_tokens':10}]}
+        merged=merge_usage(first,second)
+        for _ in range(3):
+            merged=merge_usage(merged,second)
+        self.assertCountEqual(merged['iteration_snapshots'],[first['iterations'],second['iterations']])
+        self.assertEqual(merged['iterations'][0]['output_tokens'],10)
+        self.assertEqual(merged['iterations'][0]['input_tokens'],10)
+
+    def test_usage_without_timestamp_is_reported_as_omitted(self):
+        source=self.root/'logs/a.jsonl';write_claude(source)
+        rows=[json.loads(x) for x in source.read_text().splitlines()]
+        rows[-1].pop('timestamp')
+        source.write_text(''.join(json.dumps(x)+'\n' for x in rows))
+        with History(self.db) as h:
+            for _ in range(2):
+                result=h.refresh('claude',source.parent)
+                self.assertEqual(result['status'],'partial')
+                self.assertEqual(result['unparsed_usage_lines'],1)
+                self.assertIsNone(result['last_success'])
+            self.assertEqual(h.records(),[])
+
+    def test_invalid_iteration_entries_are_not_dropped_into_complete_totals(self):
+        import why
+        raw=why._sanitize_usage({'input_tokens':1,'output_tokens':2,
+            'cache_read_input_tokens':0,'cache_creation_input_tokens':0,'iterations':[None]})
+        self.assertEqual(raw['iterations'],[{}])
+        item=normalize(record(raw_usage=raw),'m')
+        self.assertFalse(item['complete'])
+        self.assertIn('invalid_iteration',item['warnings'])
+
+    def test_schema_version_refused(self):
+        with History(self.db) as h:
+            h.connection.execute('PRAGMA user_version=999')
+        with self.assertRaisesRegex(ValueError,'version'):
+            with History(self.db): pass
+
+    def test_concurrent_imports_lose_no_records(self):
+        first=self.root/'one/a.jsonl';second=self.root/'two/b.jsonl'
+        write_claude(first,'one');write_claude(second,'two')
+        command=[sys.executable,'-B','-m','usage','--db',str(self.db),'refresh','--harness','claude','--root']
+        children=[subprocess.Popen(command+[str(p.parent)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) for p in (first,second)]
+        results=[(p, p.communicate(timeout=30)) for p in children]
+        for p, (out,err) in results:
+            self.assertEqual(p.returncode,0,err)
+        with History(self.db) as h:
+            self.assertEqual(len(h.records()),2)
+
+    def test_refresh_failure_rolls_back_observations_and_checkpoint(self):
+        source=self.root/'logs/a.jsonl';write_claude(source)
+        with History(self.db) as h:
+            with patch('usage.history.normalize', side_effect=RuntimeError('injected normalization failure')):
+                with self.assertRaisesRegex(RuntimeError,'injected'):
+                    h.refresh('claude', source.parent)
+            self.assertEqual(h.records(),[])
+            self.assertEqual(h.connection.execute('SELECT count(*) FROM files').fetchone()[0],0)
+            self.assertEqual(h.refresh('claude',source.parent)['files_parsed'],1)
+            self.assertEqual(len(h.records()),1)
+
+    def test_unknown_usage_can_be_completed_without_duplicate(self):
+        source=self.root/'logs/a.jsonl';write_claude(source)
+        rows=[json.loads(x) for x in source.read_text().splitlines()]
+        del rows[-1]['message']['usage']['cache_read_input_tokens']
+        source.write_text(''.join(json.dumps(x)+'\n' for x in rows))
+        with History(self.db) as h:
+            h.refresh('claude',source.parent)
+            self.assertIsNone(h.records()[0]['tokens']['cache_read'])
+            write_claude(source)
+            h.refresh('claude',source.parent)
+            self.assertEqual(len(h.records()),1)
+            self.assertEqual(h.records()[0]['tokens']['cache_read'],20)
+            self.assertTrue(h.records()[0]['complete'])
+
+    def test_malformed_diagnostics_survive_unchanged_refresh(self):
+        source=self.root/'logs/a.jsonl';write_claude(source)
+        with source.open('a') as f:f.write('bad json\n')
+        with History(self.db) as h:
+            first=h.refresh('claude',source.parent)
+            second=h.refresh('claude',source.parent)
+            self.assertEqual(first['status'],'partial')
+            self.assertEqual(second['status'],'partial')
+            self.assertEqual(second['malformed_lines'],1)
+            self.assertEqual(second['files_parsed'],0)
+            self.assertEqual(len(h.records()),1)
+
+    def test_file_changed_while_reading_does_not_commit_or_checkpoint(self):
+        source=self.root/'logs/a.jsonl';write_claude(source)
+        with History(self.db) as h:
+            with patch.object(h,'fingerprint',side_effect=['before','after']):
+                result=h.refresh('claude',source.parent)
+            self.assertEqual(result['changed_during_read'],1)
+            self.assertEqual(result['status'],'partial')
+            self.assertEqual(h.records(),[])
+            self.assertEqual(h.connection.execute('SELECT count(*) FROM files').fetchone()[0],0)
+            h.refresh('claude',source.parent)
+            self.assertEqual(len(h.records()),1)
+
+    def test_iteration_reordering_retains_both_original_snapshots(self):
+        base={'input_tokens':1,'cache_read_input_tokens':0,'cache_creation_input_tokens':0,'output_tokens':20}
+        first=[{'type':'message','model':'executor','output_tokens':10}]
+        second=[{'type':'advisor_message','model':'advisor','output_tokens':5},
+                {'type':'message','model':'executor','output_tokens':20}]
+        a=normalize(record(raw_usage={**base,'iterations':first}),'m')
+        b=normalize(record(raw_usage={**base,'iterations':second}),'m')
+        for merged in (merge_observations(a,b),merge_observations(b,a)):
+            self.assertIn(first,merged['raw_usage']['iteration_snapshots'])
+            self.assertIn(second,merged['raw_usage']['iteration_snapshots'])
+            self.assertEqual(merged['raw_usage']['iterations'],second)
+            self.assertFalse(merged['complete'])
+
+    def test_second_pass_read_error_does_not_checkpoint_file(self):
+        source=self.root/'logs/a.jsonl';write_claude(source)
+        original=Path.open
+        def failing_open(path,*args,**kwargs):
+            if path==source and kwargs.get('errors')=='replace':
+                raise OSError('injected second-pass failure')
+            return original(path,*args,**kwargs)
+        with History(self.db) as h:
+            with patch.object(Path,'open',failing_open):
+                result=h.refresh('claude',source.parent)
+            self.assertEqual(result['read_errors'],1)
+            self.assertEqual(h.records(),[])
+            self.assertEqual(h.connection.execute('SELECT count(*) FROM files').fetchone()[0],0)
+            self.assertEqual(h.refresh('claude',source.parent)['files_parsed'],1)
+            self.assertEqual(len(h.records()),1)
+
+    def test_claude_row_uuid_identity_is_explicitly_incomplete(self):
+        source=self.root/'logs/a.jsonl';write_claude(source)
+        rows=[json.loads(x) for x in source.read_text().splitlines()]
+        assistant=rows[-1];assistant.pop('requestId');assistant['message'].pop('id')
+        duplicate=json.loads(json.dumps(assistant));duplicate['uuid']='other-row'
+        rows.append(duplicate);source.write_text(''.join(json.dumps(r)+'\n' for r in rows))
+        with History(self.db) as h:
+            h.refresh('claude',source.parent)
+            self.assertTrue(all(r['id_synthetic'] for r in h.records()))
+            totals=summarize(h.records())['totals']
+            self.assertIsNone(totals['tokens'])
+            self.assertEqual(totals['known_tokens'],0)
+            self.assertEqual(totals['ambiguous_identity_tokens'],70)
+            self.assertEqual(totals['ambiguous_identity_observations'],2)
+            self.assertIsNone(totals['token_fields']['output'])
+
+    def test_codex_without_ordinal_survives_non_usage_line_inserted_in_copy(self):
+        from test_why_codex import _write_rollout,_meta,_context,_tokens
+        first=self.root/'logs/rollout-one.jsonl'
+        counts={'input_tokens':10,'cached_input_tokens':0,'cache_write_input_tokens':0,'output_tokens':2}
+        rows=[_meta(),_context('2026-09-03T10:00:00Z','model','high','/work/project'),
+              _tokens('2026-09-03T10:00:01Z',None,counts,counts)]
+        _write_rollout(first,rows)
+        with History(self.db) as h:
+            h.refresh('codex',first.parent)
+            _write_rollout(first.with_name('rollout-copy.jsonl'),[{'type':'harmless'}]+rows)
+            h.refresh('codex',first.parent)
+            self.assertEqual(len(h.records()),1)
+
+    def test_opencode_sqlite_refresh_is_idempotent_and_private(self):
+        db = self.root/'opencode.db'
+        connection=create_opencode_db(db)
+        connection.execute('INSERT INTO session VALUES (?,?,?,?,?,?,?)',
+            ('session','project',None,'/work/app','1.18.32',1,2))
+        data={'role':'assistant','providerID':'openai','modelID':'gpt-test','agent':'build',
+              'variant':'high','time':{'created':1788429600000,'completed':1788429601000},
+              'tokens':{'input':10,'output':5,'reasoning':3,'cache':{'read':20,'write':2},'total':37},
+              'content':'PRIVATE ASSISTANT TEXT'}
+        connection.execute('INSERT INTO message VALUES (?,?,?,?,?)',
+            ('message','session',1788429600000,1788429601000,json.dumps(data)))
+        connection.commit();connection.close()
+        with History(self.db) as h:
+            first=h.refresh('opencode',db)
+            second=h.refresh('opencode',db)
+            self.assertEqual(first['observations_seen'],1)
+            self.assertEqual(second['files_skipped'],1)
+            self.assertEqual(len(h.records()),1)
+            saved=json.dumps(h.records())
+            self.assertNotIn('PRIVATE ASSISTANT TEXT',saved)
+            self.assertEqual(h.records()[0]['source_type'],'database')
+
+    def test_opencode_schema_error_is_reported_as_partial_import(self):
+        db=self.root/'unsupported-opencode.db'
+        connection=sqlite3.connect(db)
+        connection.execute('CREATE TABLE unrelated (id INTEGER)')
+        connection.close()
+        with History(self.db) as h:
+            result=h.refresh('opencode',db)
+        self.assertEqual(result['status'],'partial')
+        self.assertEqual(result['read_errors'],1)
+        self.assertIn('no such table',result['errors'][0])
+
+    def test_malformed_opencode_rows_are_reported_as_partial_import(self):
+        db=self.root/'malformed-opencode.db'
+        connection=create_opencode_db(db)
+        connection.execute('INSERT INTO session VALUES (?,?,?,?,?,?,?)',
+            ('session','project',None,'/work/app','1.0',1,2))
+        rows=[
+            ('invalid-json','{'),
+            ('missing-tokens',json.dumps({'role':'assistant','time':{'completed':1788429601000}})),
+            ('invalid-time',json.dumps({'role':'assistant','time':{'completed':'bad'},
+                                        'tokens':{'input':1,'output':1,'cache':{'read':0,'write':0}}})),
+        ]
+        connection.executemany('INSERT INTO message VALUES (?,?,?,?,?)',
+            [(message_id,'session',1788429600000,1788429601000,data) for message_id,data in rows])
+        connection.commit();connection.close()
+        with History(self.db) as h:
+            result=h.refresh('opencode',db)
+        self.assertEqual(result['status'],'partial')
+        self.assertEqual(result['malformed_lines'],1)
+        self.assertEqual(result['unparsed_usage_lines'],2)
+        self.assertIsNone(result['last_success'])
+
+    def test_pi_refresh_deduplicates_forks_and_retains_original_session(self):
+        usage={'input':10,'output':5,'cacheRead':20,'cacheWrite':2,'reasoning':1}
+        copied=pi_message('entry','response','2026-09-03T10:00:00Z',usage)
+        root=self.root/'pi'
+        write_pi_session(root/'a-fork.jsonl','fork','2026-09-03T09:00:00Z','/work/fork',[copied])
+        write_pi_session(root/'z-original.jsonl','original','2026-09-02T09:00:00Z','/work/original',[copied])
+        with History(self.db) as h:
+            result=h.refresh('pi',root)
+            records=h.records()
+            self.assertEqual(result['observations_seen'],2)
+            self.assertEqual(len(records),1)
+            self.assertEqual(records[0]['session'],'original')
+            self.assertEqual(records[0]['project_id'],'/work/original')
+            self.assertEqual(records[0]['source_type'],'session')
+            self.assertEqual(len(records[0]['sources']),2)
+
+    def test_time_buckets_dst_and_unknowns(self):
+        samples=[]
+        for index,ts in enumerate(('2026-10-25T00:30:00+00:00','2026-10-25T01:30:00+00:00')):
+            item=normalize(record(str(index),timestamp=datetime.fromisoformat(ts)), 'm')
+            item['tokens']={'fresh_input':10,'cache_read':20,'cache_write':0,'output':5,'reasoning':None}
+            item['complete']=True
+            samples.append(item)
+        reports=[summarize(samples,unit,'Europe/Stockholm') for unit in ('day','hour','minute')]
+        self.assertEqual([r['totals']['known_tokens'] for r in reports],[70,70,70])
+        self.assertEqual(len(reports[1]['buckets']),2)
+        self.assertNotEqual(reports[1]['buckets'][0]['time'],reports[1]['buckets'][1]['time'])
+        self.assertIsNone(summarize([normalize(record(),'m')],'day','UTC')['totals']['tokens'])
+
+    def test_summary_scopes_equal_session_ids_by_harness(self):
+        claude=normalize(record('claude',raw_usage={
+            'input_tokens':1,'cache_read_input_tokens':0,
+            'cache_creation_input_tokens':0,'output_tokens':1}), 'm')
+        pi=normalize(record('pi',harness='pi',provider='test',raw_usage={
+            'input':1,'cacheRead':0,'cacheWrite':0,'output':1,'reasoning':0}), 'm')
+        names={row['name'] for row in summarize([claude,pi])['groups']['session']}
+        self.assertEqual(names,{'claude:session','pi:session'})
+
+    def test_scoped_session_filter_round_trips_summary_name(self):
+        samples=[
+            normalize(record('claude'), 'm'),
+            normalize(record('pi',harness='pi',provider='test',raw_usage={
+                'input':1,'cacheRead':0,'cacheWrite':0,'output':1,'reasoning':0}), 'm'),
+        ]
+        with History(self.db) as h:
+            for index,item in enumerate(samples):
+                h.connection.execute('INSERT INTO observations VALUES (?,?)',
+                                     (str(index),json.dumps(item)))
+            h.connection.commit()
+            self.assertEqual([row['harness'] for row in h.records(session='pi:session')],['pi'])
+            self.assertEqual({row['harness'] for row in h.records(session='session')},{'claude','pi'})
+
+
+if __name__=='__main__':unittest.main()
