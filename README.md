@@ -21,15 +21,15 @@ Reading left to right:
 
 Energy is **model-weighted** (Haiku ×0.3, Sonnet ×0.6, Opus ×1.0; order-of-magnitude) for today and going forward; older history days are model-agnostic. Quota prefers the statusline payload's `rate_limits` (no API call), falling back to the OAuth usage endpoint when absent.
 
-## Explain a spike across Claude and Codex
+## Explain a spike across Claude, Codex, Pi, and OpenCode
 
-`why.py` reads the retained Claude Code transcripts and Codex rollouts directly and ranks the calls
-that consumed a time window. It groups by project, main thread vs subagent, entrypoint, agent, exact
-model, effort, and session. Codex Desktop calls are included when they are present in the shared
-`~/.codex/sessions/` directory.
+`why.py` reads retained Claude Code transcripts, Codex rollouts, Pi sessions, and OpenCode's local
+usage store directly and ranks the calls that consumed a time window. It groups by project, main
+thread vs subagent, entrypoint, agent, exact model, effort, and session. Codex Desktop calls are
+included when they are present in the shared `~/.codex/sessions/` directory.
 
 ```bash
-# Both harnesses, trailing 24 hours
+# All supported harnesses, trailing 24 hours
 python3 why.py
 
 # A short burst, or one local calendar day
@@ -43,12 +43,80 @@ python3 why.py --hours 6 --json
 
 The command is stateless: it writes no ledger or cache. Claude requests are deduplicated by
 `requestId` using the maximum of each streamed token field; Codex uses each turn's
-`last_token_usage` delta and the event timestamp, while discarding repeated cumulative snapshots,
-so resumed sessions land on the day when the call actually happened. For a full Claude calendar day
-it also compares transcript totals with the older statusline counter and reports the latter's
-coverage.
+`last_token_usage` delta and discards repeated cumulative snapshots. Pi deduplicates copied fork
+history by provider response ID and preserves the original session attribution. OpenCode transiently
+parses local message records, then retains only allowlisted usage and attribution fields. Resumed sessions land on the
+day when each call actually happened. For a full Claude calendar day the command also compares
+transcript totals with the older statusline counter and reports the latter's coverage. Use
+`--harness both` for the legacy Claude+Codex pair, or select `claude`, `codex`, `pi`, or `opencode`.
 
-## Installation
+## Durable local usage history
+
+`energy-monitor` imports Claude, Codex, Pi, and OpenCode observations into a local SQLite
+history. It needs Python 3.10+ and the standard library, makes no network or LLM
+calls, and does not change your installed statusline.
+
+```bash
+# Default store: ~/.local/state/agentmon/history.sqlite3 (or XDG_STATE_HOME)
+energy-monitor refresh --harness claude
+energy-monitor refresh --harness codex
+energy-monitor refresh --harness pi
+energy-monitor refresh --harness opencode
+energy-monitor doctor
+
+# Stored history, local time buckets; timestamps must include an offset
+energy-monitor report --start 2026-09-01T00:00:00+02:00 --end 2026-10-01T00:00:00+02:00 --granularity hour
+energy-monitor report --granularity minute --session SESSION_ID --records
+
+# Isolated input/state, useful for a demonstration or fixture
+energy-monitor --db /private/tmp/agentmon-demo/history.sqlite3 refresh --harness claude --root /path/to/transcripts
+```
+
+All commands print JSON. `refresh` imports only changed files; running it twice
+or importing a copied transcript does not add the same usage again. Recorded
+history survives source deletion. Schedule refresh separately if desired;
+there is no background service, and already-deleted logs cannot be recovered.
+`refresh` exits 2 for missing sources or partial imports and records diagnostics.
+
+`report` supports day/hour/minute, `--timezone`, `--harness`, `--project` (full
+identity), `--session` (including displayed `HARNESS:SESSION_ID` names), and `--turn`. `--records` includes source-file references
+and observed/derived turn links. The output is **private local data**: project
+paths are visible, although prompt content and tool inputs are never stored.
+
+Missing counters remain null; `known_tokens` is only the identified observed subtotal.
+Ambiguous identities are excluded and reported separately because they may overlap.
+A complete normalized observation does not mean complete account coverage or
+verified billing. Nontrivial Claude `iterations` are retained and flagged rather
+than silently ignored or added twice. See [accounting and storage decisions](docs/history-accounting.md).
+
+## Install the history and Tokenatlas CLI
+
+Python 3.10 or newer is required. `pipx` keeps the command isolated from other Python tools:
+
+```bash
+pipx install claude-code-energy-monitor
+energy-monitor --version
+```
+
+Before the package is published, or when testing a checkout:
+
+```bash
+pipx install /path/to/claude-code-energy-monitor
+```
+
+Upgrade or remove the command with:
+
+```bash
+pipx upgrade claude-code-energy-monitor
+pipx uninstall claude-code-energy-monitor
+```
+
+Uninstalling the command intentionally preserves the local history database at
+`~/.local/state/agentmon/history.sqlite3` (or `$XDG_STATE_HOME/agentmon/history.sqlite3`). Back it up
+or remove it separately according to your own data-retention policy. Running `python3 -m usage` from
+a source checkout remains supported.
+
+## Install the Claude Code statusline
 
 **30-second setup** — paste this into Claude Code:
 
@@ -301,14 +369,23 @@ The script reads Claude Code's **statusbar JSON payload**, piped to stdin on eve
 - **Per-call snapshot (`current_usage`):** `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` — these reflect the most recent API call. The monitor accumulates these across calls (detecting call boundaries) to build daily totals.
 - **Current-context totals:** `total_input_tokens` (= `input + cache_creation + cache_read` of the most recent response) and `total_output_tokens` (that response's output). **As of Claude Code v2.1.122 these are current-context snapshots, not cumulative session counters.** Earlier builds of this monitor treated them as cumulative; the accumulation now sums per-call `current_usage` fields and derives fresh (uncached) input as `total_input − cache_read − cache_creation`.
 
-Daily totals are accumulated across sessions via a locked JSON file. This is the most complete token data source available — more complete than JSONL conversation logs (see [Known limitations](#known-limitations) below).
+Daily totals are accumulated across sessions via a locked JSON file. The statusbar payload and
+Claude Code's JSONL transcripts are complementary local sources whose coverage depends on the
+Claude Code version and workload. In a later v2.1.226 comparison, deduplicated transcript output
+was within 1% of the statusline output for a full observed day, while the statusline missed
+subagent and non-interactive calls. Neither source should be treated as universally complete (see
+[Known limitations](#known-limitations) below).
 
 ### Token accounting claims (high confidence, validated)
 
 These claims are supported by a [validation harness](analyze_tokens.py) that logged raw statusbar payloads (Feb 2026: 31 calls / 3 sessions; re-validated May 2026 on CC v2.1.157), plus [direct API billing reconciliation](FINDINGS.md):
 
 1. **No double-counting.** Energy applies separate constants to four non-overlapping token types: fresh (uncached) input, cache reads, cache creation, and output. Fresh input is derived per call as `total_input − cache_read − cache_creation` (≈ `current_usage.input_tokens`).
-2. **Thinking tokens are included.** `current_usage.output_tokens` includes extended thinking tokens (no separate `thinking_tokens` field exists), confirmed by a ~3x ratio versus JSONL logs (which exclude thinking).
+2. **Thinking visibility is version-dependent.** In the February 2026 captures, the statusbar
+   output was roughly 3x the deduplicated JSONL output, and those JSONL records did not expose
+   thinking in `usage.output_tokens`. This was a dated observation, not a universal multiplier or
+   rule: on Claude Code v2.1.226, deduplicated transcript output was within 1% of statusline
+   output for a full observed day.
 3. **Cache metrics are accurate.** Per-call `cache_read_input_tokens` and `cache_creation_input_tokens` match API billing to the token across 4 direct API test calls, and are stable within a call (the monitor sums them once per call).
 4. **Most prefill work shows up as cache creation.** In a heavily-cached workload, truly-fresh input is tiny (~1% of energy); the bulk of prefill work is `cache_creation`. This is why `E_CW` is treated as roughly prefill-cost.
 
@@ -339,13 +416,24 @@ The display snaps to order-of-magnitude steps (1, 2, 5, 10, 20, 50, ...) because
 
 1. **Pricing ≠ energy.** Anthropic's pricing ratios were the original basis for relative energy cost between token types. We've since revised the output and cache read constants using physics-derived cross-checks (FLOP-based estimates, AI Energy Score benchmarks, Google's measured per-query energy). The fresh input and cache write constants still inherit from pricing. Pricing reflects margin, competitive positioning, and demand management — not just energy.
 
-2. **Per-model constants are approximate.** A single set of constants (anchored to Opus-class compute) is scaled by rough order-of-magnitude multipliers — Haiku ×0.3, Sonnet ×0.6, Opus ×1.0 — based on the input-price ratio (1:3:5), discounted for sub-linear param→energy scaling. Anthropic discloses no parameter counts, so these are guesses, not measurements. (Earlier versions used the same constant for all three tiers.)
+2. **Per-model constants are approximate.** The current implementation uses rough order-of-magnitude
+   weights — Haiku ×0.3, Sonnet ×0.6, Opus ×1.0 — as a model for this monitor, based on the
+   input-price ratio (1:3:5) discounted for sub-linear parameter-to-energy scaling. These are
+   project assumptions, not universal energy multipliers or measurements. Anthropic discloses no
+   parameter counts. (Earlier versions used the same constant for all three tiers.)
 
 3. **Context-length decode scaling.** The formula uses a fixed per-output-token constant regardless of context length. With very long cached contexts (25M+ tokens observed in practice), decode cost increases due to larger KV-cache attention. The formula underestimates in exactly these long-context sessions.
 
 4. **Infrastructure variability.** We don't know Anthropic's hardware (GPU types, cluster config), batch sizes, scheduling strategies, model sizes, or datacenter locations. Inference efficiency is a rapidly moving target — Google reported a [33x improvement](https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference) in a single year.
 
-5. **JSONL logs are incomplete.** In tested versions, Claude Code's JSONL conversation logs have streaming placeholder values for `usage.input_tokens` (75% were ≤1 in our dataset) and exclude thinking tokens from `usage.output_tokens`. Tools like [ccusage](https://github.com/ryoppippi/ccusage) that read JSONL may significantly undercount actual compute as a result. This monitor reads the statusbar context, which is the more complete data source. See [GitHub issue #28197](https://github.com/anthropics/claude-code/issues/28197).
+5. **Source coverage and fields vary by version and workload.** In the February 2026 captures,
+   JSONL had streaming placeholder values for `usage.input_tokens` (75% were ≤1 in that dataset)
+   and did not expose thinking in `usage.output_tokens`. On Claude Code v2.1.226, a full observed
+   day of deduplicated transcript output was within 1% of statusline output, but statusline
+   collection missed subagent and non-interactive calls. Neither source is a universal billing
+   ledger. Streaming records must be deduplicated by `requestId`, taking the maximum of each token
+   field. These comparisons measure local source coverage; they are not API billing
+   reconciliation. See [GitHub issue #28197](https://github.com/anthropics/claude-code/issues/28197).
 
 ### How to use these numbers responsibly
 
@@ -439,22 +527,29 @@ A typical day of AI-assisted coding likely falls in the 1–5 kWh range (mid est
 | Energy estimates | Yes | Yes | Yes |
 | Daily history | Yes | Yes | Yes |
 | Prompt cache tracking | Yes | Yes | Yes |
+| Durable history and Tokenatlas | Yes | Yes | Yes** |
 | API quota display | Yes | Yes* | Yes* |
 
 \* Quota now comes primarily from the statusline payload's `rate_limits` fields (Claude Code v2.1.80+, Pro/Max), which work on every platform with no API call. The legacy fallback reads the OAuth token from the macOS Keychain via the `security` command and is macOS-only; on Linux/Windows it's simply skipped. So if your build provides `rate_limits`, quota shows everywhere; otherwise it's macOS-only.
+
+\** The packaged CLI installs `tzdata` on native Windows so named IANA timezones such as
+`Europe/Stockholm` remain available. WSL normally uses the distribution's timezone database.
 
 **Note:** The fallback quota path uses an **undocumented** Anthropic beta API endpoint (`/api/oauth/usage` with `anthropic-beta: oauth-2025-04-20`), which may change or disappear without notice. The token and energy features do not depend on it.
 
 ## Dependencies
 
-None. The script uses only the Python 3 standard library (`json`, `os`, `sys`, `subprocess`, `time`, `fcntl`, `pathlib`, `datetime`).
+The statusline script uses only the Python 3 standard library (`json`, `os`, `sys`, `subprocess`,
+`time`, `fcntl`, `pathlib`, `datetime`). The packaged history CLI is also standard-library-only on
+macOS, Linux, and WSL; native Windows installs the small `tzdata` package for named timezones.
 
 **`fcntl` note:** The file locking uses `fcntl.flock`, which is available on macOS and Linux. On Windows (outside WSL), this would need to be replaced with an alternative locking mechanism.
 
 ## Security
 
 - The OAuth token is read from macOS Keychain and sent only to `api.anthropic.com`. It is never written to disk.
-- All data files are created with `0600` permissions (owner read/write only).
+- On POSIX systems, data files are created with `0600` permissions (owner read/write only). Native
+  Windows uses the current user profile's filesystem ACLs because POSIX owner/mode checks are unavailable.
 - The script makes no network calls other than the optional quota fetch to Anthropic.
 - No telemetry, no third-party services, no analytics.
 
@@ -465,7 +560,7 @@ None. The script uses only the Python 3 standard library (`json`, `os`, `sys`, `
 We built a [validation harness](analyze_tokens.py) that logs raw statusbar payloads and analyzes token-counting behavior across API calls (Feb 2026: 31 calls / 3 sessions; re-validated May 2026 on CC v2.1.157). Key findings:
 
 - **`total_input_tokens` = `input + cache_creation + cache_read` of the most recent response** (current-context, *not* cumulative, since CC v2.1.122). Fresh (uncached) input is recovered as `total_input − cache_read − cache_creation`.
-- **`total_output_tokens` = the most recent response's output** (per-call, not cumulative since v2.1.122) and includes extended thinking tokens (no separate `thinking_tokens` field; ~3x ratio vs JSONL, which excludes thinking). The monitor accumulates `current_usage.output_tokens` per call.
+- **`total_output_tokens` = the most recent response's output** (per-call, not cumulative since v2.1.122). The February 2026 captures showed a roughly 3x statusbar-to-JSONL output ratio, but that ratio and the associated thinking-token interpretation are version/date-specific; v2.1.226 matched within 1% for a full observed day after requestId deduplication. The monitor accumulates `current_usage.output_tokens` per call.
 - **Cache fields are stable within a call** and summed once per detected call boundary; no double-counting across the four token types.
 
 To collect your own validation data, set `ENERGY_DEBUG=1` as an env var in the statusline command, then run `python3 analyze_tokens.py` after a session.
@@ -501,3 +596,41 @@ Full investigation details in [FINDINGS.md](FINDINGS.md).
 Magnus Gille — [gille.ai](https://gille.ai)
 
 Built collaboratively with Claude Opus 4.6, with a 2026-05 accuracy audit (token-accounting fix for CC v2.1.122, per-model multipliers, refreshed energy literature) by Claude Opus 4.8. Energy estimates, comparisons, and arithmetic independently verified by OpenAI Codex against DOE, ENERGY STAR, IEA, and Swedish Energy Agency sources.
+
+## Tokenatlas: standalone offline dashboard
+
+Create an interactive Swedish report from the retained local history (Python standard library only):
+
+```bash
+energy-monitor --db /path/to/history.sqlite3 report --html tokenatlas.html
+energy-monitor --db /path/to/history.sqlite3 report --html private.html --private
+open -a Safari private.html
+```
+
+The default HTML pseudonymizes projects, sessions, turns and agents. `--private` retains short unique
+project labels and session references. Neither mode embeds prompts, tool text, source paths, raw usage
+objects or machine IDs. Exact timestamps and model metadata remain in shared reports: pseudonymization
+is not guaranteed anonymity. JSON from the original `--records` command remains a private diagnostic
+export and has different privacy semantics.
+
+The report works without a server, network, CDN or runtime model calls. Filters cover dates, harness,
+provider, model, effort, project, session, agent and thread type. Click a timeline bar to zoom from day
+to hour/minute, or a ranking to filter. Expand sessions and turns for individual observations. CSV/JSON
+exports preserve the current selection, and SVG/print exports support presentations. Top rankings
+retain an Other subtotal. Empty intervals are not claimed to be measured zeros. Large timelines group
+consecutive observed buckets with an explicit note; the horizontal spacing is categorical. Cache-read
+share comparisons show the highest and lowest comparable session, harness, model, and project with
+observation count, input volume, and explicit excluded-group coverage.
+
+Unknown counters remain unknown, ambiguous identities are excluded from the known subtotal, and
+reasoning is normalized as a subset of output even when a harness stores it additively. No invoice,
+quota, wall time or quality is inferred. Source coverage
+is separate from arithmetic completeness. Collector revisions now invalidate file checkpoints so
+existing retained source files are reparsed after parser fixes; lost source files cannot be recovered.
+
+Checks: `python3 -m unittest discover -v` and `python3 test_interactive_export.py`. The release suite
+also builds and installs a wheel in an isolated environment. Optional local browser
+check: `PLAYWRIGHT_MODULE=/path/to/@playwright/test node test_report_browser.cjs /absolute/report.html`.
+Use an existing Playwright installation and its bundled browser; no browser dependency is installed
+by these commands. The browser test blocks network access and checks filters, totals, zoom, drilldown,
+exports and mobile overflow.
