@@ -178,6 +178,119 @@
    "notes": "Pricing page row 'Claude Haiku 4.5'; the dated snapshot id claude-haiku-4-5-20251001 mapped by name (snapshot id itself not on the pricing page). inference_geo is documented for Claude 4.6 and later models only; earlier models do not support it, so no modifier."
   },
   {
+   "provider": "anthropic",
+   "model": "claude-opus-4-8",
+   "aliases": [],
+   "currency": "USD",
+   "input": 5.0,
+   "cache_write_5m": 6.25,
+   "cache_write_1h": 10.0,
+   "cache_write": null,
+   "cache_read": 0.5,
+   "output": 25.0,
+   "long_context": null,
+   "modifiers": {
+    "speed=fast": {
+     "input": 10.0,
+     "cache_write_5m": 12.5,
+     "cache_write_1h": 20.0,
+     "cache_read": 1.0,
+     "output": 50.0
+    },
+    "inference_geo=us": {
+     "multiplier": 1.1
+    }
+   },
+   "free": false,
+   "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "retrieved_on": "2026-09-29",
+   "notes": "Fast mode $10/$50 (shared row with Opus 5); cache prices derived with the standard 1.25x/2x/0.1x multipliers."
+  },
+  {
+   "provider": "anthropic",
+   "model": "claude-opus-4-6",
+   "aliases": [],
+   "currency": "USD",
+   "input": 5.0,
+   "cache_write_5m": 6.25,
+   "cache_write_1h": 10.0,
+   "cache_write": null,
+   "cache_read": 0.5,
+   "output": 25.0,
+   "long_context": null,
+   "modifiers": {
+    "inference_geo=us": {
+     "multiplier": 1.1
+    }
+   },
+   "free": false,
+   "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "retrieved_on": "2026-09-29",
+   "notes": "Fast mode not available (requests run at standard speed and rates)."
+  },
+  {
+   "provider": "anthropic",
+   "model": "claude-opus-4-5",
+   "aliases": [
+    "claude-opus-4-5-20251101"
+   ],
+   "currency": "USD",
+   "input": 5.0,
+   "cache_write_5m": 6.25,
+   "cache_write_1h": 10.0,
+   "cache_write": null,
+   "cache_read": 0.5,
+   "output": 25.0,
+   "long_context": null,
+   "modifiers": {},
+   "free": false,
+   "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "retrieved_on": "2026-09-29",
+   "notes": "inference_geo is supported from Claude 4.6."
+  },
+  {
+   "provider": "anthropic",
+   "model": "claude-fable-5",
+   "aliases": [],
+   "currency": "USD",
+   "input": 10.0,
+   "cache_write_5m": 12.5,
+   "cache_write_1h": 20.0,
+   "cache_write": null,
+   "cache_read": 1.0,
+   "output": 50.0,
+   "long_context": null,
+   "modifiers": {
+    "inference_geo=us": {
+     "multiplier": 1.1
+    }
+   },
+   "free": false,
+   "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "retrieved_on": "2026-09-29",
+   "notes": ""
+  },
+  {
+   "provider": "anthropic",
+   "model": "claude-sonnet-4-5",
+   "aliases": [
+    "claude-sonnet-4-5-20250929"
+   ],
+   "currency": "USD",
+   "input": 3.0,
+   "cache_write_5m": 3.75,
+   "cache_write_1h": 6.0,
+   "cache_write": null,
+   "cache_read": 0.3,
+   "output": 15.0,
+   "long_context": null,
+   "modifiers": {},
+   "free": false,
+   "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "retrieved_on": "2026-09-29",
+   "notes": "inference_geo is supported from Claude 4.6."
+  },
+  {
    "provider": "openai",
    "model": "gpt-6-astra",
    "aliases": [],
