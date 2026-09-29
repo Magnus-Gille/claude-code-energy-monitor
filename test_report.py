@@ -10,8 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from usage.history import ALL_FIELDS
-from usage.report import WARNING_SEPARATOR, build_report, render_report, write_report as _write_report
+from tokenatlas.history import ALL_FIELDS
+from tokenatlas.report import WARNING_SEPARATOR, build_report, render_report, write_report as _write_report
 write_report = _write_report
 
 
@@ -94,6 +94,9 @@ class ReportTests(unittest.TestCase):
     def test_template_uses_neutral_copy_and_cache_comparison_mounts(self):
         html = render_report(build_report([], {}))
         self.assertIn('<h1>Tokenanvändning</h1>', html)
+        self.assertIn('<title>TokenAtlas · ', html)
+        self.assertIn('<span>↗</span>TokenAtlas</div>', html)
+        self.assertNotIn('Tokenatlas', html)
         for label in ('Totalt', 'Input', 'Cache write', 'Cache read', 'Output'):
             self.assertIn(label, html)
         self.assertIn('id="cache-comparisons"', html)

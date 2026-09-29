@@ -7,7 +7,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-import why
+from tokenatlas import why
 
 
 def _write_rollout(path, rows):

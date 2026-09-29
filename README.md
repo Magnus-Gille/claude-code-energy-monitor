@@ -1,4 +1,8 @@
-# Coding Agent Energy Monitor
+# TokenAtlas
+
+*Formerly claude-code-energy-monitor.*
+
+TokenAtlas is a local, private token and cost atlas for AI coding agents (Claude Code, Codex, OpenCode, Pi): a durable history CLI (`tokenatlas`), an offline HTML report, list-price costing, session trees and fixed-context overhead. The statusline and companion scripts below are the original energy monitor and keep working from a checkout.
 
 A statusline script for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that shows real-time token usage and order-of-magnitude energy estimates. It tracks daily, weekly, and monthly totals, distinguishes cheap cached tokens from expensive fresh tokens, and logs history automatically.
 
@@ -52,24 +56,24 @@ transcript totals with the older statusline counter and reports the latter's cov
 
 ## Durable local usage history
 
-`energy-monitor` imports Claude, Codex, Pi, and OpenCode observations into a local SQLite
+`tokenatlas` imports Claude, Codex, Pi, and OpenCode observations into a local SQLite
 history. It needs Python 3.10+ and the standard library, makes no network or LLM
 calls, and does not change your installed statusline.
 
 ```bash
-# Default store: ~/.local/state/agentmon/history.sqlite3 (or XDG_STATE_HOME)
-energy-monitor refresh --harness claude
-energy-monitor refresh --harness codex
-energy-monitor refresh --harness pi
-energy-monitor refresh --harness opencode
-energy-monitor doctor
+# Default store: ~/.local/state/tokenatlas/history.sqlite3 (or XDG_STATE_HOME)
+tokenatlas refresh --harness claude
+tokenatlas refresh --harness codex
+tokenatlas refresh --harness pi
+tokenatlas refresh --harness opencode
+tokenatlas doctor
 
 # Stored history, local time buckets; timestamps must include an offset
-energy-monitor report --start 2026-09-01T00:00:00+02:00 --end 2026-10-01T00:00:00+02:00 --granularity hour
-energy-monitor report --granularity minute --session SESSION_ID --records
+tokenatlas report --start 2026-09-01T00:00:00+02:00 --end 2026-10-01T00:00:00+02:00 --granularity hour
+tokenatlas report --granularity minute --session SESSION_ID --records
 
 # Isolated input/state, useful for a demonstration or fixture
-energy-monitor --db /private/tmp/agentmon-demo/history.sqlite3 refresh --harness claude --root /path/to/transcripts
+tokenatlas --db /private/tmp/tokenatlas-demo/history.sqlite3 refresh --harness claude --root /path/to/transcripts
 ```
 
 All commands print JSON. `refresh` imports only changed files; running it twice
@@ -94,11 +98,11 @@ usage row of a request, so their output can be a lower bound (warning `output_no
 
 ```bash
 # Tree of one root session: subagents, workflows, child sessions, per-model totals
-energy-monitor session <session-id> [--json] [--no-infer]
+tokenatlas session <session-id> [--json] [--no-infer]
 
 # List thread keys, then rate a unit of work (appends to outcomes.jsonl next to the database)
-energy-monitor rate <session-id>
-energy-monitor rate <session-id> --unit review --thread claude:agent:<id> --outcome pass --note "ok"
+tokenatlas rate <session-id>
+tokenatlas rate <session-id> --unit review --thread claude:agent:<id> --outcome pass --note "ok"
 ```
 
 Costs are API-equivalent list prices, not what was paid; unknown cost prints `n/a`. Once outcomes exist,
@@ -106,38 +110,34 @@ Costs are API-equivalent list prices, not what was paid; unknown cost prints `n/
 
 ## Fixed context overhead
 
-`energy-monitor overhead --refresh` reports the floor tokens of a session's first request, the sizes of
+`tokenatlas overhead --refresh` reports the floor tokens of a session's first request, the sizes of
 instruction files, skills lists and skill bodies, and an API-equivalent estimate of re-reading that floor on
 every call. Only sizes, names, counts and token counts are stored, never content. Component tokens are
 character counts divided by 4 (an estimate). A comparison table at the top gives usage-normalized measures per
 harness (fixed share of input, per 1k output, share of cost, calls per session), sorted most efficient first. See [docs/overhead.md](docs/overhead.md).
 
-## Install the history and Tokenatlas CLI
+## Install the history and TokenAtlas CLI
 
 Python 3.10 or newer is required. `pipx` keeps the command isolated from other Python tools:
 
 ```bash
-pipx install claude-code-energy-monitor
-energy-monitor --version
+pipx install git+https://github.com/Magnus-Gille/tokenatlas
+tokenatlas --version
 ```
 
-Before the package is published, or when testing a checkout:
-
-```bash
-pipx install /path/to/claude-code-energy-monitor
-```
+For a checkout, use `pipx install /path/to/tokenatlas`. On systems with an externally managed Python (for example Raspberry Pi OS), use the venv recipe in [docs/remote-machines.md](docs/remote-machines.md). The old `energy-monitor` command remains as a deprecated alias that prints a one-line notice.
 
 Upgrade or remove the command with:
 
 ```bash
-pipx upgrade claude-code-energy-monitor
-pipx uninstall claude-code-energy-monitor
+pipx upgrade tokenatlas
+pipx uninstall tokenatlas
 ```
 
 Uninstalling the command intentionally preserves the local history database at
-`~/.local/state/agentmon/history.sqlite3` (or `$XDG_STATE_HOME/agentmon/history.sqlite3`). Back it up
-or remove it separately according to your own data-retention policy. Running `python3 -m usage` from
-a source checkout remains supported.
+`~/.local/state/tokenatlas/history.sqlite3` (or `$XDG_STATE_HOME/tokenatlas/history.sqlite3`). Back it up
+or remove it separately according to your own data-retention policy. Running `python3 -m tokenatlas` from
+a source checkout remains supported. On first run the former `agentmon` data directory is moved to `tokenatlas` automatically (never with an explicit `--db`).
 
 ## Install the Claude Code statusline
 
@@ -145,7 +145,7 @@ a source checkout remains supported.
 
 > Please set up a custom statusline for me. Do the following:
 >
-> 1. Download `statusline.py` from https://github.com/Magnus-Gille/claude-code-energy-monitor and save it to `~/.claude/statusline.py`
+> 1. Download `statusline.py` from https://github.com/Magnus-Gille/tokenatlas and save it to `~/.claude/statusline.py`
 > 2. Run `chmod +x ~/.claude/statusline.py`
 > 3. Run `claude config set --global statusline "python3 ~/.claude/statusline.py"` to enable it
 
@@ -153,7 +153,7 @@ Or do it manually:
 
 ```bash
 # Download the script
-curl -o ~/.claude/statusline.py https://raw.githubusercontent.com/Magnus-Gille/claude-code-energy-monitor/master/statusline.py
+curl -o ~/.claude/statusline.py https://raw.githubusercontent.com/Magnus-Gille/tokenatlas/master/statusline.py
 
 # Make it executable
 chmod +x ~/.claude/statusline.py
@@ -550,7 +550,7 @@ A typical day of AI-assisted coding likely falls in the 1–5 kWh range (mid est
 | Energy estimates | Yes | Yes | Yes |
 | Daily history | Yes | Yes | Yes |
 | Prompt cache tracking | Yes | Yes | Yes |
-| Durable history and Tokenatlas | Yes | Yes | Yes** |
+| Durable history and TokenAtlas | Yes | Yes | Yes** |
 | API quota display | Yes | Yes* | Yes* |
 
 \* Quota now comes primarily from the statusline payload's `rate_limits` fields (Claude Code v2.1.80+, Pro/Max), which work on every platform with no API call. The legacy fallback reads the OAuth token from the macOS Keychain via the `security` command and is macOS-only; on Linux/Windows it's simply skipped. So if your build provides `rate_limits`, quota shows everywhere; otherwise it's macOS-only.
@@ -620,13 +620,13 @@ Magnus Gille — [gille.ai](https://gille.ai)
 
 Built collaboratively with Claude Opus 4.6, with a 2026-05 accuracy audit (token-accounting fix for CC v2.1.122, per-model multipliers, refreshed energy literature) by Claude Opus 4.8. Energy estimates, comparisons, and arithmetic independently verified by OpenAI Codex against DOE, ENERGY STAR, IEA, and Swedish Energy Agency sources.
 
-## Tokenatlas: standalone offline dashboard
+## TokenAtlas: standalone offline dashboard
 
 Create an interactive Swedish report from the retained local history (Python standard library only):
 
 ```bash
-energy-monitor --db /path/to/history.sqlite3 report --html tokenatlas.html
-energy-monitor --db /path/to/history.sqlite3 report --html private.html --private
+tokenatlas --db /path/to/history.sqlite3 report --html tokenatlas.html
+tokenatlas --db /path/to/history.sqlite3 report --html private.html --private
 open -a Safari private.html
 ```
 

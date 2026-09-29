@@ -69,7 +69,7 @@ jobs:
           npx playwright install --with-deps ${{ matrix.browser }}
       - name: Build installed-package smoke report
         env:
-          ENERGY_MONITOR_SMOKE_REPORT: ${{ runner.temp }}/tokenatlas-smoke.html
+          TOKENATLAS_SMOKE_REPORT: ${{ runner.temp }}/tokenatlas-smoke.html
         run: python test_release_artifact.py
       - name: Check report offline
         env:

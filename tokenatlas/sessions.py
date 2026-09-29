@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-from usage.history import _has_private_permissions, _owned_by_current_user
+from tokenatlas.history import _has_private_permissions, _owned_by_current_user
 
 HARNESSES = ('claude', 'codex', 'pi', 'opencode')
 HEADLESS = ('codex_exec', 'exec', 'sdk-cli', 'sdk-py', 'sdk-ts')
@@ -25,8 +25,8 @@ def _slashed(path):
 
 
 def default_pricer(prices_path=None):
-    """Return (price callable, table retrieved date) from usage.pricing; imported lazily."""
-    from usage import pricing
+    """Return (price callable, table retrieved date) from tokenatlas.pricing; imported lazily."""
+    from tokenatlas import pricing
     table = pricing.load_prices(prices_path)
     return (lambda obs: pricing.price_observation(obs, table)), table.get('retrieved_on') or 'unknown'
 

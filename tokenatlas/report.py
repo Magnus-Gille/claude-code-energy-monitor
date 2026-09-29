@@ -10,7 +10,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from usage.history import ALL_FIELDS
+from tokenatlas.history import ALL_FIELDS
 
 PUBLIC_NAMES = dict(
     provider=frozenset('anthropic openai openai-codex openrouter opencode berget google mistral'.split()),

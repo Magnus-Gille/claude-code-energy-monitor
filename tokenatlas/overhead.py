@@ -409,7 +409,7 @@ def _dominant(records):
 def _joined(records, table):
     """Per (harness, session key) history totals: input, output, cost (None when any observation lacks it),
     whether output is a lower bound.  Claude subagent rows are keyed by session and agent file id (else agent field) apart from the main rows."""
-    from usage import pricing
+    from tokenatlas import pricing
     out = {}
     for r in records:
         sub = r.get('harness') == 'claude' and r.get('thread_kind') == 'subagent'
@@ -532,7 +532,7 @@ def summarize(db, since=None, until=None, harness=None, records=None, prices=Non
             sessions[(h, s)]['skills'].append((name, chars, source))
     table, tariffs = None, {}
     if records is not None:
-        from usage import pricing
+        from tokenatlas import pricing
         table = prices if prices is not None else pricing.load_prices()
         models, joined = _dominant(records), _joined(records, table)
         tariffs = _dominant_tariff(records, models)
@@ -660,8 +660,8 @@ def render(result):
 
 def run(args):
     """`overhead` command: optional rescan of the default roots, then the report; returns the exit status."""
-    import why
-    from usage.history import History
+    from tokenatlas import why
+    from tokenatlas.history import History
     if not args.refresh and not args.db.expanduser().is_file():
         raise ValueError('history database does not exist; run refresh or overhead --refresh first')
     roots = {'claude': why.CLAUDE_PROJECTS, 'codex': why.CODEX_SESSIONS, 'pi': why.PI_SESSIONS, 'opencode': why.OPENCODE_DB}

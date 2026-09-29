@@ -9,8 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test_why_harnesses import create_opencode_db, pi_message, write_pi_session
-from usage import overhead
-from usage.__main__ import main
+from tokenatlas import overhead
+from tokenatlas.__main__ import main
 
 SECRET = 'SECRET-MARKER-9f3a'
 PRIVATE = 'PRIVATE-PATH-zz'
@@ -552,7 +552,7 @@ class CliTests(unittest.TestCase):
             roots = {'CLAUDE_PROJECTS': root, 'CODEX_SESSIONS': Path(tmp) / 'none', 'PI_SESSIONS': Path(tmp) / 'none',
                      'OPENCODE_DB': Path(tmp) / 'none.db'}
             out = io.StringIO()
-            with patch.multiple('why', **roots), redirect_stdout(out):
+            with patch.multiple('tokenatlas.why', **roots), redirect_stdout(out):
                 self.assertEqual(main(['--db', str(db), 'overhead', '--refresh', '--json']), 0)
             data = json.loads(out.getvalue())
             self.assertEqual(data['harnesses']['claude']['floor']['n'], 2)

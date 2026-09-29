@@ -1,4 +1,4 @@
-"""python -m usage: local refresh, report, and doctor."""
+"""python -m tokenatlas: local refresh, report, and doctor."""
 import argparse
 import json
 import os
@@ -8,11 +8,11 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import why
-from usage import __version__
-from usage import sessions
-from usage.history import History, summarize
-from usage.report import build_report, render_report, write_report
+from tokenatlas import why
+from tokenatlas import __version__
+from tokenatlas import sessions
+from tokenatlas.history import History, summarize
+from tokenatlas.report import build_report, render_report, write_report
 
 
 def aggregate(results):
@@ -24,11 +24,25 @@ def aggregate(results):
                 coverage_complete=False,roots=results,**total)
 
 
+def default_db():
+    """Default history path; one-time move of the pre-rename agentmon directory (never used with --db)."""
+    base=Path(os.environ.get('XDG_STATE_HOME',Path.home()/'.local/state'))
+    new,old=base/'tokenatlas',base/'agentmon'
+    if old.is_dir():
+        if new.exists():
+            print(f'warning: {old} left in place; using {new}',file=sys.stderr)
+        else:
+            os.rename(old,new)
+            print(f'moved history from {old} to {new}',file=sys.stderr)
+    return new/'history.sqlite3'
+
+
 def main(argv=None):
-    parser=argparse.ArgumentParser(description='Local observed token history; no network or LLM calls.')
+    if Path(sys.argv[0]).name.lower() in ('energy-monitor','energy-monitor.exe','energy-monitor-script.py'):
+        print('energy-monitor is deprecated; use tokenatlas',file=sys.stderr)
+    parser=argparse.ArgumentParser(prog='tokenatlas',description='Local observed token history; no network or LLM calls.')
     parser.add_argument('--version',action='version',version=f'%(prog)s {__version__}')
-    default=Path(os.environ.get('XDG_STATE_HOME',Path.home()/'.local/state'))/'agentmon/history.sqlite3'
-    parser.add_argument('--db',type=Path,default=default)
+    parser.add_argument('--db',type=Path,help='History database; default $XDG_STATE_HOME/tokenatlas/history.sqlite3.')
     commands=parser.add_subparsers(dest='command',required=True)
     refresh=commands.add_parser('refresh',help='Import changed files; preserve retained observations.')
     refresh.add_argument('--harness',choices=('claude','codex','pi','opencode'),required=True)
@@ -73,6 +87,7 @@ def main(argv=None):
     overhead.add_argument('--json',action='store_true')
     commands.add_parser('doctor',help='Show source availability, import errors and known coverage limits.')
     args=parser.parse_args(argv)
+    if args.db is None:args.db=default_db()
     try:
         start=end=None
         if args.command=='report':
@@ -89,7 +104,7 @@ def main(argv=None):
             if args.html and args.html.expanduser().resolve()==args.db.expanduser().resolve():
                 raise ValueError('HTML output must not replace the history database')
         if args.command=='overhead':
-            from usage import overhead as _overhead
+            from tokenatlas import overhead as _overhead
             return _overhead.run(args)
         if args.command not in ('refresh','import') and not args.db.expanduser().is_file():
             raise ValueError('history database does not exist; run refresh first')

@@ -9,9 +9,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from usage import sessions
-from usage.__main__ import main
-from usage.history import History
+from tokenatlas import sessions
+from tokenatlas.__main__ import main
+from tokenatlas.history import History
 
 BASE = datetime(2026, 9, 10, 10, tzinfo=timezone.utc)
 RATE = {'m-a': 1e-6, 'm-b': 2e-6}
@@ -294,8 +294,8 @@ class OutcomeFileSafetyTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.item) + '\n'); self.path.chmod(0o600)
         real_fstat = os.fstat
         loose = lambda fd: os.stat_result((stat.S_IFREG | 0o644,) + tuple(real_fstat(fd))[1:])
-        with patch('usage.sessions.os.lstat', side_effect=AssertionError('path-based check')), \
-                patch('usage.sessions.os.fstat', side_effect=loose):
+        with patch('tokenatlas.sessions.os.lstat', side_effect=AssertionError('path-based check')), \
+                patch('tokenatlas.sessions.os.fstat', side_effect=loose):
             with self.assertRaisesRegex(ValueError, '0600'):
                 sessions.append_outcome(self.path, self.item)
         self.assertEqual(len(self.path.read_text().splitlines()), 1)
@@ -308,7 +308,7 @@ class OutcomeFileSafetyTests(unittest.TestCase):
             if not flags & os.O_CREAT and not self.path.is_symlink():
                 self.path.unlink(); self.path.symlink_to(target)  # replaced just before the open
             return real_open(path, flags, *a)
-        with patch('usage.sessions.os.open', side_effect=swapping_open):
+        with patch('tokenatlas.sessions.os.open', side_effect=swapping_open):
             with self.assertRaisesRegex(ValueError, 'symlink'):
                 sessions.append_outcome(self.path, self.item)
         self.assertEqual(target.read_text(), 'x\n')
@@ -335,7 +335,7 @@ class CliTests(unittest.TestCase):
         self.write(proj / 'S/subagents/agent-a1.jsonl', 'S', 'a1', 'req1', '2026-09-10T10:05:00Z')
         with History(self.db) as h:
             h.refresh('claude', self.root / 'logs')
-        patcher = patch('usage.sessions.default_pricer', return_value=(fake_price, '2026-09-01'))
+        patcher = patch('tokenatlas.sessions.default_pricer', return_value=(fake_price, '2026-09-01'))
         patcher.start(); self.addCleanup(patcher.stop)
 
     @staticmethod

@@ -9,36 +9,36 @@ Python 3.10 or newer, stdlib only, no dependencies. Debian 12/13 and Raspberry P
 Python as externally managed (PEP 668), so `pip install --user` fails. Use a venv, pinned to a commit
 or tag:
 
-    python3 -m venv ~/.local/share/energy-monitor/venv
-    ~/.local/share/energy-monitor/venv/bin/pip install "git+https://github.com/Magnus-Gille/claude-code-energy-monitor@<commit>"
-    ln -sf ~/.local/share/energy-monitor/venv/bin/energy-monitor ~/.local/bin/energy-monitor
+    python3 -m venv ~/.local/share/tokenatlas/venv
+    ~/.local/share/tokenatlas/venv/bin/pip install "git+https://github.com/Magnus-Gille/tokenatlas@<commit>"
+    ln -sf ~/.local/share/tokenatlas/venv/bin/tokenatlas ~/.local/bin/tokenatlas
 
-`pipx install "git+https://github.com/Magnus-Gille/claude-code-energy-monitor@<commit>"` works as well.
+`pipx install "git+https://github.com/Magnus-Gille/tokenatlas@<commit>"` works as well.
 
 Refresh on a schedule, one line per harness in use (cron, `crontab -e`). Cron has a short `PATH`, so
 use the full path:
 
-    */30 * * * * ~/.local/bin/energy-monitor refresh --harness claude
-    */30 * * * * ~/.local/bin/energy-monitor refresh --harness pi
-    */30 * * * * ~/.local/bin/energy-monitor refresh --harness codex
+    */30 * * * * ~/.local/bin/tokenatlas refresh --harness claude
+    */30 * * * * ~/.local/bin/tokenatlas refresh --harness pi
+    */30 * * * * ~/.local/bin/tokenatlas refresh --harness codex
 
 `remote_sync.sh` puts `~/.local/bin` on `PATH` locally and for every command it runs over
 non-interactive ssh, so a user install is found on both ends. To try the sync without touching your
 default database, set `ENERGY_MONITOR_DB=/path/to/test.sqlite3`; the local import then uses
-`energy-monitor --db <path> import ...`.
+`tokenatlas --db <path> import ...`.
 
 ## Bring it home
 
-`remote_sync.sh` does this per host after the JSONL pulls, when `command -v energy-monitor` succeeds
-remotely (with `~/.local/bin` prepended to `PATH`): `energy-monitor snapshot` on the host, `scp` to `~/.local/state/agentmon/remote/<tag>.sqlite3`
-(directory mode 0700), then `energy-monitor import ... --label <tag>` locally. A host without it prints
+`remote_sync.sh` does this per host after the JSONL pulls, when `command -v tokenatlas || command -v energy-monitor` succeeds
+remotely (with `~/.local/bin` prepended to `PATH`): `tokenatlas snapshot` on the host (`energy-monitor snapshot` on a not-yet-upgraded remote), `scp` to `~/.local/state/tokenatlas/remote/<tag>.sqlite3`
+(directory mode 0700), then `tokenatlas import ... --label <tag>` locally. A host without it prints
 `history: not installed on <tag>` and the loop continues.
 
 By hand:
 
-    ssh pi energy-monitor snapshot '~/.local/state/agentmon/snapshot.sqlite3'
-    scp pi:.local/state/agentmon/snapshot.sqlite3 ./pi.sqlite3
-    energy-monitor import ./pi.sqlite3 --label pi
+    ssh pi tokenatlas snapshot '~/.local/state/tokenatlas/snapshot.sqlite3'
+    scp pi:.local/state/tokenatlas/snapshot.sqlite3 ./pi.sqlite3
+    tokenatlas import ./pi.sqlite3 --label pi
 
 `snapshot` writes a consistent 0600 copy with the SQLite backup API, atomically, and refuses the
 database itself as target. `import` works on a temporary copy (an older schema is migrated on the copy,

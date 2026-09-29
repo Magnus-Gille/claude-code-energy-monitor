@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 
-import why
+from tokenatlas import why
 
 
 START = datetime(2026, 9, 3, tzinfo=timezone.utc)

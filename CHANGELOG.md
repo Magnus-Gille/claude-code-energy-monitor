@@ -6,14 +6,15 @@ All notable changes to this project are documented in this file. The project fol
 
 ### Added
 
-- List-price cost per observation (`usage/pricing.py`, packaged `usage/prices.json` with verified 2026-09-29 prices and source URLs): input, 5m/1h cache writes, cache read and output priced separately, long-context tiers, Claude fast mode and US inference; unknown prices or tariff dimensions give `n/a`/partial, never zero. Costs are API-equivalent at list price, not what was paid.
-- `energy-monitor session <id>`: a session tree (Claude subagents and Workflow runs, explicit children, inferred headless children, unassigned threads) with per-model tokens and cost, conductor overhead, and cost per passed unit from an optional outcomes file; `energy-monitor rate` records outcomes.
+- List-price cost per observation (`tokenatlas/pricing.py`, packaged `tokenatlas/prices.json` with verified 2026-09-29 prices and source URLs): input, 5m/1h cache writes, cache read and output priced separately, long-context tiers, Claude fast mode and US inference; unknown prices or tariff dimensions give `n/a`/partial, never zero. Costs are API-equivalent at list price, not what was paid.
+- `tokenatlas session <id>`: a session tree (Claude subagents and Workflow runs, explicit children, inferred headless children, unassigned threads) with per-model tokens and cost, conductor overhead, and cost per passed unit from an optional outcomes file; `tokenatlas rate` records outcomes.
 - Claude desktop Cowork transcripts (`local-agent-mode-sessions/*/*/local_*/.claude/projects`) are imported by `refresh --harness claude` with origin `local-agent`; `audit.jsonl` is never read.
-- `energy-monitor snapshot` and `import` merge history from other machines (see `docs/remote-machines.md`); `remote_sync.sh` pulls it.
-- `energy-monitor overhead`: per-harness context floor, fixed-context component sizes (instruction files, skill listing, MCP instructions, system prompt), skill uses and an estimated recurring re-read cost. Only sizes, names and counts are stored.
+- `tokenatlas snapshot` and `import` merge history from other machines (see `docs/remote-machines.md`); `remote_sync.sh` pulls it.
+- `tokenatlas overhead`: per-harness context floor, fixed-context component sizes (instruction files, skill listing, MCP instructions, system prompt), skill uses and an estimated recurring re-read cost. Only sizes, names and counts are stored.
 
 ### Changed
 
+- Renamed to TokenAtlas: command `tokenatlas` (`energy-monitor` remains a deprecated alias), package `tokenatlas`, data directory `~/.local/state/tokenatlas` (migrated automatically from `agentmon`).
 - Claude observations record their tariff (speed, service tier, inference geography); the collector version is 5, so existing files are re-read once.
 
 ## [1.2.0] - Unreleased
