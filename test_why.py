@@ -107,6 +107,104 @@ class ClaudeAttributionTests(unittest.TestCase):
 
         self.assertEqual(records[0].project, "project-from-path")
 
+    def test_enrichment_is_stable_across_windows_and_does_not_store_prompt_text(self):
+        usage = {
+            "input_tokens": 3,
+            "cache_read_input_tokens": -1,
+            "output_tokens": 7,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 11,
+                "ephemeral_1h_input_tokens": 13,
+                "secret": "drop",
+            },
+            "output_tokens_details": {"thinking_tokens": 2, "secret": "drop"},
+            "iterations": [{
+                "type": "message", "model": "claude-test",
+                "input_tokens": 3, "prompt": "do not retain",
+            }],
+            "prompt": "do not retain",
+            "invalid_tokens": -1,
+        }
+        rows = [
+            {"type": "user", "uuid": "turn-1", "timestamp": "2026-09-02T23:59:00Z",
+             "message": {"role": "user", "content": "private prompt"}},
+            _claude_row("2026-09-02T23:59:59Z", None, usage, uuid="uuid-a",
+                        message={"id": "message-1", "model": "claude-test", "usage": usage},
+                        cwd="/work/project", version="v-test"),
+            _claude_row("2026-09-03T00:00:01Z", None, {**usage, "output_tokens": 9}, uuid="uuid-b",
+                        message={"id": "message-1", "model": "claude-test", "usage": {**usage, "output_tokens": 9}},
+                        cwd="/work/project", version="v-test"),
+            _claude_row("2026-09-03T00:00:02Z", "advisor-only", {
+                "iterations": [{"type": "message", "model": "claude-test"}],
+            }, cwd="/work/project", version="v-test"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "project" / "session.jsonl"
+            _write_jsonl(path, rows)
+            narrow = why.collect_claude(root, self.start, self.end, paths=[path])
+            full = why.collect_claude(
+                root,
+                datetime(2026, 9, 2, tzinfo=timezone.utc),
+                self.end,
+                paths=[path],
+            )
+
+        self.assertEqual([record.call_id for record in narrow], ["message-1", "advisor-only"])
+        self.assertEqual(narrow[0].output, 9)
+        self.assertEqual(narrow[0].call_id, full[0].call_id)
+        self.assertEqual(narrow[0].turn_id, "turn-1")
+        self.assertEqual(narrow[0].turn_confidence, "derived")
+        self.assertEqual(narrow[0].project_id, "/work/project")
+        self.assertEqual(narrow[0].harness_version, "v-test")
+        self.assertNotIn("prompt", narrow[0].raw_usage)
+        self.assertNotIn("invalid_tokens", narrow[0].raw_usage)
+        self.assertIsNone(narrow[0].raw_usage["cache_read_input_tokens"])
+        self.assertEqual(narrow[0].raw_usage["cache_creation"], {
+            "ephemeral_5m_input_tokens": 11,
+            "ephemeral_1h_input_tokens": 13,
+        })
+        self.assertEqual(narrow[0].raw_usage["iterations"], [{
+            "type": "message", "model": "claude-test", "input_tokens": 3,
+        }])
+        self.assertEqual(narrow[1].raw_usage["iterations"], [{
+            "type": "message", "model": "claude-test",
+        }])
+
+    def test_nested_cache_write_counts_and_growing_iterations_keep_prior_maxima(self):
+        raw={'input_tokens':1,'output_tokens':2,'cache_creation':{
+            'ephemeral_5m_input_tokens':3,'ephemeral_1h_input_tokens':4}}
+        rows=[_claude_row('2026-09-03T10:00:00Z','req',raw)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);path=root/'session.jsonl';_write_jsonl(path,rows)
+            record=why.collect_claude(root,self.start,self.end)[0]
+        self.assertEqual(record.cache_write,7)
+        first={'iterations':[{'type':'message','output_tokens':20}]}
+        second={'iterations':[{'type':'message','output_tokens':5},{'type':'advisor_message','output_tokens':10}]}
+        merged=why._merge_sanitized_usage(first,second)
+        self.assertEqual(merged['iterations'][0]['output_tokens'],20)
+        self.assertEqual(len(merged['iterations']),2)
+
+    def test_project_summary_uses_full_project_ids(self):
+        records = [
+            why.AttributionRecord(
+                harness="claude", provider="anthropic", timestamp=self.start,
+                session_id="s1", call_id="a", model="m", effort="high",
+                project="repo", project_id="/one/repo", entrypoint="cli",
+                thread_kind="main", agent="main", fresh_input=1, cache_read=0,
+                cache_write=0, output=0, reasoning=0,
+            ),
+            why.AttributionRecord(
+                harness="claude", provider="anthropic", timestamp=self.start,
+                session_id="s2", call_id="b", model="m", effort="high",
+                project="repo", project_id="/two/repo", entrypoint="cli",
+                thread_kind="main", agent="main", fresh_input=1, cache_read=0,
+                cache_write=0, output=0, reasoning=0,
+            ),
+        ]
+        names = {row["name"] for row in why.summarize_records(records)["groups"]["project"]}
+        self.assertEqual(names, {"/one/repo", "/two/repo"})
+
     def test_filters_by_event_time_and_ignores_malformed_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
