@@ -20,6 +20,10 @@ PUBLIC_NAMES = dict(
     turn_confidence=frozenset('observed derived absent'.split()),
 )
 CONSERVATIVE_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._: -]{0,120}')
+PUBLIC_MODEL = re.compile(
+    r'(?:(?:openai|anthropic|google|qwen|z-ai|zai-org|mistralai|meta-llama|deepseek|moonshotai|x-ai)/)?'
+    r'(?:claude|gpt|o[0-9]|codex|gemini|gemma|mistral|devstral|qwen|llama|deepseek|glm|kimi|grok)'
+    r'[A-Za-z0-9._-]{0,100}', re.IGNORECASE)
 
 
 def build_report(records, source_status, timezone_name='Europe/Stockholm', redact=True):
@@ -45,7 +49,7 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
         if value is None or not redact:
             return value
         if kind == 'model':
-            public = record.get('provider') in PUBLIC_NAMES['provider'] and CONSERVATIVE_NAME.fullmatch(str(value))
+            public = record.get('provider') in PUBLIC_NAMES['provider'] and PUBLIC_MODEL.fullmatch(str(value))
         elif record is None:
             public = CONSERVATIVE_NAME.fullmatch(str(value))
         else:

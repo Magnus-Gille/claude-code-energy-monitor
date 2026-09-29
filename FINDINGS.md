@@ -358,3 +358,9 @@ The old `update_daily` accumulated `max(0, total_input − prev)` and `max(0, to
 The fix accumulates per-call `current_usage` fields, detecting call boundaries (input-side signature change **or** output reset — the latter also fixes a pre-existing miss on consecutive identical fully-cached calls) and summing each call once. The corrected logic was replay-validated to match ground truth exactly on all four token types. Net effect: the fresh-input energy share falls from a spurious ~12–15% to ~1% (real prefill work is correctly attributed to cache creation); output is no longer under-counted; cache terms are unchanged.
 
 Full constant-level discussion, new 2026 energy literature, and per-model multipliers are in [docs/energy-constants.md](docs/energy-constants.md#2026-05-30-audit-update).
+
+## Claude subagent transcripts lack the final usage row — 2026-09-29
+
+Claude Code subagent transcripts often never contain the final usage row of a request: only the stream-start snapshot is written, with `message.stop_reason: null` and `output_tokens` of a few tokens even for long outputs. On one machine, 1,537 of 3,125 subagent requests and 209 of 219 workflow-agent requests had no row with a `stop_reason`, against 0 of 3,256 main-thread requests. The share varies by Claude Code version: 2.1.270 had 15 of 1,792 requests without a final row, 2.1.282 had 791 of 1,798, and 2.1.284 had 406 of 706.
+
+History now records `output_final` per Claude request. When no row carries a `stop_reason`, the observation gets the warning `output_not_final`, is incomplete, and its output and reasoning confidence is `lower_bound`. Recovering the true subagent output from another source is future work.

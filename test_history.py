@@ -30,7 +30,7 @@ def write_claude(path, request='req', output=5):
     rows=[{'type':'user','uuid':'prompt-1','message':{'role':'user','content':'PRIVATE PROMPT'}},
           {'type':'assistant','uuid':'response-'+request,'requestId':request,
            'sessionId':'session','cwd':'/work/client/app','version':'test-version',
-           'timestamp':'2026-09-03T10:00:00Z','message':{'id':'msg-'+request,'model':'test-model',
+           'timestamp':'2026-09-03T10:00:00Z','message':{'id':'msg-'+request,'model':'test-model','stop_reason':'end_turn',
              'usage':{'input_tokens':10,'cache_read_input_tokens':20,
                       'cache_creation_input_tokens':0,'output_tokens':output}}}]
     path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
@@ -409,6 +409,57 @@ class HistoryReviewTests(unittest.TestCase):
         self.assertEqual((item['model'], item['effort'], item['session']), (None, None, 'unknown'))
         self.assertEqual(normalize(record(model='x' * 300), 'm')['model'], None)
 
+    def test_iteration_model_and_type_are_bounded_printable_strings(self):
+        import why
+        raw = {'input_tokens': 1, 'output_tokens': 1, 'iterations': [
+            {'type': 'message', 'model': 'x' * 300}, {'type': {'p': 'SECRET'}, 'model': 'ok-model'}]}
+        item = normalize(record(raw_usage=raw), 'm')
+        self.assertEqual(item['raw_usage']['iterations'],
+                         [{'type': 'message'}, {'model': 'ok-model'}])
+        self.assertNotIn('SECRET', json.dumps(item))
+        self.assertEqual(why._sanitize_usage(raw)['iterations'],
+                         [{'type': 'message'}, {'model': 'ok-model'}])
+
+    def test_output_not_final_is_a_lower_bound_and_merges_in_both_orders(self):
+        usage = {'input_tokens': 10, 'cache_read_input_tokens': 20, 'cache_creation_input_tokens': 0,
+                 'output_tokens': 5}
+        def obs(final, output=5, **kw):
+            item = normalize(record(raw_usage=dict(usage, output_tokens=output), output=output,
+                                    output_final=final, **kw), 'm')
+            return item
+        partial, done, unknown = obs(False), obs(True, 90), obs(None, 7)
+        self.assertFalse(partial['complete'])
+        self.assertFalse(partial['output_final'])
+        self.assertIn('output_not_final', partial['warnings'])
+        self.assertEqual((partial['confidence']['output'], partial['confidence']['reasoning']),
+                         ('lower_bound', 'absent'))
+        self.assertEqual(partial['confidence']['fresh_input'], 'observed')
+        self.assertTrue(done['complete'])
+        self.assertEqual(done['confidence']['output'], 'observed')
+        self.assertIsNone(unknown['output_final'])
+        self.assertTrue(unknown['complete'])
+        for a, b in ((partial, done), (done, partial)):
+            merged = merge_observations(a, b)
+            self.assertTrue(merged['output_final'])
+            self.assertTrue(merged['complete'])
+            self.assertEqual(merged['tokens']['output'], 90)
+        for a, b in ((partial, unknown), (unknown, partial)):
+            merged = merge_observations(a, b)
+            self.assertFalse(merged['output_final'])
+            self.assertIn('output_not_final', merged['warnings'])
+            self.assertEqual(merged['confidence']['output'], 'lower_bound')
+        legacy = {k: v for k, v in partial.items() if k != 'output_final'}
+        legacy['warnings'] = []
+        merged = merge_observations(legacy, unknown)
+        self.assertIsNone(merged['output_final'])
+        self.assertTrue(merged['complete'])
+        merged = merge_observations(legacy, partial)
+        self.assertFalse(merged['output_final'])
+
+    def test_collector_version_change_invalidates_file_fingerprints(self):
+        import usage.history as history
+        self.assertGreaterEqual(history.COLLECTOR_VERSION, 4)
+
     def test_total_token_counters_survive_persistence(self):
         item = normalize(record(raw_usage={'input_tokens': 1, 'output_tokens': 1,
                                            'total_input_tokens': 7, 'total_output_tokens': 3}), 'm')
@@ -427,6 +478,41 @@ class HistoryReviewTests(unittest.TestCase):
                 self.assertEqual(merge_observations(obs(first, late), obs(second, early))['session'], second)
         merged = merge_observations(obs('zzz', early, 'zzz'), obs('aaa', late, None))
         self.assertEqual((merged['session'], merged['parent_session']), ('zzz', 'zzz'))
+
+    def test_refresh_same_request_in_two_sessions_is_deterministic(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.db = self.root / 'state/history.sqlite3'
+        def put(path, session, ts):
+            write_claude(path)
+            rows = [json.loads(x) for x in path.read_text().splitlines()]
+            rows[-1].update(sessionId=session, timestamp=ts)
+            path.write_text(''.join(json.dumps(x) + '\n' for x in rows))
+        a, b = self.root / 'logs/a.jsonl', self.root / 'logs/b.jsonl'
+        tie = '2026-09-03T10:00:00Z'
+        put(a, 'sess-a', tie)
+        with History(self.db) as h:
+            h.refresh('claude', a.parent)
+            put(b, 'sess-b', tie)
+            h.refresh('claude', a.parent)
+            (item,) = h.records()
+            # On a tie the stored (first imported) session wins, whatever the ids are.
+            self.assertEqual(item['session'], 'sess-a')
+            self.assertEqual(item['sources'], sorted([str(a), str(b)]))
+            self.assertEqual(item['tokens']['output'], 5)
+            put(b, 'sess-b', '2026-09-03T09:00:00Z')
+            h.refresh('claude', a.parent)
+            self.assertEqual(h.records()[0]['session'], 'sess-b')
+        put(a, 'sess-b', tie); put(b, 'sess-a', tie)
+        with History(self.root / 'state/fresh.sqlite3') as h:
+            h.refresh('claude', a.parent)
+            (item,) = h.records()
+            # A fresh import reads a.jsonl first, so the tie goes to it: owners can differ
+            # between fresh and incremental imports on an exact tie (accepted, documented).
+            self.assertEqual(item['session'], 'sess-b')
+            self.assertEqual(item['sources'], sorted([str(a), str(b)]))
+            self.assertEqual(item['tokens']['output'], 5)
 
     def test_hour_buckets_are_ordered_by_instant_across_dst_fall_back(self):
         rows = [normalize(record(str(i), timestamp=ts, raw_usage={

@@ -18,10 +18,15 @@ All notable changes to this project are documented in this file. The project fol
 - `why.py` defaults to all supported harnesses while retaining `--harness both` for Claude and Codex.
 - Session identities are harness-scoped in summaries and reports.
 - OpenCode reasoning is normalized as a subset of output while retained as a separate subtotal.
+- Claude subagent transcripts are linked to their parent session from the transcript path.
+- Claude output is flagged as a lower bound (`output_not_final`) when a request's transcript lacks the final usage row; the collector version is bumped so existing files are re-read.
+- Hour and minute buckets are ordered by instant across DST changes.
 
 ### Security
 
 - History persistence uses an explicit allowlist and never stores prompts, assistant text, tool content, credentials, hostnames, or hardware identifiers. It generates a random local ID to scope synthetic identities to one database.
+- Shared reports show provider, origin, effort, and model names only from explicit public allowlists and pseudonymize everything else, including fine-tune ids and host names.
+- Metadata strings, including iteration `model` and `type`, must be bounded printable text or they are dropped.
 - Shared reports pseudonymize project, session, turn, observation, and agent identities by default.
 - Generated reports are standalone and make no network or model calls.
 

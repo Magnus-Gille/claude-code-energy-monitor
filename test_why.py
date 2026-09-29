@@ -355,6 +355,38 @@ class ClaudeMetadataReviewTests(unittest.TestCase):
                               records[call_id].thread_kind), ("parent-uuid", "parent-uuid", "subagent"))
         self.assertEqual((records["req-3"].session_id, records["req-3"].parent_session_id), ("top-session", None))
 
+    def test_workflow_path_supplies_session_and_parent_without_session_id(self):
+        row = _claude_row("2026-09-03T12:00:00Z", "req", self.usage)
+        row.pop("sessionId")
+        record = self.collect({"proj/sess-x/subagents/workflows/wf_x/agent-a.jsonl": [row]})[0]
+        self.assertEqual((record.session_id, record.parent_session_id, record.thread_kind),
+                         ("sess-x", "sess-x", "subagent"))
+
+    def test_subagents_named_root_or_ancestor_does_not_confuse_path_derivation(self):
+        row = _claude_row("2026-09-03T12:00:00Z", "req", self.usage)
+        row.pop("sessionId")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "subagents" / "root"
+            _write_jsonl(root / "project" / "top.jsonl", [dict(row, requestId="r1")])
+            _write_jsonl(root / "project" / "parent" / "subagents" / "agent.jsonl", [dict(row, requestId="r2")])
+            records = {r.call_id: r for r in why.collect_claude(root, self.start, self.end)}
+        self.assertEqual((records["r1"].session_id, records["r1"].parent_session_id, records["r1"].thread_kind),
+                         ("top", None, "main"))
+        self.assertEqual((records["r2"].session_id, records["r2"].parent_session_id), ("parent", "parent"))
+
+    def test_output_final_requires_a_stop_reason_on_some_row(self):
+        def row(ts, output, stop):
+            r = _claude_row(ts, "req", {"input_tokens": 5, "output_tokens": output})
+            r["message"]["stop_reason"] = stop
+            return r
+        start = row("2026-09-03T12:00:00Z", 3, None)
+        done = row("2026-09-03T12:00:05Z", 90, "end_turn")
+        cases = ([start], [start, dict(start, timestamp="2026-09-03T12:00:01Z")], [start, done], [done, start])
+        result = [self.collect({"p/s.jsonl": rows})[0] for rows in cases]
+        self.assertEqual([r.output_final for r in result], [False, False, True, True])
+        self.assertEqual(result[2].output, 90)
+        self.assertIs(self.collect({"p/s.jsonl": [row("2026-09-03T12:00:00Z", 3, "")]})[0].output_final, False)
+
     def test_explicit_parent_session_field_wins_over_path(self):
         row = _claude_row("2026-09-03T12:00:00Z", "req", self.usage, agentId="a1", parentSessionId="explicit")
         record = self.collect({"proj/dir-session/subagents/agent-a1.jsonl": [row]})[0]

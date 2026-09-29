@@ -55,6 +55,7 @@ class AttributionRecord:
     session_started_at: datetime | None = None
     raw_usage: dict = field(default_factory=dict)
     id_synthetic: bool = False
+    output_final: bool | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -174,8 +175,8 @@ def _sanitize_iteration(value: object) -> dict | None:
     # These identify the billing/model variant without retaining arbitrary
     # iteration text.  All other strings are intentionally discarded.
     for key in ("type", "model"):
-        if isinstance(value.get(key), str) and value[key]:
-            result[key] = value[key]
+        if (text := _meta_text(value.get(key))) is not None:
+            result[key] = text
     return result
 
 
@@ -369,11 +370,15 @@ def collect_claude(
     """
     calls: dict[str, dict] = {}
     for path in _paths_for(root, "*.jsonl", start, paths):
-        is_subagent_path = "subagents" in path.parts
+        try:
+            parts = path.relative_to(root).parts
+        except ValueError:
+            parts = path.parts
+        is_subagent_path = "subagents" in parts
         if is_subagent_path and path.name == "journal.jsonl":
             continue
-        subagent_index = path.parts.index("subagents") if is_subagent_path else 0
-        path_session = _meta_text(path.parts[subagent_index - 1] if subagent_index else None) \
+        subagent_index = parts.index("subagents") if is_subagent_path else 0
+        path_session = _meta_text(parts[subagent_index - 1] if subagent_index else None) \
             if is_subagent_path else None
         fallback_session = path_session or _meta_text(path.stem, default="unknown")
         fallback_project = _claude_project_fallback(path, root)
@@ -424,9 +429,11 @@ def collect_claude(
             }
             parent_session_id = _meta_text(
                 row.get("parentSessionId"), row.get("parent_session_id"), path_session)
+            stop = message.get("stop_reason")
+            has_stop = isinstance(stop, str) and bool(stop)
             existing = calls.get(key)
             if existing is None:
-                existing = {**values, "timestamp": timestamp, "_first": timestamp,
+                existing = {**values, "output_final": has_stop, "timestamp": timestamp, "_first": timestamp,
                             "session_id": session_id, "parent_session_id": parent_session_id,
                             "_fallback": (fallback_project, _claude_project_id(path, root))}
                 calls[key] = existing
@@ -437,6 +444,7 @@ def collect_claude(
                     existing.get("raw_usage", {}), values["raw_usage"]
                 )
                 existing["timestamp"] = max(existing["timestamp"], timestamp)
+                existing["output_final"] = existing["output_final"] or has_stop
                 # A copied request belongs to the session of its earliest row; equal
                 # timestamps keep the first one seen, independent of session ids.
                 if timestamp < existing["_first"]:

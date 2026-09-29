@@ -87,7 +87,8 @@ Missing counters remain null; `known_tokens` is only the identified observed sub
 Ambiguous identities are excluded and reported separately because they may overlap.
 A complete normalized observation does not mean complete account coverage or
 verified billing. Nontrivial Claude `iterations` are retained and flagged rather
-than silently ignored or added twice. See [accounting and storage decisions](docs/history-accounting.md).
+than silently ignored or added twice. Claude subagent transcripts often lack the final
+usage row of a request, so their output can be a lower bound (warning `output_not_final`). See [accounting and storage decisions](docs/history-accounting.md).
 
 ## Install the history and Tokenatlas CLI
 

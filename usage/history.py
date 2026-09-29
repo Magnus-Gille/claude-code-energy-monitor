@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 import why
 
 VERSION = 1
-COLLECTOR_VERSION = 3
+COLLECTOR_VERSION = 4
 FIELDS = ('fresh_input', 'cache_read', 'cache_write', 'output')
 ALL_FIELDS = FIELDS + ('reasoning',)
 
@@ -66,8 +66,8 @@ def clean_usage(raw):
                     continue
                 cleaned = clean_usage({k: v for k, v in entry.items() if k not in ('iterations', 'iteration_snapshots')})
                 for key in ('type', 'model'):
-                    if isinstance(entry.get(key), str):
-                        cleaned[key] = entry[key]
+                    if (text := why._meta_text(entry.get(key))) is not None:
+                        cleaned[key] = text
                 result['iterations'].append(cleaned)
     if isinstance(raw.get('iteration_snapshots'), list):
         result['iteration_snapshots'] = [clean_usage({'iterations': snapshot})['iterations']
@@ -114,6 +114,10 @@ def normalize(record, machine):
                       reasoning=reasoning)
     else:
         raise ValueError(f'unsupported harness {record.harness}')
+    output_final = getattr(record, 'output_final', None)
+    output_final = output_final if isinstance(output_final, bool) else None
+    if record.harness == 'claude' and output_final is False:
+        warnings.append('output_not_final')
     if any(tokens[k] is None for k in FIELDS):
         warnings.append('missing_token_fields')
     if tokens['reasoning'] is not None and tokens['output'] is not None and tokens['reasoning'] > tokens['output']:
@@ -138,6 +142,11 @@ def normalize(record, machine):
     model, effort = text(record.model, default='unknown'), text(record.effort, default='unknown')
     version = getattr(record, 'harness_version', None)
     version = str(version) if isinstance(version, int) and not isinstance(version, bool) else text(version, limit=64)
+    confidence = {k: 'absent' if v is None else 'observed' for k, v in tokens.items()}
+    if 'output_not_final' in warnings:
+        for k in ('output', 'reasoning'):
+            if tokens[k] is not None:
+                confidence[k] = 'lower_bound'
     return {
         'v': VERSION, 'kind': 'usage_observation', 'id': record.call_id,
         'id_synthetic': getattr(record, 'id_synthetic', False),
@@ -160,7 +169,7 @@ def normalize(record, machine):
         'tokens': tokens, 'raw_usage': raw, 'duration_ms': None,
         'accounting_basis': 'request_top_level', 'billing_verified': False,
         'warnings': sorted(set(warnings)), 'complete': not warnings,
-        'confidence': {k: 'absent' if v is None else 'observed' for k, v in tokens.items()},
+        'confidence': confidence, 'output_final': output_final,
     }
 
 
@@ -186,6 +195,8 @@ def merge_observations(a, b):
         # The earliest copy owns a request; on equal time keep the stored one (a).
         owner = b if b['ts'] < a['ts'] else a
         result['session'], result['parent_session'] = owner['session'], owner['parent_session']
+    flags = [x.get('output_final') for x in (a, b)]
+    output_final = True if True in flags else False if False in flags else None
     raw = merge_usage(a['raw_usage'], b['raw_usage'])
     # Re-normalize coherent raw counters rather than merge derived fresh input.
     from types import SimpleNamespace
@@ -198,7 +209,7 @@ def merge_observations(a, b):
         turn_confidence=result['turn_confidence'], harness_version=result['harness_version'],
         session_started_at=(datetime.fromisoformat(result['session_started_at'])
                             if result.get('session_started_at') else None),
-        raw_usage=raw, id_synthetic=result['id_synthetic'])
+        raw_usage=raw, id_synthetic=result['id_synthetic'], output_final=output_final)
     return normalize(proxy, result['machine'])
 
 

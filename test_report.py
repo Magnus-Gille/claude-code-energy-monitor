@@ -122,5 +122,23 @@ class ReportReviewTests(unittest.TestCase):
         private = render_report(build_report(rows, {}, redact=False))
         self.assertIn('inference-gille', private)
 
+    def test_redacted_models_use_public_family_allowlist(self):
+        visible = ('claude-opus-5-5', 'claude-haiku-4-5-20251001', 'gpt-5.6-luna', 'gpt-6-astra',
+                   'codex-auto-review', 'gpt-5.3-codex-spark', 'openai/gpt-oss-120b',
+                   'qwen/qwen3-coder', 'zai-org/GLM-4.7')
+        hidden = ('ft:gpt-4o-2024-08-06:acme-corp::abc123', 'magnus-macbook', 'stealth/ox-alpha',
+                  'big-pickle', '<synthetic>')
+        rows = [observation(f'v{i}', provider='openai', model=m) for i, m in enumerate(visible)]
+        rows += [observation(f'h{i}', provider='openai', model=m) for i, m in enumerate(hidden)]
+        rows += [observation('n1', provider='m5', model='claude-opus-5-5'),
+                 observation('n2', provider='inference-gille', model='gpt-5.6-luna')]
+        shown = [r['model'] for r in build_report(rows, {})['records']]
+        self.assertTrue(set(visible) <= set(shown))
+        encoded = json.dumps(shown)
+        for model in hidden + ('m5', 'inference-gille'):
+            self.assertNotIn(model, encoded)
+        self.assertEqual(sum(v in visible for v in shown), len(visible))
+        self.assertTrue(all(v.startswith('model ') for v in shown if v not in visible))
+
 if __name__ == '__main__':
     unittest.main()
