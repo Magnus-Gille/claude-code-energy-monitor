@@ -21,6 +21,11 @@ def decode_html(html):
     return json.loads(gzip.decompress(base64.b64decode(match.group(1))).decode('ascii'))
 
 
+def page_text(html):
+    """The page without its base64 payload, whose random-looking text can contain any short string."""
+    return re.sub(r'(<script id="report-data"[^>]*>)[A-Za-z0-9+/=]*(</script>)', r'\1\2', html)
+
+
 def expand(report):
     """Python twin of the template's expand(): per-record dicts from the columnar block."""
     c, out, ms = report['columns'], [], 0
@@ -63,7 +68,7 @@ class ReportTests(unittest.TestCase):
         html = render_report(report)
         encoded = json.dumps(decode_html(html))
         for secret in ('/private/', 'PRIVATE PROMPT', 'private-session', 'private-agent', 'private-turn', 'private-machine'):
-            self.assertNotIn(secret, html)
+            self.assertNotIn(secret, page_text(html))
         for secret in ('/private/', 'PRIVATE PROMPT', 'private-session', 'private-agent', 'private-turn', 'private-machine'):
             self.assertNotIn(secret, encoded)
         self.assertEqual(report['privacy'], 'redacted')
@@ -158,7 +163,7 @@ class ReportReviewTests(unittest.TestCase):
         shown = json.dumps(decode_html(html))
         for private in ('m5', 'inference-gille', 'qwen3-coder', 'gpt-oss-120b', 'my-host-tui'):
             self.assertNotIn(private, shown)
-            self.assertNotIn(private, html)
+            self.assertNotIn(private, page_text(html))
         for public in ('anthropic', 'claude-opus-5-5', 'openai', 'gpt-5.6-luna', 'xhigh'):
             self.assertIn(public, shown)
         private = render_report(build_report(rows, {}, redact=False))
@@ -231,7 +236,7 @@ class PayloadV2Tests(unittest.TestCase):
         self.assertEqual(render_report(report), render_report(report))
         html = render_report(report)
         for private in ('private-session', 'private-turn', 'private-agent'):
-            self.assertNotIn(private, html)
+            self.assertNotIn(private, page_text(html))
             self.assertIn(private, json.dumps(decode_html(html)))
 
     def test_twenty_thousand_observations_stay_small(self):

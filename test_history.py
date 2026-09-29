@@ -674,6 +674,27 @@ class HistoryStorageTests(unittest.TestCase):
             self.assertEqual(h.records(session='nope'), [])
             self.assertEqual(len(h.records(session='claude:session', turn=None, project=None)), 2)
 
+    def test_doctor_counts_in_sql_match_records(self):
+        with History(self.root / 'empty.sqlite3') as h:
+            d = h.doctor()
+            self.assertEqual((d['observations'], d['first_event'], d['last_event'], d['incomplete_observations'],
+                              d['unlinked_turns']), (0, None, None, 0, 0))
+        for name, request, ts, stop in (('a', 'r2', '2026-09-03T11:00:00.250Z', 'end_turn'),
+                                        ('b', 'r1', '2026-09-03T10:00:00Z', None)):
+            path = self.root / f'logs/{name}.jsonl'; write_claude(path, request)
+            rows = [json.loads(x) for x in path.read_text().splitlines()]
+            rows[-1]['timestamp'] = ts
+            rows[-1]['message']['stop_reason'] = stop
+            path.write_text(''.join(json.dumps(x) + '\n' for x in rows))
+        with History(self.root / 'h.sqlite3') as h:
+            h.refresh('claude', self.root / 'logs')
+            records, d = h.records(), h.doctor()
+            self.assertEqual((d['observations'], d['first_event'], d['last_event']),
+                             (len(records), records[0]['ts'], records[-1]['ts']))
+            self.assertEqual(d['incomplete_observations'], sum(not r['complete'] for r in records))
+            self.assertEqual(d['unlinked_turns'], sum(r['turn_id'] is None for r in records))
+            self.assertEqual(d['incomplete_observations'], 1)
+
     def test_migrates_v1_keeping_records_sources_and_deleted_files(self):
         gone, kept = self.root / 'logs/gone.jsonl', self.root / 'logs/kept.jsonl'
         write_claude(gone, 'old'); write_claude(kept, 'new')

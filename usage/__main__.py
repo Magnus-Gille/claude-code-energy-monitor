@@ -71,7 +71,8 @@ def main(argv=None):
                 records=history.records(start,end,args.harness,args.project,args.session,args.turn)
                 records=[row for row in records if all(getattr(args,key) is None or row[key]==getattr(args,key)
                     for key in ('model','effort','provider','agent'))]
-                result=summarize(records,args.granularity,args.timezone)
+                # The HTML path prints only a short receipt, so skip the (costly) JSON summary there.
+                result={} if args.html else summarize(records,args.granularity,args.timezone)
                 result['window']={'start':args.start,'end':args.end}
                 result['source_status']=history.doctor()
                 if args.records:result['records']=records

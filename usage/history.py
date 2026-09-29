@@ -645,15 +645,16 @@ class History:
         return sorted(result,key=lambda x:(x['ts'],x['provider'],x['id']))
 
     def doctor(self):
-        records = self.records()
+        count, first, last, incomplete, unlinked = self.connection.execute(
+            'SELECT count(*), min(ts_us), max(ts_us), coalesce(sum(complete=0),0), coalesce(sum(turn_id IS NULL),0)'
+            ' FROM observations').fetchone()
         imports = [json.loads(r[0]) for r in self.connection.execute('SELECT data FROM imports ORDER BY harness,root')]
         missing = sum(not Path(r[0]).exists() for r in self.connection.execute('SELECT path FROM files'))
-        return dict(schema_version=SCHEMA_VERSION, machine=self.machine, observations=len(records),
-                    first_event=records[0]['ts'] if records else None,
-                    last_event=records[-1]['ts'] if records else None,
+        return dict(schema_version=SCHEMA_VERSION, machine=self.machine, observations=count,
+                    first_event=None if first is None else _ts_text(first),
+                    last_event=None if last is None else _ts_text(last),
                     missing_source_files=missing, imports=imports, coverage_complete=False,
-                    incomplete_observations=sum(not x['complete'] for x in records),
-                    unlinked_turns=sum(x['turn_id'] is None for x in records),
+                    incomplete_observations=incomplete, unlinked_turns=unlinked,
                     billing_verified=False,
                     notes=['Local retained sources only; missing history cannot be reconstructed.',
                            'Request observations are not verified billable inference passes.'])
