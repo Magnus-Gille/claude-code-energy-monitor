@@ -372,6 +372,31 @@ def _moment(text):
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
+def _slashed(path):
+    """Imported snapshots may carry Windows source paths; match both separators."""
+    return path.replace('\\', '/')
+
+
+def _dominant_tariff(records, models):
+    """Per (harness, session key): (most common tariff among the dominant model's records, whether tariffs differ)."""
+    seen = {}
+    for r in records:
+        key = (r.get('harness'), str(r.get('session')).split('/')[0])
+        if models.get(key) == (r.get('provider'), r.get('model')):
+            label = json.dumps(r.get('tariff'), sort_keys=True)
+            seen.setdefault(key, {}).setdefault(label, [0, r.get('tariff')])[0] += 1
+    best = {k: max(sorted(v), key=lambda label: v[label][0]) for k, v in seen.items()}
+    return {k: (v[best[k]][1], len(v) > 1) for k, v in seen.items()}
+
+
+def _add_cost(total, cost, currency):
+    """Add one priced amount to a {currency: amount} map; None (any unpriced part) stays None."""
+    if total is None or cost is None:
+        return None
+    total[currency or '?'] = total.get(currency or '?', 0.0) + cost
+    return total
+
+
 def _dominant(records):
     counts = {}
     for r in records:
@@ -389,18 +414,18 @@ def _joined(records, table):
     for r in records:
         sub = r.get('harness') == 'claude' and r.get('thread_kind') == 'subagent'
         if sub:  # the transcript file name carries the agent id; the agent field is a type, kept as a fallback
-            found = next((m.group(1) for m in map(_AGENT_FILE.search, r.get('sources') or ()) if m), None)
+            found = next((m.group(1) for m in map(_AGENT_FILE.search, map(_slashed, r.get('sources') or ())) if m), None)
             key = (r.get('harness'), (str(r.get('session')), 'file', found) if found
                    else (str(r.get('session')), 'agent', str(r.get('agent'))))
         else:
             key = (r.get('harness'), str(r.get('session')))
         t = r.get('tokens') or {}
         cls = [t.get(k) for k in ('fresh_input', 'cache_write', 'cache_read')]
-        e = out.setdefault(key, {'input': 0, 'output': 0, 'cost': 0.0, 'lower': False})
+        e = out.setdefault(key, {'input': 0, 'output': 0, 'cost': {}, 'lower': False})
         e['input'] = None if e['input'] is None or None in cls else e['input'] + sum(cls)
         e['output'] = None if e['output'] is None or t.get('output') is None else e['output'] + t['output']
-        cost = pricing.price_observation(r, table)['cost'] if table is not None else None
-        e['cost'] = None if e['cost'] is None or cost is None else e['cost'] + cost
+        priced = pricing.price_observation(r, table) if table is not None else {'cost': None}
+        e['cost'] = _add_cost(e['cost'], priced['cost'], priced.get('currency'))
         e['lower'] = e['lower'] or 'output_not_final' in (r.get('warnings') or ())
     return out
 
@@ -420,6 +445,13 @@ def _lookup(joined, h, s, sub):
 
 def _share(num, den, scale=100):
     return num / den * scale if den else None
+
+
+def _cost_shares(pairs):
+    """Fixed share of cost per currency over (recurring map, total map) pairs; only currencies with a total."""
+    currencies = sorted({c for _, total in pairs for c in total})
+    shares = {c: _share(sum(f.get(c, 0.0) for f, _ in pairs), sum(t.get(c, 0.0) for _, t in pairs)) for c in currencies}
+    return {c: v for c, v in shares.items() if v is not None}
 
 
 def _relative(h, mine, joined, rec_costs):
@@ -470,7 +502,7 @@ def _relative(h, mine, joined, rec_costs):
                                  'n': len(inp)},
         'fixed_per_1k_output': {'value': _share(sum(f for f, _ in out), sum(o for _, o in out), 1000),
                                 'output_lower_bound': lower, 'n': len(out)},
-        'fixed_cost_share': {'pct': _share(sum(f for f, _ in cost), sum(c for _, c in cost)), 'n': len(cost)},
+        'fixed_cost_share': {'pct': _cost_shares(cost), 'n': len(cost)},
         'calls_per_session': {'median': statistics.median(calls) if calls else None,
                               'p90': _pct(calls, 0.9) if calls else None, 'n': len(calls)},
         'excluded': ex, 'subagents': subs}
@@ -498,11 +530,12 @@ def summarize(db, since=None, until=None, harness=None, records=None, prices=Non
     for h, s, name, chars, source in db.execute('SELECT harness, session, name, chars, source FROM overhead_skill_uses'):
         if (h, s) in sessions:
             sessions[(h, s)]['skills'].append((name, chars, source))
-    table = None
+    table, tariffs = None, {}
     if records is not None:
         from usage import pricing
         table = prices if prices is not None else pricing.load_prices()
         models, joined = _dominant(records), _joined(records, table)
+        tariffs = _dominant_tariff(records, models)
     joined = joined if records is not None else {}
     result = {'chars_per_token': CHARS_PER_TOKEN, 'token_basis': 'estimate', 'harnesses': {}}
     for h in sorted({k[0] for k in sessions}):
@@ -516,26 +549,32 @@ def summarize(db, since=None, until=None, harness=None, records=None, prices=Non
                 skills.setdefault((name, source), []).append(chars)
             if v['kinds'] and v['floor'] is not None:
                 residual.append(v['floor'] - sum(v['kinds'].values()) / CHARS_PER_TOKEN)
-        cost, priced, unpriced, rec_costs = 0.0, 0, 0, {}
-        currency = None
+        cost, priced, unpriced, rec_costs, assumptions = {}, 0, 0, {}, set()
         for s, v in mine.items():
             if v['floor'] is None:
                 continue
-            price = None
-            model = models.get((h, s.split('/')[0])) if table is not None else None
+            price, currency = None, None
+            key = (h, s.split('/')[0])
+            model = models.get(key) if table is not None else None
+            tariff, mixed = tariffs.get(key, (None, False))
             if model and v['calls'] > 1:
-                price = pricing.price_observation({'harness': h, 'provider': model[0], 'model': model[1], 'tokens': {
-                    'fresh_input': 0, 'cache_read': v['floor'], 'cache_write': 0, 'output': 0}}, table)['cost']
+                one = pricing.price_observation({'harness': h, 'provider': model[0], 'model': model[1], 'tariff': tariff,
+                                                 'tokens': {'fresh_input': 0, 'cache_read': v['floor'], 'cache_write': 0,
+                                                            'output': 0}}, table)
+                price, currency = one['cost'], one['currency']
             elif model and v['calls'] <= 1:
                 price = 0.0
             if price is None:
                 unpriced += 1
             else:
-                cost += price * max(v['calls'] - 1, 0)
-                rec_costs[s] = price * max(v['calls'] - 1, 0)
+                amount = price * max(v['calls'] - 1, 0)
+                rec_costs[s] = {}
+                if currency:  # a one-call session re-reads nothing and has no currency; it adds to no map
+                    rec_costs[s] = {currency: amount}
+                    _add_cost(cost, amount, currency)
+                if mixed:
+                    assumptions.add('mixed tariffs in session')
                 priced += 1
-        if table is not None and priced:
-            currency = next((m.get('currency') for m in table['models']), None)
         result['harnesses'][h] = {
             'sessions': len(mine), 'subagent_sessions': sum(v['sub'] for v in mine.values()),
             'floor': {'n': len(floors), 'median': statistics.median(floors) if floors else None,
@@ -550,7 +589,7 @@ def summarize(db, since=None, until=None, harness=None, records=None, prices=Non
                             'estimated_tokens': statistics.median(c) / CHARS_PER_TOKEN, 'label': 'estimate'}
                            for (n, src), c in sorted(skills.items(), key=lambda i: (-len(i[1]), i[0]))],
             'relative': _relative(h, mine, joined, rec_costs),
-            'recurring_cost': {'cost': cost if priced else None, 'currency': currency, 'sessions_priced': priced,
+            'recurring_cost': {'cost': cost if priced else None, 'assumptions': sorted(assumptions), 'sessions_priced': priced,
                                'sessions_unpriced': unpriced, 'label': COST_LABEL}}
     return result
 
@@ -561,6 +600,11 @@ def _n(value):
 
 def _p(value):
     return '-' if value is None else f'{value:.1f}%'
+
+
+def _by_currency(values, fmt):
+    """`USD 12.34, EUR 1.20` for a {currency: value} map; '-' when empty."""
+    return ', '.join(f'{c} {fmt(v)}' for c, v in sorted(values.items())) if values else '-'
 
 
 def render(result):
@@ -574,7 +618,8 @@ def render(result):
             lb = '*' if x['fixed_per_1k_output']['output_lower_bound'] else ''
             table.append((h, _n(x['floor_per_call']['median']) + f" ({_n(x['floor_per_call']['p10'])}-{_n(x['floor_per_call']['p90'])})",
                           _p(x['fixed_share_of_input']['pct']) + f" (med {_p(x['fixed_share_of_input']['median_session_pct'])})",
-                          _n(x['fixed_per_1k_output']['value']) + lb, _p(x['fixed_cost_share']['pct']),
+                          _n(x['fixed_per_1k_output']['value']) + lb, (_p(next(iter(x['fixed_cost_share']['pct'].values()))) if len(x['fixed_cost_share']['pct']) == 1
+                           else _by_currency(x['fixed_cost_share']['pct'], lambda v: f'{v:.1f}%')),
                           f"{_n(x['calls_per_session']['median'])} (p90 {_n(x['calls_per_session']['p90'])})",
                           f"{x['fixed_share_of_input']['n']}/{x['fixed_per_1k_output']['n']}/{x['fixed_cost_share']['n']}"))
         widths = [max(len(str(row[i])) for row in table) for i in range(len(cols))]
@@ -604,7 +649,7 @@ def render(result):
         if r['residual']['median_tokens'] is not None:
             lines.append(f"  {r['residual']['label']}: median ~{_n(r['residual']['median_tokens'])} tokens (estimate)")
         rc = r['recurring_cost']
-        lines.append(f"  recurring re-read cost (total, depends on usage): {'unknown' if rc['cost'] is None else format(rc['cost'], ',.2f') + ' ' + (rc['currency'] or '')}"
+        lines.append(f"  recurring re-read cost (total, depends on usage): {'unknown' if rc['cost'] is None else _by_currency(rc['cost'], lambda v: format(v, ',.2f'))}"
                      f" over {rc['sessions_priced']} priced sessions ({rc['sessions_unpriced']} unpriced); {rc['label']}")
         for u in r['skill_uses']:
             lines.append(f"  skill {u['name']:<24} uses={u['count']:<4} median {_n(u['median_chars']):>8} chars  ~{_n(u['estimated_tokens']):>7} tokens ({u['source']}, estimate)")

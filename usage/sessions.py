@@ -2,8 +2,12 @@
 import json
 import os
 import re
+import stat
+import sys
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+
+from usage.history import _has_private_permissions, _owned_by_current_user
 
 HARNESSES = ('claude', 'codex', 'pi', 'opencode')
 HEADLESS = ('codex_exec', 'exec', 'sdk-cli', 'sdk-py', 'sdk-ts')
@@ -12,6 +16,11 @@ CLASSES = ('fresh_input', 'cache_write', 'cache_read', 'output', 'reasoning')
 WINDOW_SLACK = timedelta(minutes=10)
 _AGENT_FILE = re.compile(r'(?:^|/)agent-([^/]+)\.jsonl$')
 _WORKFLOW = re.compile(r'subagents/workflows/(wf_[^/]+)/')
+
+
+def _slashed(path):
+    """Imported snapshots may carry Windows source paths; match both separators."""
+    return path.replace('\\', '/')
 
 
 def default_pricer(prices_path=None):
@@ -73,9 +82,10 @@ def _aggregate(rows, price):
             one['cost'] = {priced.get('currency') or '?': float(priced['cost'])}; one['priced'] = 1
         one['lower_bound'] = (not row.get('complete', True)) or 'output_not_final' in (row.get('warnings') or ())
         one['first_ts'] = one['last_ts'] = row['ts']
-        one['model_first'][row['model']] = row['ts']
+        name = row['model'] or 'unknown'  # history normalizes an unrecorded model to None
+        one['model_first'][name] = row['ts']
         _merge(total, _finish(one))
-        _merge(by_model.setdefault(row['model'], _empty()), one)
+        _merge(by_model.setdefault(name, _empty()), one)
     return total, by_model
 
 
@@ -163,12 +173,12 @@ def build_tree(records, root, *, infer=True, price=None):
         if h == 'claude':
             groups, workflows = {}, {}
             for r in subs.get(sid, []):
-                found = next((m.group(1) for m in map(_AGENT_FILE.search, r['sources']) if m), None)
+                found = next((m.group(1) for m in map(_AGENT_FILE.search, map(_slashed, r['sources'])) if m), None)
                 groups.setdefault(found or r['agent'], []).append(r)
             for agent_id, agent_rows in groups.items():
                 agent_type = next((x['agent'] for x in agent_rows if x.get('agent')), agent_id)
                 name = agent_id if agent_type == agent_id else f'{agent_type} {agent_id[:8]}'
-                match = next((_WORKFLOW.search(s) for x in agent_rows for s in x['sources'] if _WORKFLOW.search(s)), None)
+                match = next((m for x in agent_rows for m in map(_WORKFLOW.search, map(_slashed, x['sources'])) if m), None)
                 leaf = node('subagent', agent_id, 'path', name, agent_rows, 'claude', [])
                 if match:
                     workflows.setdefault(match.group(1), []).append(leaf)
@@ -256,6 +266,9 @@ class Outcomes(list):
 def load_outcomes(path, root):
     """Matching v0/v1 lines for a root session; malformed lines are counted, not fatal."""
     out = Outcomes()
+    problem = _outcomes_problem(path)
+    if problem:
+        print(f'warning: outcomes file {problem}; reading it anyway', file=sys.stderr)
     try:
         text = Path(path).read_text(encoding='utf-8')
     except FileNotFoundError:
@@ -393,10 +406,31 @@ def render(result, eff, retrieved):
     return '\n'.join(lines)
 
 
+def _outcomes_problem(path):
+    """Why an outcomes file is not private (symlink, not a regular file, foreign owner, loose mode); else None."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        return 'must not be a symlink'
+    if not stat.S_ISREG(info.st_mode) or not _owned_by_current_user(info):
+        return 'must be a regular file owned by this user'
+    if not _has_private_permissions(info):
+        return 'permissions must be 0600'
+    return None
+
+
 def append_outcome(path, item):
-    """Atomic single-write append; created 0600 if missing."""
+    """Atomic single-write append; a new file is created 0600, an existing one must already be private."""
     data = (json.dumps(item, sort_keys=True) + '\n').encode()
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        problem = _outcomes_problem(path)
+        if problem:
+            raise ValueError(f'outcomes file {problem}') from None
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | getattr(os, 'O_NOFOLLOW', 0))
     try:
         os.write(fd, data)
     finally:

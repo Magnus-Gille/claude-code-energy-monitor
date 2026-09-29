@@ -353,10 +353,53 @@ class SummaryTests(unittest.TestCase):
             {'harness': 'claude', 'session': 'b', 'provider': 'p', 'model': 'm-x'}]
         rep = overhead.summarize(self.db(rows), records=records, prices=PRICES)['harnesses']['claude']
         cost = rep['recurring_cost']
-        self.assertAlmostEqual(cost['cost'], 6.0)  # 1M floor x 3 re-reads x 2.0 per MTok; b has 0 re-reads
+        self.assertAlmostEqual(cost['cost']['USD'], 6.0)  # 1M floor x 3 re-reads x 2.0 per MTok; b has 0 re-reads
         self.assertEqual((cost['sessions_priced'], cost['sessions_unpriced']), (2, 1))
         self.assertEqual(cost['label'], 'API-equivalent at list price, estimate')
         self.assertIsNone(overhead.summarize(self.db(rows))['harnesses']['claude']['recurring_cost']['cost'])
+
+    def claude_prices(self):
+        model = {'provider': 'anthropic', 'model': 'claude-opus-5', 'currency': 'USD', 'input': 5.0, 'cache_read': 0.5,
+                 'output': 25.0, 'cache_write_5m': 6.0, 'cache_write_1h': 10.0, 'free': False, 'source_url': 'x',
+                 'retrieved_on': '2026-09-29', 'modifiers': {'speed=fast': {'cache_read': 5.0},
+                                                            'inference_geo=us': {'multiplier': 1.1}}}
+        return dict(PRICES, models=[model])
+
+    def recurring(self, tariffs):
+        rows = [sess('a', 1_000_000, 2)]
+        records = [{'harness': 'claude', 'session': 'a', 'provider': 'anthropic', 'model': 'claude-opus-5', 'tariff': t}
+                   for t in tariffs]
+        return overhead.summarize(self.db(rows), records=records, prices=self.claude_prices())['harnesses']['claude']['recurring_cost']
+
+    def test_recurring_cost_uses_captured_tariff(self):
+        self.assertAlmostEqual(self.recurring([{'speed': 'fast'}])['cost']['USD'], 5.0)
+        self.assertAlmostEqual(self.recurring([{'speed': 'standard', 'inference_geo': 'us'}])['cost']['USD'], 0.55)
+        self.assertAlmostEqual(self.recurring([{'speed': 'standard'}])['cost']['USD'], 0.5)
+
+    def test_mixed_tariffs_use_dominant_and_are_flagged(self):
+        got = self.recurring([{'speed': 'fast'}, {'speed': 'fast'}, {'speed': 'standard'}])
+        self.assertAlmostEqual(got['cost']['USD'], 5.0)
+        self.assertIn('mixed tariffs in session', got['assumptions'])
+        self.assertNotIn('mixed tariffs in session', self.recurring([{'speed': 'fast'}] * 2)['assumptions'])
+
+    def test_currencies_stay_separate_in_cost_and_share(self):
+        eur = dict(PRICES['models'][0], model='m-e', currency='EUR', cache_read=1.0)
+        prices = dict(PRICES, models=PRICES['models'] + [eur])
+        rows = [sess('a', 1_000_000, 2, harness='pi'), sess('b', 1_000_000, 2, harness='pi')]
+        records = [rec('pi', 'a', 1_000_000, 0, 0, 10), rec('pi', 'a', 10, 0, 1_000_000, 10),
+                   rec('pi', 'b', 1_000_000, 0, 0, 10, model='m-e'), rec('pi', 'b', 10, 0, 1_000_000, 10, model='m-e')]
+        con = sqlite3.connect(':memory:')
+        overhead.save(con, 'pi', rows)
+        res = overhead.summarize(con, records=records, prices=prices)
+        rc = res['harnesses']['pi']['recurring_cost']
+        self.assertEqual(set(rc['cost']), {'USD', 'EUR'})
+        self.assertAlmostEqual(rc['cost']['USD'], 2.0); self.assertAlmostEqual(rc['cost']['EUR'], 1.0)
+        share = res['harnesses']['pi']['relative']['fixed_cost_share']['pct']
+        self.assertEqual(set(share), {'USD', 'EUR'})
+        json.dumps(res)
+        text = overhead.render(res)
+        self.assertIn('EUR 1.00, USD 2.00', text)
+        self.assertRegex(text, r'EUR \d+\.\d%, USD \d+\.\d%')
 
     def test_filters_and_missing_components(self):
         rows = [sess('old', 10, 1, ts='2026-08-01T00:00:00Z'), sess('new', 20, 1, ts='2026-09-10T00:00:00Z')]
@@ -396,16 +439,17 @@ class RelativeTests(unittest.TestCase):
     def test_relative_equal_totals_differ(self):
         res = self.two()['harnesses']
         rel = {h: res[h]['relative'] for h in res}
-        for key, field in (('fixed_share_of_input', 'pct'), ('fixed_per_1k_output', 'value'), ('fixed_cost_share', 'pct')):
+        for key, field in (('fixed_share_of_input', 'pct'), ('fixed_per_1k_output', 'value')):
             self.assertAlmostEqual(rel['pi'][key][field], rel['opencode'][key][field])
         self.assertAlmostEqual(rel['pi']['fixed_share_of_input']['pct'], 200 / 210 * 100)
         self.assertAlmostEqual(rel['pi']['fixed_share_of_input']['median_session_pct'], 200 / 210 * 100)
         self.assertAlmostEqual(rel['pi']['fixed_per_1k_output']['value'], 10000)
-        self.assertAlmostEqual(rel['pi']['fixed_cost_share']['pct'], 200 / 370 * 100)
+        self.assertAlmostEqual(rel['pi']['fixed_cost_share']['pct']['USD'], 200 / 370 * 100)
+        self.assertAlmostEqual(rel['opencode']['fixed_cost_share']['pct']['USD'], 200 / 370 * 100)
         self.assertEqual(rel['pi']['calls_per_session'], {'median': 2, 'p90': 2, 'n': 1})
         self.assertEqual(rel['pi']['floor_per_call']['median'], 100)
         self.assertEqual(rel['opencode']['floor_per_call']['median'], 300)
-        self.assertAlmostEqual(res['opencode']['recurring_cost']['cost'], 3 * res['pi']['recurring_cost']['cost'])
+        self.assertAlmostEqual(res['opencode']['recurring_cost']['cost']['USD'], 3 * res['pi']['recurring_cost']['cost']['USD'])
         self.assertEqual(rel['pi']['fixed_share_of_input']['n'], 1)
 
     def test_fixed_capped_at_input_total(self):
@@ -454,6 +498,16 @@ class RelativeTests(unittest.TestCase):
         self.assertEqual(rel['fixed_share_of_input']['n'], 3)
         # abc123 has input 105 (fixed 100), def456 input 210 but fixed capped at floor x calls = 100: not merged by type
         self.assertAlmostEqual(rel['fixed_share_of_input']['pct'], (200 + 100 + 100) / (210 + 105 + 210) * 100)
+
+    def test_windows_import_paths_join_by_agent_id(self):
+        main = sess('p1', 100, 2, harness='claude')
+        sub = sess('p1/agent-abc', 50, 2, harness='claude'); sub['is_subagent'] = True
+        path = 'm-pc:C:\\Users\\x\\.claude\\projects\\p\\p1\\subagents\\workflows\\wf_1\\agent-abc.jsonl'
+        records = [rec('claude', 'p1', 100, 0, 0, 5), rec('claude', 'p1', 10, 0, 100, 5),
+                   rec('claude', 'p1', 50, 0, 0, 5, thread_kind='subagent', agent='implementer', sources=[path]),
+                   rec('claude', 'p1', 5, 0, 50, 5, thread_kind='subagent', agent='implementer', sources=[path])]
+        rel = self.build([main, sub], records)['harnesses']['claude']['relative']
+        self.assertEqual(rel['subagents'], {'sessions': 1, 'matched': 1, 'excluded': 0})
 
     def test_output_lower_bound_marked(self):
         a, ra = profile('pi', 'a', 1)

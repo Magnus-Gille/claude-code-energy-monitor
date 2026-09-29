@@ -130,6 +130,19 @@ class PriceObservationTests(unittest.TestCase):
         r = self.price(obs(fresh=M, tariff={'speed': 'standard', 'inference_geo': 'not_available'}))
         self.assertAlmostEqual(r['cost'], 4.0)
 
+    def test_unknown_geo_and_service_tier_are_unpriced_unless_modified(self):
+        r = self.price(obs(fresh=M, tariff={'speed': 'standard', 'inference_geo': 'eu'}))
+        self.assertEqual((r['status'], r['cost'], r['reason']), ('unpriced', None, 'unknown inference_geo eu'))
+        for geo in ('global', 'not_available', None):
+            r = self.price(obs(fresh=M, tariff={'speed': 'standard', 'inference_geo': geo}))
+            self.assertEqual((r['status'], r['cost']), ('priced', 4.0))
+        r = self.price(obs(fresh=M, tariff={'speed': 'standard', 'service_tier': 'batch'}))
+        self.assertEqual((r['status'], r['reason']), ('unpriced', 'unknown service_tier batch'))
+        tiered = dict(CLAUDE, model='claude-tier', aliases=[], modifiers={'service_tier=batch': dict(input=2.0, output=10.0)})
+        table = dict(TABLE, models=TABLE['models'] + [tiered])
+        r = self.price(obs(model='claude-tier', fresh=M, tariff={'speed': 'standard', 'service_tier': 'batch'}), table)
+        self.assertAlmostEqual(r['cost'], 2.0)
+
     def test_unknown_model_local_provider_and_free_model(self):
         r = self.price(obs(model='claude-nope', fresh=5))
         self.assertEqual((r['status'], r['cost'], r['reason']), ('unpriced', None, 'no list price for anthropic/claude-nope'))

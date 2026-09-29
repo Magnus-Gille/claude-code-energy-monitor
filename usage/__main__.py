@@ -109,10 +109,12 @@ def main(argv=None):
                         print(json.dumps(result,indent=2,sort_keys=True))
                     else:print(sessions.render(result,eff,retrieved))
                 elif not args.unit:
-                    for node in sessions.iter_nodes(result['root']):
-                        if node is not result['root']:
-                            print(f"{sessions.thread_key(node)}  {', '.join(node['models']) or '-'}  {sessions._tokens(node)}"
-                                  f"  {sessions._money(node['cost'],node['cost_coverage'],node['lower_bound'])}")
+                    threads=[n for n in sessions.iter_nodes(result['root']) if n is not result['root']]
+                    if not threads:
+                        print('no rateable threads: the root thread is coordination, not a unit of work',file=sys.stderr)
+                    for node in threads:
+                        print(f"{sessions.thread_key(node)}  {', '.join(node['models']) or '-'}  {sessions._tokens(node)}"
+                              f"  {sessions._money(node['cost'],node['cost_coverage'],node['lower_bound'])}")
                 else:
                     keys={sessions.thread_key(n) for n in sessions.iter_nodes(result['root']) if n is not result['root']}
                     for key in args.thread:

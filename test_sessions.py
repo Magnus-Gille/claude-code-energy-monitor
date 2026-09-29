@@ -4,7 +4,7 @@ import os
 import stat
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -68,6 +68,29 @@ class TreeTests(unittest.TestCase):
         self.assertEqual(sorted(c['id'] for c in wf['children']), ['w1', 'w2'])
         self.assertEqual(tree['own']['observations'], 2)
         self.assertEqual(tree['observations'], 6)
+
+    def test_windows_import_paths_give_agent_id_and_workflow(self):
+        win = 'm-pc:C:\\Users\\x\\.claude\\projects\\p\\S\\subagents\\workflows\\wf_1\\agent-abc.jsonl'
+        records = [rec('claude', 'S', 0), rec('claude', 'S', 2, agent='implementer', kind='subagent', parent='S', src=win)]
+        result = sessions.build_tree(records, 'S', price=fake_price)
+        flow = result['root']['children'][0]
+        self.assertEqual((flow['kind'], flow['id']), ('workflow', 'wf_1'))
+        self.assertEqual(flow['children'][0]['id'], 'abc')
+
+    def test_unknown_model_uses_display_key_and_renders(self):
+        records = [rec('claude', 'S', 0), rec('claude', 'S', 1, model=None), sub('S', 'a1', 2, model=None)]
+        result = sessions.build_tree(records, 'S', price=fake_price)
+        self.assertIn('unknown', result['models']); self.assertIn('m-a', result['models'])
+        self.assertEqual(result['root']['models'], ['m-a', 'unknown'])
+        text = sessions.render(result, None, '2026-09-01')
+        self.assertIn('unknown:', text)
+        json.dumps(result, sort_keys=True)
+        line_ = json.dumps({'v': 1, 'root_session': 'S', 'unit': 'u', 'outcome': 'pass', 'note': '',
+                            'threads': [{'harness': 'claude', 'agent_id': 'a1'}]})
+        out = sessions.Outcomes([json.loads(line_)])
+        eff = sessions.efficiency(result, out)
+        self.assertIn('unknown', eff['models']); self.assertEqual(eff['units'][0]['models'], ['unknown'])
+        self.assertIn('unknown', sessions.render(result, eff, '2026-09-01'))
 
     def test_same_type_subagents_split_by_agent_id(self):
         rows = [rec('claude', 'S', 0), sub('S', 'a546438a7f4c8fe18', 1, atype='implementer'),
@@ -244,6 +267,40 @@ class OutcomeTests(unittest.TestCase):
         self.assertIn('n/a', sessions.render(result, eff, 'D'))
 
 
+class OutcomeFileSafetyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / 'outcomes.jsonl'
+        self.item = json.loads(line('u1', [ag('a1')], 'pass'))
+
+    def test_new_file_is_created_0600(self):
+        sessions.append_outcome(self.path, self.item)
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+        sessions.append_outcome(self.path, self.item)
+        self.assertEqual(len(self.path.read_text().splitlines()), 2)
+
+    def test_loose_permissions_refused_for_append_but_warned_for_read(self):
+        self.path.write_text(json.dumps(self.item) + '\n'); self.path.chmod(0o644)
+        with self.assertRaisesRegex(ValueError, '0600'):
+            sessions.append_outcome(self.path, self.item)
+        self.assertEqual(len(self.path.read_text().splitlines()), 1)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            found = sessions.load_outcomes(self.path, 'S')
+        self.assertEqual(len(found), 1); self.assertIn('0600', err.getvalue())
+
+    def test_symlink_refused_for_append_but_warned_for_read(self):
+        target = Path(self.tmp.name) / 'target.jsonl'
+        target.write_text(json.dumps(self.item) + '\n'); target.chmod(0o600)
+        self.path.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            sessions.append_outcome(self.path, self.item)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            found = sessions.load_outcomes(self.path, 'S')
+        self.assertEqual(len(found), 1); self.assertIn('symlink', err.getvalue())
+
+
 class CliTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
@@ -258,11 +315,11 @@ class CliTests(unittest.TestCase):
         patcher.start(); self.addCleanup(patcher.stop)
 
     @staticmethod
-    def write(path, session, agent, request, ts, attr=None):
+    def write(path, session, agent, request, ts, attr=None, model='m-a'):
         path.parent.mkdir(parents=True, exist_ok=True)
         row = {'type': 'assistant', 'uuid': 'r' + request, 'requestId': request, 'sessionId': session,
                'cwd': '/w/app', 'version': 'v', 'timestamp': ts,
-               'message': {'id': 'm' + request, 'model': 'm-a', 'stop_reason': 'end_turn',
+               'message': {'id': 'm' + request, 'model': model, 'stop_reason': 'end_turn',
                            'usage': {'input_tokens': 10, 'cache_read_input_tokens': 20,
                                      'cache_creation_input_tokens': 0, 'output_tokens': 5}}}
         if agent:
@@ -285,6 +342,14 @@ class CliTests(unittest.TestCase):
         self.assertEqual(data['total']['observations'], 2)
         self.assertEqual(data['root']['children'][0]['link'], 'path')
 
+    def test_unknown_model_session_rate_text_and_json(self):
+        self.write(self.root / 'logs/proj/S/subagents/agent-u1.jsonl', 'S', 'u1', 'req9', '2026-09-10T10:06:00Z', model='unknown')
+        with History(self.db) as h:
+            h.refresh('claude', self.root / 'logs')
+        self.assertIn('unknown', self.run_main('session', 'S'))
+        self.assertIn('unknown', json.loads(self.run_main('session', 'S', '--json'))['models'])
+        self.assertIn('claude:agent:u1', self.run_main('rate', 'S'))
+
     def test_rate_lists_agent_id_keys_for_typed_subagents(self):
         proj = self.root / 'logs/proj'
         self.write(proj / 'S/subagents/agent-i111111111.jsonl', 'S', 'i111111111', 'req2', '2026-09-10T10:06:00Z', 'implementer')
@@ -294,6 +359,15 @@ class CliTests(unittest.TestCase):
         listing = self.run_main('rate', 'S')
         self.assertIn('claude:agent:i111111111', listing)
         self.assertIn('claude:agent:i222222222', listing)
+
+    def test_rate_without_child_threads_explains_on_stderr(self):
+        self.write(self.root / 'logs/proj/L.jsonl', 'L', None, 'reqL', '2026-09-10T11:00:00Z')
+        with History(self.db) as h:
+            h.refresh('claude', self.root / 'logs')
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(self.run_main('rate', 'L'), '')
+        self.assertIn('no rateable threads', err.getvalue())
 
     def test_rate_lists_appends_and_rejects(self):
         listing = self.run_main('rate', 'S')
