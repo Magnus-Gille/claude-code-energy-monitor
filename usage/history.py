@@ -11,13 +11,14 @@ import os
 import sqlite3
 import stat
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import why
 
-VERSION = 1
+OBSERVATION_VERSION = 1  # the 'v' field inside observation dicts
+SCHEMA_VERSION = 2  # PRAGMA user_version of the SQLite layout
 COLLECTOR_VERSION = 4
 FIELDS = ('fresh_input', 'cache_read', 'cache_write', 'output')
 ALL_FIELDS = FIELDS + ('reasoning',)
@@ -148,7 +149,7 @@ def normalize(record, machine):
             if tokens[k] is not None:
                 confidence[k] = 'lower_bound'
     return {
-        'v': VERSION, 'kind': 'usage_observation', 'id': record.call_id,
+        'v': OBSERVATION_VERSION, 'kind': 'usage_observation', 'id': record.call_id,
         'id_synthetic': getattr(record, 'id_synthetic', False),
         'ts': record.timestamp.astimezone(timezone.utc).isoformat(), 'machine': machine,
         'harness': record.harness, 'provider': text(record.provider, default='unknown'),
@@ -213,6 +214,149 @@ def merge_observations(a, b):
     return normalize(proxy, result['machine'])
 
 
+# ---- Storage codec: one observation dict <-> one typed row -------------------------------------------
+# Text and small-JSON fields become references into the global `strings` dictionary; _encode/_decode
+# work on logical rows (values, not ids) and History maps reference columns to ids and back.
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_MICRO = timedelta(microseconds=1)
+_REFS = ('id', 'machine', 'harness', 'provider', 'harness_version', 'collector', 'source_type', 'session',
+         'parent_session', 'session_started_at', 'thread_kind', 'agent', 'origin', 'model', 'effort',
+         'project_id', 'project_label', 'cwd', 'turn_id', 'turn_confidence', 'warnings', 'confidence')
+_JSON_REFS = ('warnings', 'confidence')
+_FLAGS = ('id_synthetic', 'complete', 'output_final')
+_TOKENS = ALL_FIELDS
+_CONSTANTS = (('v', OBSERVATION_VERSION), ('kind', 'usage_observation'), ('duration_ms', None),
+              ('accounting_basis', 'request_top_level'), ('billing_verified', False))
+_ITEM_KEYS = frozenset(_REFS + _FLAGS + ('ts', 'tokens', 'raw_usage') + tuple(k for k, _ in _CONSTANTS))
+_COLUMN_OF = {'id': 'call_id'}
+COLUMNS = (('key', 'ts_us') + tuple(_COLUMN_OF.get(k, k) for k in _REFS) + _FLAGS + _TOKENS
+           + ('raw_usage', 'extra'))
+_REF_INDEX = tuple(range(2, 2 + len(_REFS)))
+# Fixed raw_usage layout: (top-level key, None) or (container, member). Codex counters come first so that
+# the positional array stays short; -1 marks an absent slot (counters are never negative), null is None.
+_RAW_LAYOUT = tuple((k, None) for k in ('input_tokens', 'cached_input_tokens', 'output_tokens',
+    'reasoning_output_tokens', 'total_tokens', 'cache_write_input_tokens', 'cache_read_input_tokens',
+    'cache_creation_input_tokens', 'total_input_tokens', 'total_output_tokens', 'input', 'output',
+    'reasoning', 'cacheRead', 'cacheWrite', 'totalTokens')) + (
+    ('cache_creation', 'ephemeral_5m_input_tokens'), ('cache_creation', 'ephemeral_1h_input_tokens'),
+    ('output_tokens_details', 'thinking_tokens'), ('cache', 'read'), ('cache', 'write'))
+_RAW_SLOT = {slot: i for i, slot in enumerate(_RAW_LAYOUT)}
+_RAW_MEMBERS = {}
+for _name, _member in _RAW_LAYOUT:
+    if _member is not None:
+        _RAW_MEMBERS.setdefault(_name, set()).add(_member)
+_ABSENT = -1
+_OBSERVATIONS_DDL = ('CREATE TABLE IF NOT EXISTS observations (id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, '
+                     'ts_us INTEGER NOT NULL, ' + ', '.join(
+                         f'{name} {"TEXT" if name in ("raw_usage", "extra") else "INTEGER"}'
+                         for name in COLUMNS[2:]) + ')')
+
+
+def _counter_or_none(value):
+    return value is None or (type(value) is int and value >= 0)
+
+
+def _compact(value):
+    return json.dumps(value, separators=(',', ':'))
+
+
+def _pack_raw(raw):
+    """Return (positional counter array JSON or None, JSON of everything outside the layout or None)."""
+    slots, extra = [_ABSENT] * len(_RAW_LAYOUT), {}
+    for key, value in raw.items():
+        if key in _RAW_MEMBERS:
+            if (isinstance(value, dict) and value and set(value) <= _RAW_MEMBERS[key]
+                    and all(_counter_or_none(v) for v in value.values())):
+                for member, v in value.items():
+                    slots[_RAW_SLOT[key, member]] = v
+                continue
+        elif (key, None) in _RAW_SLOT and _counter_or_none(value):
+            slots[_RAW_SLOT[key, None]] = value
+            continue
+        extra[key] = value
+    while slots and slots[-1] == _ABSENT:
+        slots.pop()
+    return (_compact(slots) if slots else None), (_compact(extra) if extra else None)
+
+
+def _unpack_raw(packed, extra):
+    raw = {}
+    for (name, member), value in zip(_RAW_LAYOUT, json.loads(packed) if packed else ()):
+        if value != _ABSENT:
+            if member is None:
+                raw[name] = value
+            else:
+                raw.setdefault(name, {})[member] = value
+    if extra:
+        raw.update(json.loads(extra))
+    return raw
+
+
+def _ts_us(text):
+    micros = (datetime.fromisoformat(text) - _EPOCH) // _MICRO
+    if _ts_text(micros) != text:
+        raise ValueError(f'timestamp {text!r} is not a canonical UTC ISO string')
+    return micros
+
+
+def _ts_text(micros):
+    return (_EPOCH + timedelta(microseconds=micros)).isoformat()
+
+
+def _key(item):
+    return json.dumps([item['provider'], item['harness'], item['machine'] if item['id_synthetic'] else '', item['id']])
+
+
+def _encode(item, key=None):
+    """Observation dict -> logical row in COLUMNS order (reference columns hold strings, not ids)."""
+    unknown = set(item) - _ITEM_KEYS - {'sources'}
+    if unknown:
+        raise ValueError(f'unstorable observation fields {sorted(unknown)}')
+    for name, constant in _CONSTANTS:
+        if type(item.get(name, constant)) is not type(constant) or item.get(name, constant) != constant:
+            raise ValueError(f'observation field {name} must be {constant!r}')
+    refs = []
+    for name in _REFS:
+        value = item.get(name)
+        if name in _JSON_REFS:
+            value = _compact(value)
+        elif value is not None and type(value) is not str:
+            raise ValueError(f'observation field {name} must be text or null')
+        refs.append(value)
+    flags = []
+    for name in _FLAGS:
+        value = item.get(name)
+        if value is not None and type(value) is not bool or value is None and name != 'output_final':
+            raise ValueError(f'observation field {name} must be boolean')
+        flags.append(None if value is None else int(value))
+    tokens = item.get('tokens') or {}
+    if set(tokens) - set(_TOKENS) or not all(_counter_or_none(tokens.get(k)) for k in _TOKENS):
+        raise ValueError('observation tokens must be non-negative integers or null')
+    packed, extra = _pack_raw(item.get('raw_usage') or {})
+    return (_key(item) if key is None else key, _ts_us(item['ts']), *refs, *flags,
+            *(tokens.get(k) for k in _TOKENS), packed, extra)
+
+
+def _decode(row):
+    """Inverse of _encode; returns the observation dict exactly as normalize produced it."""
+    key, ts_us, *rest = row
+    refs = dict(zip(_REFS, rest))
+    flags = dict(zip(_FLAGS, rest[len(_REFS):]))
+    n = len(_REFS) + len(_FLAGS)
+    tokens = dict(zip(_TOKENS, rest[n:n + len(_TOKENS)]))
+    packed, extra = rest[n + len(_TOKENS):]
+    item = {'v': OBSERVATION_VERSION, 'kind': 'usage_observation', 'id': refs['id'],
+            'id_synthetic': bool(flags['id_synthetic']), 'ts': _ts_text(ts_us)}
+    for name in _REFS[1:-2]:
+        item[name] = refs[name]
+    item.update(tokens=tokens, raw_usage=_unpack_raw(packed, extra), duration_ms=None,
+                accounting_basis='request_top_level', billing_verified=False,
+                warnings=json.loads(refs['warnings']), complete=bool(flags['complete']),
+                confidence=json.loads(refs['confidence']),
+                output_final=None if flags['output_final'] is None else bool(flags['output_final']))
+    return item
+
+
 class History:
     def __init__(self, path):
         self.path = Path(path).expanduser().absolute()
@@ -234,28 +378,96 @@ class History:
         c = sqlite3.connect(str(self.path), timeout=30, isolation_level=None)
         c.row_factory = sqlite3.Row
         self.connection = c
+        self._strings, self._values = {}, {}
         try:
             c.execute('BEGIN IMMEDIATE')
             version = c.execute('PRAGMA user_version').fetchone()[0]
-            if version not in (0, VERSION):
+            if version not in (0, 1, SCHEMA_VERSION):
                 raise ValueError(f'unsupported history schema version {version}')
+            migrate = version == 1 and any(r['name'] == 'data' for r in c.execute('PRAGMA table_info(observations)'))
+            if migrate:
+                for table in ('observations', 'sources', 'files'):
+                    c.execute(f'ALTER TABLE {table} RENAME TO v1_{table}')
             for sql in (
                 'CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
-                'CREATE TABLE IF NOT EXISTS observations (key TEXT PRIMARY KEY, data TEXT NOT NULL)',
-                'CREATE TABLE IF NOT EXISTS sources (observation TEXT, harness TEXT, path TEXT, PRIMARY KEY(observation,harness,path))',
-                'CREATE TABLE IF NOT EXISTS files (harness TEXT, path TEXT, root TEXT, fingerprint TEXT, diagnostics TEXT, PRIMARY KEY(harness,path))',
+                'CREATE TABLE IF NOT EXISTS strings (id INTEGER PRIMARY KEY, value TEXT NOT NULL UNIQUE)',
+                'CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, harness TEXT NOT NULL, path TEXT NOT NULL,'
+                ' root TEXT, fingerprint TEXT, diagnostics TEXT, UNIQUE(harness, path))',
+                _OBSERVATIONS_DDL,
+                'CREATE TABLE IF NOT EXISTS sources (observation INTEGER, file INTEGER,'
+                ' PRIMARY KEY(observation, file)) WITHOUT ROWID',
                 'CREATE TABLE IF NOT EXISTS imports (harness TEXT, root TEXT, data TEXT, PRIMARY KEY(harness,root))',
             ):
                 c.execute(sql)
+            if migrate:
+                self._migrate_v1(c)
             c.execute('INSERT OR IGNORE INTO meta VALUES (?,?)', ('machine', 'm-' + uuid.uuid4().hex))
-            c.execute(f'PRAGMA user_version={VERSION}')
+            c.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             c.commit()
+            if migrate:
+                c.execute('VACUUM')  # outside the transaction; reclaims the space of the dropped v1 tables
         except Exception:
-            c.rollback()
+            if c.in_transaction:
+                c.rollback()
             c.close()
             raise
         self.machine = c.execute("SELECT value FROM meta WHERE key='machine'").fetchone()[0]
         return self
+
+    def _migrate_v1(self, c):
+        """Move JSON observations and text-keyed sources into schema v2, then drop the v1 tables."""
+        c.execute('INSERT INTO files(harness,path,root,fingerprint,diagnostics)'
+                  ' SELECT harness,path,root,fingerprint,diagnostics FROM v1_files')
+        # A retained observation may cite a file that has no checkpoint row; keep the citation.
+        c.execute('INSERT OR IGNORE INTO files(harness,path) SELECT DISTINCT harness,path FROM v1_sources')
+        for row in c.execute('SELECT key,data FROM v1_observations'):
+            try:
+                encoded = _encode(json.loads(row['data']), row['key'])
+            except ValueError as exc:
+                raise ValueError(f"cannot migrate observation {row['key']}: {exc}") from exc
+            self._insert(c, encoded)
+        for row in c.execute('SELECT observation,harness,path FROM v1_sources').fetchall():
+            found = c.execute('SELECT o.id,f.id FROM observations o, files f WHERE o.key=? AND f.harness=? AND f.path=?',
+                              (self._physical_key(c, row['observation']), row['harness'], row['path'])).fetchone()
+            if found:
+                c.execute('INSERT OR IGNORE INTO sources VALUES (?,?)', tuple(found))
+        for table in ('sources', 'files', 'observations'):
+            c.execute(f'DROP TABLE v1_{table}')
+
+    def _sid(self, c, value):
+        if value is None:
+            return None
+        found = self._strings.get(value)
+        if found is None:
+            row = c.execute('SELECT id FROM strings WHERE value=?', (value,)).fetchone()
+            found = row[0] if row else c.execute('INSERT INTO strings(value) VALUES (?)', (value,)).lastrowid
+            self._strings[value] = found
+            self._values[found] = value
+        return found
+
+    def _physical_key(self, c, logical):
+        """Compact unique key: the dictionary ids of (provider, harness, machine scope, id), dot-joined."""
+        return '.'.join(str(self._sid(c, part)) for part in json.loads(logical))
+
+    def _insert(self, c, encoded):
+        """Upsert by key, keeping the observation's integer id (and thus its sources) stable; returns that id."""
+        row = [self._physical_key(c, encoded[0])] + [
+            v if i not in _REF_INDEX else self._sid(c, v) for i, v in enumerate(encoded) if i]
+        updates = ','.join(f'{name}=excluded.{name}' for name in COLUMNS[1:])
+        c.execute(f'INSERT INTO observations({",".join(COLUMNS)}) VALUES ({",".join("?" * len(COLUMNS))})'
+                  f' ON CONFLICT(key) DO UPDATE SET {updates}', row)
+        return c.execute('SELECT id FROM observations WHERE key=?', (row[0],)).fetchone()[0]
+
+    def _value(self, c, ident):
+        if ident not in self._values:
+            self._values[ident] = c.execute('SELECT value FROM strings WHERE id=?', (ident,)).fetchone()[0]
+        return self._values[ident]
+
+    def _existing(self, c, logical_key):
+        row = c.execute(f'SELECT {",".join(COLUMNS)} FROM observations WHERE key=?',
+                        (self._physical_key(c, logical_key),)).fetchone()
+        return row and _decode(tuple(self._value(c, v) if i in _REF_INDEX and v is not None else v
+                                     for i, v in enumerate(row)))
 
     def __exit__(self, *_):
         if self.connection:
@@ -281,6 +493,7 @@ class History:
         root = Path(root).expanduser().absolute()
         c = self.connection
         c.execute('BEGIN IMMEDIATE')
+        self._strings, self._values = {}, {}
         try:
             prior = c.execute('SELECT data FROM imports WHERE harness=? AND root=?', (harness, str(root))).fetchone()
             prior = json.loads(prior[0]) if prior else {}
@@ -357,24 +570,23 @@ class History:
                         result['changed_during_read'] += 1
                         if harness != 'opencode':
                             continue
+                    file_id = self._file_id(c, harness, str(path))
                     for record in records:
                         item = normalize(record, self.machine)
                         # Synthetic IDs are machine scoped; provider IDs can merge copies.
-                        key = json.dumps([item['provider'], item['harness'],
-                                          self.machine if item['id_synthetic'] else '', item['id']])
-                        old = c.execute('SELECT data FROM observations WHERE key=?', (key,)).fetchone()
+                        key = _key(item)
+                        old = self._existing(c, key)
                         if old:
-                            item = merge_observations(json.loads(old[0]), item)
-                        c.execute('INSERT OR REPLACE INTO observations VALUES (?,?)',
-                                  (key, json.dumps(item, sort_keys=True)))
-                        c.execute('INSERT OR IGNORE INTO sources VALUES (?,?,?)', (key,harness,str(path)))
+                            item = merge_observations(old, item)
+                        c.execute('INSERT OR IGNORE INTO sources VALUES (?,?)',
+                                  (self._insert(c, _encode(item, key)), file_id))
                         result['observations_seen'] += 1
                     for k in diagnostics:
                         result[k] += diagnostics.get(k, 0)
                     # Never checkpoint an incomplete tail; try it again next refresh.
                     checkpoint = before if not diagnostics['partial_lines'] and not changed else None
-                    c.execute('INSERT OR REPLACE INTO files VALUES (?,?,?,?,?)',
-                              (harness,str(path),str(root),checkpoint,json.dumps(diagnostics)))
+                    c.execute('UPDATE files SET root=?,fingerprint=?,diagnostics=? WHERE id=?',
+                              (str(root),checkpoint,json.dumps(diagnostics),file_id))
                 except (OSError, UnicodeError) as exc:
                     result['read_errors'] += 1
                     result['errors'].append(f'{path}: {type(exc).__name__}: {exc}')
@@ -388,7 +600,13 @@ class History:
             return result
         except Exception:
             c.rollback()
+            self._strings, self._values = {}, {}
             raise
+
+    @staticmethod
+    def _file_id(c, harness, path):
+        c.execute('INSERT OR IGNORE INTO files(harness,path) VALUES (?,?)', (harness, path))
+        return c.execute('SELECT id FROM files WHERE harness=? AND path=?', (harness, path)).fetchone()[0]
 
     def records(self, start=None, end=None, harness=None, project=None, session=None, turn=None):
         session_harness = None
@@ -400,17 +618,29 @@ class History:
         if harness is not None and session_harness is not None and harness != session_harness:
             return []
         effective_harness = harness or session_harness
+        c = self.connection
+        where, params = [], []
+        if start is not None:
+            where.append('o.ts_us>=?'); params.append((start - _EPOCH) // _MICRO)
+        if end is not None:
+            where.append('o.ts_us<?'); params.append((end - _EPOCH) // _MICRO)
+        for column, wanted in (('harness',effective_harness),('project_id',project),('session',raw_session),('turn_id',turn)):
+            if wanted is not None:
+                found = c.execute('SELECT id FROM strings WHERE value=?', (wanted,)).fetchone() if isinstance(wanted, str) else None
+                if not found:
+                    return []
+                where.append(f'o.{column}=?'); params.append(found[0])
+        where = ('WHERE ' + ' AND '.join(where)) if where else ''
+        paths = {}
+        for observation, path in c.execute('SELECT s.observation,f.path FROM sources s JOIN files f ON f.id=s.file'
+                                           f' JOIN observations o ON o.id=s.observation {where}', params):
+            paths.setdefault(observation, []).append(path)
+        strings = {r[0]: r[1] for r in c.execute('SELECT id,value FROM strings')}
         result = []
-        for row in self.connection.execute('SELECT key,data FROM observations'):
-            item = json.loads(row['data'])
-            ts = datetime.fromisoformat(item['ts'])
-            if start is not None and ts < start or end is not None and ts >= end:
-                continue
-            if any(wanted is not None and item[key] != wanted for key, wanted in (
-                ('harness',effective_harness),('project_id',project),('session',raw_session),('turn_id',turn))):
-                continue
-            item['sources'] = [r[0] for r in self.connection.execute(
-                'SELECT path FROM sources WHERE observation=? ORDER BY path',(row['key'],))]
+        for row in c.execute(f'SELECT o.id,{",".join("o." + n for n in COLUMNS)} FROM observations o {where}', params):
+            item = _decode(tuple(strings[v] if i in _REF_INDEX and v is not None else v
+                                 for i, v in enumerate(row[1:])))
+            item['sources'] = sorted(paths.get(row[0], ()))
             result.append(item)
         return sorted(result,key=lambda x:(x['ts'],x['provider'],x['id']))
 
@@ -418,7 +648,7 @@ class History:
         records = self.records()
         imports = [json.loads(r[0]) for r in self.connection.execute('SELECT data FROM imports ORDER BY harness,root')]
         missing = sum(not Path(r[0]).exists() for r in self.connection.execute('SELECT path FROM files'))
-        return dict(schema_version=VERSION, machine=self.machine, observations=len(records),
+        return dict(schema_version=SCHEMA_VERSION, machine=self.machine, observations=len(records),
                     first_event=records[0]['ts'] if records else None,
                     last_event=records[-1]['ts'] if records else None,
                     missing_source_files=missing, imports=imports, coverage_complete=False,

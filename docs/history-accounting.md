@@ -50,7 +50,12 @@ local file. This intentionally implements a smaller slice than the earlier
 immutable-chunk/multi-machine design. No sync, quota meter, heartbeat service,
 credential fingerprint, or statusline migration is introduced.
 
-`PRAGMA user_version=1` versions the database. Unknown database versions fail
+`PRAGMA user_version=2` versions the database (observation dicts keep `v: 1`). Schema 2 stores typed
+integer columns, one global string dictionary, a compact positional `raw_usage` array (rare shapes in
+`extra`), and integer source links: a real 379,401-observation history takes 140 MB instead of 990 MB
+(about 370 bytes per observation instead of about 2.6 KB); a version 1
+database migrates in one transaction on first open (retained observations whose files are gone survive)
+and is then vacuumed. Unknown database versions fail
 closed; later migrations must be explicit and preserve original observations.
 On POSIX systems, database files are 0600 and a newly created immediate state
 directory is 0700. Native Windows uses the current user's filesystem ACLs because

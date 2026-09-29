@@ -15,6 +15,7 @@ All notable changes to this project are documented in this file. The project fol
 
 ### Changed
 
+- History database schema 2: typed columns and a string dictionary cut storage roughly sevenfold (990 MB to 140 MB for 379,401 real observations); existing databases migrate automatically on first open.
 - `why.py` defaults to all supported harnesses while retaining `--harness both` for Claude and Codex.
 - Session identities are harness-scoped in summaries and reports.
 - OpenCode reasoning is normalized as a subset of output while retained as a separate subtotal.

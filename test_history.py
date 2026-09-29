@@ -6,11 +6,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
-from usage.history import History, _owned_by_current_user, normalize, summarize, merge_observations
+from usage.history import History, _encode, _decode, _owned_by_current_user, normalize, summarize, merge_observations
 from why import AttributionRecord
 from test_why_harnesses import create_opencode_db, pi_message, write_pi_session
 
@@ -408,9 +409,7 @@ class HistoryTests(unittest.TestCase):
         ]
         with History(self.db) as h:
             for index,item in enumerate(samples):
-                h.connection.execute('INSERT INTO observations VALUES (?,?)',
-                                     (str(index),json.dumps(item)))
-            h.connection.commit()
+                h._insert(h.connection,_encode(item))
             self.assertEqual([row['harness'] for row in h.records(session='pi:session')],['pi'])
             self.assertEqual({row['harness'] for row in h.records(session='session')},{'claude','pi'})
 
@@ -558,6 +557,208 @@ class HistoryReviewTests(unittest.TestCase):
         self.assertEqual((item['tokens']['output'], item['tokens']['reasoning']), (4, None))
         item = normalize(record(raw_usage=dict(usage, reasoning=3), **base), 'm')
         self.assertEqual((item['tokens']['output'], item['tokens']['reasoning']), (7, 3))
+
+
+def _v1_database(path, records, files):
+    """Write a schema v1 database (JSON text observations, text-keyed sources) as the old code did."""
+    from usage.history import _key
+    connection = sqlite3.connect(str(path))
+    for sql in (
+        'CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+        'CREATE TABLE observations (key TEXT PRIMARY KEY, data TEXT NOT NULL)',
+        'CREATE TABLE sources (observation TEXT, harness TEXT, path TEXT, PRIMARY KEY(observation,harness,path))',
+        'CREATE TABLE files (harness TEXT, path TEXT, root TEXT, fingerprint TEXT, diagnostics TEXT, PRIMARY KEY(harness,path))',
+        'CREATE TABLE imports (harness TEXT, root TEXT, data TEXT, PRIMARY KEY(harness,root))'):
+        connection.execute(sql)
+    connection.execute("INSERT INTO meta VALUES ('machine','m-legacy')")
+    for record in records:
+        item = {k: v for k, v in record.items() if k != 'sources'}
+        key = _key(item)
+        connection.execute('INSERT INTO observations VALUES (?,?)', (key, json.dumps(item, sort_keys=True)))
+        for source in record['sources']:
+            connection.execute('INSERT INTO sources VALUES (?,?,?)', (key, item['harness'], source))
+    for harness, source, root, fingerprint in files:
+        connection.execute('INSERT INTO files VALUES (?,?,?,?,?)', (harness, source, root, fingerprint,
+                           json.dumps(dict(malformed_lines=0, partial_lines=0, unparsed_usage_lines=0))))
+    connection.execute("INSERT INTO imports VALUES ('claude','/r','{\"status\":\"ok\"}')")
+    connection.execute('PRAGMA user_version=1')
+    connection.commit()
+    connection.close()
+
+
+def _synthetic_items():
+    utc = timezone.utc
+    claude_usage = {'input_tokens': 3, 'output_tokens': 9, 'cache_read_input_tokens': 7,
+                    'cache_creation_input_tokens': 5,
+                    'cache_creation': {'ephemeral_5m_input_tokens': 2, 'ephemeral_1h_input_tokens': 3},
+                    'output_tokens_details': {'thinking_tokens': 4},
+                    'iterations': [{'input_tokens': 3, 'output_tokens': 9, 'type': 'message', 'model': 'm'}],
+                    'iteration_snapshots': [[{'input_tokens': 1}], [{'input_tokens': 3, 'output_tokens': 9}]]}
+    samples = [
+        record('c1', raw_usage=claude_usage, output_final=True, parent_session_id='p', turn_id='t1',
+               turn_confidence='observed', cwd='/work/x', project_id='/work/x', harness_version='1.2',
+               timestamp=datetime(2026, 9, 3, 10, 0, 0, 123456, tzinfo=utc)),
+        record('c2', raw_usage={'input_tokens': None, 'output_tokens': 0, 'cache_creation': {},
+                                'iterations': None}, output_final=False),
+        record('c3', raw_usage={'input_tokens': 1, 'output_tokens': 1, 'cache_read_input_tokens': 1,
+                                'cache_creation_input_tokens': 0, 'cache_creation': {'ephemeral_1h_input_tokens': 0}},
+               output_final=None, id_synthetic=True),
+        record('x1', harness='codex', provider='openai', raw_usage={
+            'input_tokens': 10, 'cached_input_tokens': 4, 'cache_write_input_tokens': 0,
+            'output_tokens': 2, 'reasoning_output_tokens': 1, 'total_tokens': 12}),
+        record('x2', harness='codex', provider='openai', raw_usage={'input_tokens': 1, 'cached_input_tokens': 4}),
+        record('p1', harness='pi', provider='test', raw_usage={
+            'input': 1, 'cacheRead': 0, 'cacheWrite': 0, 'output': 1, 'reasoning': 0, 'totalTokens': 2},
+            session_started_at=datetime(2026, 9, 3, 9, 0, tzinfo=utc)),
+        record('o1', harness='opencode', provider='test', raw_usage={
+            'input': 1, 'output': 4, 'reasoning': 3, 'cache': {'read': 2, 'write': 0}}),
+        record('o2', harness='opencode', provider='test', raw_usage={'input': 1, 'cache': {'read': None}},
+               model='unknown', effort='unknown'),
+        record('e1', raw_usage={}),
+    ]
+    return [normalize(r, 'm-test') for r in samples]
+
+
+class HistoryStorageTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_codec_round_trips_every_harness_and_raw_shape(self):
+        items = _synthetic_items()
+        self.assertEqual({i['harness'] for i in items}, {'claude', 'codex', 'pi', 'opencode'})
+        self.assertEqual({i['output_final'] for i in items}, {True, False, None})
+        for item in items:
+            with self.subTest(id=item['id']):
+                self.assertEqual(_decode(_encode(item)), item)
+        raw = {i['id']: i['raw_usage'] for i in items}
+        self.assertEqual(raw['c2'], {'input_tokens': None, 'output_tokens': 0, 'cache_creation': {}, 'iterations': None})
+        self.assertNotIn('cache_creation_input_tokens', raw['c2'])
+
+    def test_codec_refuses_fields_it_cannot_restore(self):
+        item = _synthetic_items()[0]
+        with self.assertRaisesRegex(ValueError, 'unstorable'):
+            _encode(dict(item, surprise=1))
+        with self.assertRaisesRegex(ValueError, 'billing_verified'):
+            _encode(dict(item, billing_verified=True))
+
+    def test_v2_layout_is_typed_and_deduplicated(self):
+        source = self.root / 'logs/a.jsonl'; write_claude(source)
+        with History(self.root / 'h.sqlite3') as h:
+            h.refresh('claude', source.parent)
+            c = h.connection
+            self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertEqual(h.doctor()['schema_version'], 2)
+            self.assertEqual({r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")},
+                             {'meta', 'strings', 'files', 'observations', 'sources', 'imports'})
+            row = c.execute('SELECT ts_us,fresh_input,raw_usage,extra FROM observations').fetchone()
+            self.assertEqual(tuple(row), (1788429600000000, 10, '[10,-1,5,-1,-1,-1,20,0]', None))
+            self.assertEqual(c.execute('SELECT typeof(harness) FROM observations').fetchone()[0], 'integer')
+            h.refresh('claude', source.parent)
+            self.assertEqual(c.execute('SELECT count(*) FROM sources').fetchone()[0], 1)
+
+    def test_records_filters_run_in_sql_and_keep_order(self):
+        for name, request, ts in (('a', 'r2', '2026-09-03T11:00:00Z'), ('b', 'r1', '2026-09-03T10:00:00Z')):
+            path = self.root / f'logs/{name}.jsonl'; write_claude(path, request)
+            rows = [json.loads(x) for x in path.read_text().splitlines()]
+            rows[-1]['timestamp'] = ts
+            path.write_text(''.join(json.dumps(x) + '\n' for x in rows))
+        with History(self.root / 'h.sqlite3') as h:
+            h.refresh('claude', self.root / 'logs')
+            self.assertEqual([r['id'] for r in h.records()], ['r1', 'r2'])
+            at = datetime(2026, 9, 3, 11, tzinfo=timezone.utc)
+            self.assertEqual([r['id'] for r in h.records(start=at)], ['r2'])
+            self.assertEqual([r['id'] for r in h.records(end=at)], ['r1'])
+            self.assertEqual(h.records(harness='codex'), [])
+            self.assertEqual(h.records(session='nope'), [])
+            self.assertEqual(len(h.records(session='claude:session', turn=None, project=None)), 2)
+
+    def test_migrates_v1_keeping_records_sources_and_deleted_files(self):
+        gone, kept = self.root / 'logs/gone.jsonl', self.root / 'logs/kept.jsonl'
+        write_claude(gone, 'old'); write_claude(kept, 'new')
+        with History(self.root / 'reference.sqlite3') as h:
+            h.refresh('claude', kept.parent)
+            expected = h.records()
+        self.assertEqual({len(r['sources']) for r in expected}, {1})
+        expected[0]['sources'] = sorted([str(gone), str(kept)])
+        legacy = self.root / 'state/legacy.sqlite3'
+        legacy.parent.mkdir()
+        # Both observations come from both files; a third only exists in the file that is then deleted.
+        extra = dict(expected[0], id='only-gone', sources=[str(gone)])
+        records = expected + [extra]
+        _v1_database(legacy, records, [('claude', str(gone), str(gone.parent), 'f1'),
+                                       ('claude', str(kept), str(kept.parent), None)])
+        os.chmod(legacy, 0o600)
+        size_before = legacy.stat().st_size
+        gone.unlink()
+        with History(legacy) as h:
+            self.assertEqual(h.machine, 'm-legacy')
+            self.assertEqual(sorted(h.records(), key=lambda r: r['id']), sorted(records, key=lambda r: r['id']))
+            self.assertEqual([r['sources'] for r in h.records() if r['id'] == 'only-gone'], [[str(gone)]])
+            self.assertEqual(h.connection.execute('PRAGMA user_version').fetchone()[0], 2)
+            tables = {r[0] for r in h.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertFalse({t for t in tables if t.startswith('v1_')})
+            self.assertEqual(tables, {'meta', 'strings', 'files', 'observations', 'sources', 'imports'})
+            self.assertEqual(h.connection.execute("SELECT count(*) FROM imports").fetchone()[0], 1)
+            self.assertEqual(h.doctor()['missing_source_files'], 1)
+            self.assertEqual(h.connection.execute("SELECT fingerprint FROM files WHERE path=?", (str(gone),)).fetchone()[0], 'f1')
+            # The migrated database keeps refreshing incrementally.
+            h.refresh('claude', kept.parent)
+            self.assertEqual(len(h.records()), 3)
+        with History(legacy) as h:
+            self.assertEqual(len(h.records()), 3)
+        self.assertLessEqual(stat.S_IMODE(legacy.stat().st_mode), 0o600)
+        self.assertGreater(size_before, 0)
+
+    def test_failed_migration_leaves_v1_untouched(self):
+        item = _synthetic_items()[0]
+        legacy = self.root / 'legacy.sqlite3'
+        _v1_database(legacy, [dict(item, sources=[])], [])
+        connection = sqlite3.connect(str(legacy))
+        connection.execute("UPDATE observations SET data=json_set(data,'$.surprise',1)")
+        connection.commit(); connection.close()
+        os.chmod(legacy, 0o600)
+        with self.assertRaisesRegex(ValueError, 'cannot migrate'):
+            History(legacy).__enter__()
+        connection = sqlite3.connect(str(legacy))
+        self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 1)
+        self.assertEqual(connection.execute('SELECT count(*) FROM observations').fetchone()[0], 1)
+        connection.close()
+
+    def test_size_is_at_most_300_bytes_per_observation(self):
+        import random
+        from test_why_codex import _write_rollout, _meta, _context, _tokens
+        rng = random.Random(7)
+        files, per_file, turns_per_file = 200, 100, 10
+        logs = self.root / 'logs'
+        for f in range(files):
+            session = str(uuid.UUID(int=rng.getrandbits(128), version=4))
+            rows = [_meta(session)]
+            total = 0
+            for n in range(per_file):
+                second = n * 7
+                stamp = f'2026-09-{1 + f % 28:02d}T{(second // 3600) % 24:02d}:{second // 60 % 60:02d}:{second % 60:02d}Z'
+                if n % (per_file // turns_per_file) == 0:
+                    context = _context(stamp, 'gpt-5.5', 'high', f'/work/project-{f % 9}')
+                    context['payload']['turn_id'] = str(uuid.UUID(int=rng.getrandbits(128), version=4))
+                    rows.append(context)
+                inp = rng.randrange(2000, 90000); cached = rng.randrange(0, inp); out = rng.randrange(20, 3000)
+                usage = {'input_tokens': inp, 'cached_input_tokens': cached, 'cache_write_input_tokens': 0,
+                         'output_tokens': out, 'reasoning_output_tokens': rng.randrange(0, out),
+                         'total_tokens': inp + out}
+                total += inp
+                rows.append(_tokens(stamp, n, usage, dict(usage, input_tokens=total, total_tokens=total + out)))
+            _write_rollout(logs / f'{f % 28:02d}/rollout-{session}.jsonl', rows)
+        with History(self.root / 'h.sqlite3') as h:
+            h.refresh('codex', logs)
+            count = len(h.records())
+            self.assertEqual(count, files * per_file)
+            self.assertEqual(len({r['turn_id'] for r in h.records()}), files * turns_per_file)
+            h.connection.execute('VACUUM')
+        per_observation = (self.root / 'h.sqlite3').stat().st_size / count
+        print(f'\nhistory size: {per_observation:.1f} bytes per observation over {count} observations')
+        self.assertLessEqual(per_observation, 300)
 
 
 if __name__=='__main__':unittest.main()
