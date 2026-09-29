@@ -5,23 +5,32 @@ observation records the machine that first observed it. Nothing is shared live: 
 
 ## Install on the Pi
 
-Python 3.10 or newer, then install the wheel (stdlib only, no dependencies):
+Python 3.10 or newer, stdlib only, no dependencies. Debian 12/13 and Raspberry Pi OS mark the system
+Python as externally managed (PEP 668), so `pip install --user` fails. Use a venv, pinned to a commit
+or tag:
 
-    pip install claude_code_energy_monitor-<version>-py3-none-any.whl
+    python3 -m venv ~/.local/share/energy-monitor/venv
+    ~/.local/share/energy-monitor/venv/bin/pip install "git+https://github.com/Magnus-Gille/claude-code-energy-monitor@<commit>"
+    ln -sf ~/.local/share/energy-monitor/venv/bin/energy-monitor ~/.local/bin/energy-monitor
 
-Refresh on a schedule, one line per harness in use (cron, `crontab -e`):
+`pipx install "git+https://github.com/Magnus-Gille/claude-code-energy-monitor@<commit>"` works as well.
 
-    */30 * * * * energy-monitor refresh --harness claude
-    */30 * * * * energy-monitor refresh --harness pi
-    */30 * * * * energy-monitor refresh --harness codex
+Refresh on a schedule, one line per harness in use (cron, `crontab -e`). Cron has a short `PATH`, so
+use the full path:
 
-Cron has a short `PATH`; with `pip install --user` use `~/.local/bin/energy-monitor` or set `PATH`.
-`remote_sync.sh` runs `energy-monitor` through non-interactive ssh, so it must be on that `PATH` too.
+    */30 * * * * ~/.local/bin/energy-monitor refresh --harness claude
+    */30 * * * * ~/.local/bin/energy-monitor refresh --harness pi
+    */30 * * * * ~/.local/bin/energy-monitor refresh --harness codex
+
+`remote_sync.sh` puts `~/.local/bin` on `PATH` locally and for every command it runs over
+non-interactive ssh, so a user install is found on both ends. To try the sync without touching your
+default database, set `ENERGY_MONITOR_DB=/path/to/test.sqlite3`; the local import then uses
+`energy-monitor --db <path> import ...`.
 
 ## Bring it home
 
 `remote_sync.sh` does this per host after the JSONL pulls, when `command -v energy-monitor` succeeds
-remotely: `energy-monitor snapshot` on the host, `scp` to `~/.local/state/agentmon/remote/<tag>.sqlite3`
+remotely (with `~/.local/bin` prepended to `PATH`): `energy-monitor snapshot` on the host, `scp` to `~/.local/state/agentmon/remote/<tag>.sqlite3`
 (directory mode 0700), then `energy-monitor import ... --label <tag>` locally. A host without it prints
 `history: not installed on <tag>` and the loop continues.
 
