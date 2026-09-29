@@ -25,7 +25,32 @@ history database (`usage.pricing`, priced per call so long-context tiers use the
 no history records, or an unpriced model, contributes no cost and is counted as unpriced. Subagent sessions use
 their parent's dominant model. `calls` counts distinct priced requests: Claude `requestId` (else message id),
 Codex distinct cumulative token totals, Pi `responseId` (else entry id), OpenCode assistant messages with tokens.
-Cache writes on the first call are not included, and a cache miss or expiry mid-session would raise the real bill.
+This absolute total depends on usage (`recurring re-read cost (total, depends on usage)`). Cache writes on the first call are not included, and a cache miss or expiry mid-session would raise the real bill.
+
+## Relative, usage-normalized comparison
+
+Totals such as the recurring cost mostly reflect how much a harness was used, so the report opens with a
+comparison table (one row per harness, sorted by `fixed % of input` ascending, most efficient first). Token
+counts come from each provider's own tokenizer (Claude 4.7+ counts about 30% more tokens for the same text), so
+compare the percentages across providers, not raw tokens. Each session's history records are joined on
+`(harness, session)`; per session `input_total = fresh_input + cache_write + cache_read`, `output_total`, and
+`cost_total` (API-equivalent, `usage.pricing`). `fixed_tokens_session = floor_tokens x calls`, capped at
+`input_total`.
+
+| Measure | Definition |
+| --- | --- |
+| `floor/call` | Median floor tokens, with p10 and p90 |
+| `fixed % of input` | sum(fixed_tokens_session) / sum(input_total); also the per-session median |
+| `fixed per 1k output` | sum(fixed_tokens_session) / sum(output_total) x 1000; `*` when any session has `output_not_final` observations (output is then a lower bound, so the ratio is an upper bound) |
+| `fixed % of cost` | sum(recurring re-read cost) / sum(cost_total) over sessions with both known |
+| `calls/session` | Median and p90 of `calls` |
+| `n` | Sessions used for the input / output / cost measures |
+
+Sessions are excluded per measure, with counts by reason under `relative.excluded` in `--json` and in a text
+footnote: `no_floor`, `no_history_records`, `tokens_unknown` (a token class missing), `cost_unknown` (cost measure
+only), and `subagent_unmatched`. Claude subagent sessions join to the subagent's own history rows by parent
+session and the agent id from the transcript file name (`agent-<id>.jsonl`, since the rows' `agent` field holds the
+agent type); the main session's totals exclude those rows, and unmatched ones are excluded and reported.
 
 ## The 4 characters per token estimate
 

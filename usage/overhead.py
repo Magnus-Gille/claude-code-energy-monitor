@@ -18,6 +18,8 @@ CHARS_PER_TOKEN = 4
 HARNESSES = ('claude', 'codex', 'pi', 'opencode')
 RESIDUAL_LABEL = 'other: tools, first prompt, unlogged'
 COST_LABEL = 'API-equivalent at list price, estimate'
+NOTE = ("Relative measures are usage-normalized. Token counts come from each provider's own tokenizer (Claude"
+        ' 4.7+ counts about 30% more tokens for the same text), so compare percentages across providers rather than raw tokens.')
 _DDL = (
     'CREATE TABLE IF NOT EXISTS overhead_sessions (harness TEXT NOT NULL, session TEXT NOT NULL, is_subagent INTEGER,'
     ' first_ts TEXT, floor_tokens INTEGER, floor_input INTEGER, floor_cache_write INTEGER, floor_cache_read INTEGER,'
@@ -35,6 +37,7 @@ _GUTTER = re.compile(r'(?m)^[ \t]*\d+[\t\u2192]')
 _FRONT_NAME = re.compile(r'(?m)^name:[ \t]*[\'"]?([A-Za-z0-9][A-Za-z0-9._:-]{0,80})[\'"]?[ \t]*$')
 _HEADING = re.compile(r'#{1,6}[ \t]+\S')
 _MIN_BODY = 200
+_AGENT_FILE = re.compile(r'(?:^|/)agent-([^/]+)\.jsonl$')
 
 
 def _skill_paths(command):
@@ -378,6 +381,101 @@ def _dominant(records):
     return {k: max(sorted(v, key=str), key=v.get) for k, v in counts.items()}
 
 
+def _joined(records, table):
+    """Per (harness, session key) history totals: input, output, cost (None when any observation lacks it),
+    whether output is a lower bound.  Claude subagent rows are keyed by session and agent file id (else agent field) apart from the main rows."""
+    from usage import pricing
+    out = {}
+    for r in records:
+        sub = r.get('harness') == 'claude' and r.get('thread_kind') == 'subagent'
+        if sub:  # the transcript file name carries the agent id; the agent field is a type, kept as a fallback
+            found = next((m.group(1) for m in map(_AGENT_FILE.search, r.get('sources') or ()) if m), None)
+            key = (r.get('harness'), (str(r.get('session')), 'file', found) if found
+                   else (str(r.get('session')), 'agent', str(r.get('agent'))))
+        else:
+            key = (r.get('harness'), str(r.get('session')))
+        t = r.get('tokens') or {}
+        cls = [t.get(k) for k in ('fresh_input', 'cache_write', 'cache_read')]
+        e = out.setdefault(key, {'input': 0, 'output': 0, 'cost': 0.0, 'lower': False})
+        e['input'] = None if e['input'] is None or None in cls else e['input'] + sum(cls)
+        e['output'] = None if e['output'] is None or t.get('output') is None else e['output'] + t['output']
+        cost = pricing.price_observation(r, table)['cost'] if table is not None else None
+        e['cost'] = None if e['cost'] is None or cost is None else e['cost'] + cost
+        e['lower'] = e['lower'] or 'output_not_final' in (r.get('warnings') or ())
+    return out
+
+
+def _lookup(joined, h, s, sub):
+    """History totals for an overhead session; (totals, reason for exclusion)."""
+    if h == 'claude' and sub:
+        parent, _, stem = s.partition('/')
+        ident = stem[6:] if stem.startswith('agent-') else stem
+        for key in ((parent, 'file', ident), (parent, 'agent', stem), (parent, 'agent', ident)):
+            if (h, key) in joined:
+                return joined[(h, key)], None
+        return None, 'subagent_unmatched'
+    found = joined.get((h, s.split('/')[0] if h == 'claude' else s))
+    return found, None if found else 'no_history_records'
+
+
+def _share(num, den, scale=100):
+    return num / den * scale if den else None
+
+
+def _relative(h, mine, joined, rec_costs):
+    """Usage-normalized measures for one harness; each metric reports its own n and the exclusions by reason."""
+    ex = {'input': {}, 'output': {}, 'cost': {}}
+    used = {'input': [], 'output': [], 'cost': []}
+    lower = False
+    subs = {'sessions': 0, 'matched': 0, 'excluded': 0}
+
+    def skip(kinds, reason):
+        for k in kinds:
+            ex[k][reason] = ex[k].get(reason, 0) + 1
+    for s, v in mine.items():
+        subs['sessions'] += h == 'claude' and v['sub']
+        if v['floor'] is None:
+            skip(ex, 'no_floor')
+            continue
+        e, reason = _lookup(joined, h, s, v['sub'])
+        if h == 'claude' and v['sub']:
+            subs['matched' if e else 'excluded'] += 1
+        if e is None:
+            skip(ex, reason)
+            continue
+        fixed = v['floor'] * v['calls'] if e['input'] is None else min(v['floor'] * v['calls'], e['input'])
+        if e['input'] is None:
+            skip(('input', 'cost'), 'tokens_unknown')
+        else:
+            used['input'].append((fixed, e['input']))
+        if e['output'] is None:
+            skip(('output',), 'tokens_unknown')
+        else:
+            used['output'].append((fixed, e['output']))
+            lower = lower or e['lower']
+        if e['input'] is not None:
+            if e['cost'] is None or rec_costs.get(s) is None:
+                skip(('cost',), 'cost_unknown')
+            else:
+                used['cost'].append((rec_costs[s], e['cost']))
+    inp, out, cost = used['input'], used['output'], used['cost']
+    calls = [v['calls'] for v in mine.values() if v['floor'] is not None]
+    floors = [v['floor'] for v in mine.values() if v['floor'] is not None]
+    return {
+        'floor_per_call': {'median': statistics.median(floors) if floors else None,
+                           'p10': _pct(floors, 0.1) if floors else None, 'p90': _pct(floors, 0.9) if floors else None,
+                           'n': len(floors)},
+        'fixed_share_of_input': {'pct': _share(sum(f for f, _ in inp), sum(i for _, i in inp)),
+                                 'median_session_pct': statistics.median(f / i * 100 for f, i in inp if i) if any(i for _, i in inp) else None,
+                                 'n': len(inp)},
+        'fixed_per_1k_output': {'value': _share(sum(f for f, _ in out), sum(o for _, o in out), 1000),
+                                'output_lower_bound': lower, 'n': len(out)},
+        'fixed_cost_share': {'pct': _share(sum(f for f, _ in cost), sum(c for _, c in cost)), 'n': len(cost)},
+        'calls_per_session': {'median': statistics.median(calls) if calls else None,
+                              'p90': _pct(calls, 0.9) if calls else None, 'n': len(calls)},
+        'excluded': ex, 'subagents': subs}
+
+
 def summarize(db, since=None, until=None, harness=None, records=None, prices=None):
     """Per-harness floor distribution, estimated component tokens, residual, skill uses and recurring cost.
 
@@ -404,7 +502,8 @@ def summarize(db, since=None, until=None, harness=None, records=None, prices=Non
     if records is not None:
         from usage import pricing
         table = prices if prices is not None else pricing.load_prices()
-        models = _dominant(records)
+        models, joined = _dominant(records), _joined(records, table)
+    joined = joined if records is not None else {}
     result = {'chars_per_token': CHARS_PER_TOKEN, 'token_basis': 'estimate', 'harnesses': {}}
     for h in sorted({k[0] for k in sessions}):
         mine = {k[1]: v for k, v in sessions.items() if k[0] == h}
@@ -417,7 +516,7 @@ def summarize(db, since=None, until=None, harness=None, records=None, prices=Non
                 skills.setdefault((name, source), []).append(chars)
             if v['kinds'] and v['floor'] is not None:
                 residual.append(v['floor'] - sum(v['kinds'].values()) / CHARS_PER_TOKEN)
-        cost, priced, unpriced = 0.0, 0, 0
+        cost, priced, unpriced, rec_costs = 0.0, 0, 0, {}
         currency = None
         for s, v in mine.items():
             if v['floor'] is None:
@@ -433,6 +532,7 @@ def summarize(db, since=None, until=None, harness=None, records=None, prices=Non
                 unpriced += 1
             else:
                 cost += price * max(v['calls'] - 1, 0)
+                rec_costs[s] = price * max(v['calls'] - 1, 0)
                 priced += 1
         if table is not None and priced:
             currency = next((m.get('currency') for m in table['models']), None)
@@ -449,6 +549,7 @@ def summarize(db, since=None, until=None, harness=None, records=None, prices=Non
             'skill_uses': [{'name': n, 'source': src, 'count': len(c), 'median_chars': statistics.median(c),
                             'estimated_tokens': statistics.median(c) / CHARS_PER_TOKEN, 'label': 'estimate'}
                            for (n, src), c in sorted(skills.items(), key=lambda i: (-len(i[1]), i[0]))],
+            'relative': _relative(h, mine, joined, rec_costs),
             'recurring_cost': {'cost': cost if priced else None, 'currency': currency, 'sessions_priced': priced,
                                'sessions_unpriced': unpriced, 'label': COST_LABEL}}
     return result
@@ -458,8 +559,38 @@ def _n(value):
     return '-' if value is None else f'{value:,.0f}'
 
 
+def _p(value):
+    return '-' if value is None else f'{value:.1f}%'
+
+
 def render(result):
-    lines = [f"Fixed context overhead; component tokens are estimates at {result['chars_per_token']} characters per token."]
+    lines = [NOTE, '']
+    rows = sorted(((h, r['relative']) for h, r in result['harnesses'].items()),
+                  key=lambda i: (i[1]['fixed_share_of_input']['pct'] is None, i[1]['fixed_share_of_input']['pct'] or 0, i[0]))
+    if rows:
+        cols = ('harness', 'floor/call', 'fixed % of input', 'fixed per 1k output', 'fixed % of cost', 'calls/session', 'n')
+        table = [cols]
+        for h, x in rows:
+            lb = '*' if x['fixed_per_1k_output']['output_lower_bound'] else ''
+            table.append((h, _n(x['floor_per_call']['median']) + f" ({_n(x['floor_per_call']['p10'])}-{_n(x['floor_per_call']['p90'])})",
+                          _p(x['fixed_share_of_input']['pct']) + f" (med {_p(x['fixed_share_of_input']['median_session_pct'])})",
+                          _n(x['fixed_per_1k_output']['value']) + lb, _p(x['fixed_cost_share']['pct']),
+                          f"{_n(x['calls_per_session']['median'])} (p90 {_n(x['calls_per_session']['p90'])})",
+                          f"{x['fixed_share_of_input']['n']}/{x['fixed_per_1k_output']['n']}/{x['fixed_cost_share']['n']}"))
+        widths = [max(len(str(row[i])) for row in table) for i in range(len(cols))]
+        lines += ['  '.join(str(c).ljust(w) for c, w in zip(row, widths)).rstrip() for row in table]
+        lines.append('floor/call is median (p10-p90) tokens; n is sessions used for input/output/cost measures.')
+        if any(x['fixed_per_1k_output']['output_lower_bound'] for _, x in rows):
+            lines.append('* output is a lower bound (output_not_final observations), so fixed per 1k output is an upper bound.')
+        for h, x in rows:
+            gone = {k: v for k, v in x['excluded'].items() if v}
+            if gone:
+                lines.append(f"excluded {h}: " + '; '.join(f"{k}: " + ', '.join(f'{n} {r}' for r, n in sorted(v.items()))
+                                                          for k, v in gone.items()))
+            if x['subagents']['sessions']:
+                lines.append(f"{h} subagents: {x['subagents']['matched']} matched to history by agent id, "
+                             f"{x['subagents']['excluded']} excluded from the history join")
+    lines += ['', f"Fixed context overhead; component tokens are estimates at {result['chars_per_token']} characters per token."]
     if not result['harnesses']:
         lines.append('No overhead data; run with --refresh.')
     for h, r in result['harnesses'].items():
@@ -473,7 +604,7 @@ def render(result):
         if r['residual']['median_tokens'] is not None:
             lines.append(f"  {r['residual']['label']}: median ~{_n(r['residual']['median_tokens'])} tokens (estimate)")
         rc = r['recurring_cost']
-        lines.append(f"  recurring re-read cost: {'unknown' if rc['cost'] is None else format(rc['cost'], ',.2f') + ' ' + (rc['currency'] or '')}"
+        lines.append(f"  recurring re-read cost (total, depends on usage): {'unknown' if rc['cost'] is None else format(rc['cost'], ',.2f') + ' ' + (rc['currency'] or '')}"
                      f" over {rc['sessions_priced']} priced sessions ({rc['sessions_unpriced']} unpriced); {rc['label']}")
         for u in r['skill_uses']:
             lines.append(f"  skill {u['name']:<24} uses={u['count']:<4} median {_n(u['median_chars']):>8} chars  ~{_n(u['estimated_tokens']):>7} tokens ({u['source']}, estimate)")

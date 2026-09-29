@@ -109,7 +109,8 @@ Costs are API-equivalent list prices, not what was paid; unknown cost prints `n/
 `energy-monitor overhead --refresh` reports the floor tokens of a session's first request, the sizes of
 instruction files, skills lists and skill bodies, and an API-equivalent estimate of re-reading that floor on
 every call. Only sizes, names, counts and token counts are stored, never content. Component tokens are
-character counts divided by 4 (an estimate). See [docs/overhead.md](docs/overhead.md).
+character counts divided by 4 (an estimate). A comparison table at the top gives usage-normalized measures per
+harness (fixed share of input, per 1k output, share of cost, calls per session), sorted most efficient first. See [docs/overhead.md](docs/overhead.md).
 
 ## Install the history and Tokenatlas CLI
 

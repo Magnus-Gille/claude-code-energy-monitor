@@ -370,6 +370,126 @@ class SummaryTests(unittest.TestCase):
         self.assertIsNone(pi['residual']['median_tokens'])
 
 
+def rec(harness, session, fresh, write, read, out, model='m-x', **extra):
+    return {'harness': harness, 'session': session, 'provider': 'p', 'model': model, 'thread_kind': 'main',
+            'tokens': {'fresh_input': fresh, 'cache_write': write, 'cache_read': read, 'output': out},
+            'warnings': [], **extra}
+
+
+def profile(harness, session, k, **extra):
+    """Two calls, floor 100k: input 210k (fixed 200k = 95.2%), output 20k, cost 370k micro-dollars (fixed 200k)."""
+    return sess(session, 100 * k, 2, harness=harness), [rec(harness, session, 100 * k, 0, 0, 10 * k, **extra),
+                                                        rec(harness, session, 10 * k, 0, 100 * k, 10 * k, **extra)]
+
+
+class RelativeTests(unittest.TestCase):
+    def build(self, specs, records):
+        con = sqlite3.connect(':memory:')
+        for h in {s['harness'] for s in specs}:
+            overhead.save(con, h, [s for s in specs if s['harness'] == h])
+        return overhead.summarize(con, records=records, prices=PRICES)
+
+    def two(self):
+        (a, ra), (b, rb) = profile('pi', 'a', 1), profile('opencode', 'b', 3)
+        return self.build([a, b], ra + rb)
+
+    def test_relative_equal_totals_differ(self):
+        res = self.two()['harnesses']
+        rel = {h: res[h]['relative'] for h in res}
+        for key, field in (('fixed_share_of_input', 'pct'), ('fixed_per_1k_output', 'value'), ('fixed_cost_share', 'pct')):
+            self.assertAlmostEqual(rel['pi'][key][field], rel['opencode'][key][field])
+        self.assertAlmostEqual(rel['pi']['fixed_share_of_input']['pct'], 200 / 210 * 100)
+        self.assertAlmostEqual(rel['pi']['fixed_share_of_input']['median_session_pct'], 200 / 210 * 100)
+        self.assertAlmostEqual(rel['pi']['fixed_per_1k_output']['value'], 10000)
+        self.assertAlmostEqual(rel['pi']['fixed_cost_share']['pct'], 200 / 370 * 100)
+        self.assertEqual(rel['pi']['calls_per_session'], {'median': 2, 'p90': 2, 'n': 1})
+        self.assertEqual(rel['pi']['floor_per_call']['median'], 100)
+        self.assertEqual(rel['opencode']['floor_per_call']['median'], 300)
+        self.assertAlmostEqual(res['opencode']['recurring_cost']['cost'], 3 * res['pi']['recurring_cost']['cost'])
+        self.assertEqual(rel['pi']['fixed_share_of_input']['n'], 1)
+
+    def test_fixed_capped_at_input_total(self):
+        spec = sess('c', 100, 5, harness='pi')
+        res = self.build([spec], [rec('pi', 'c', 100, 0, 0, 5), rec('pi', 'c', 0, 0, 200, 5)])
+        rel = res['harnesses']['pi']['relative']
+        self.assertAlmostEqual(rel['fixed_share_of_input']['pct'], 100.0)  # 500 capped to 300
+        self.assertAlmostEqual(rel['fixed_per_1k_output']['value'], 300 / 10 * 1000)
+
+    def test_exclusions_with_reasons(self):
+        good, rg = profile('pi', 'g', 1)
+        specs = [good, sess('nohist', 100, 2, harness='pi'), sess('unk', 100, 2, harness='pi'),
+                 sess('nocost', 100, 2, harness='pi'), sess('nofloor', None, 0, harness='pi')]
+        records = rg + [rec('pi', 'unk', None, 0, 0, 5), rec('pi', 'nocost', 10, 0, 0, 5, model='other')]
+        rel = self.build(specs, records)['harnesses']['pi']['relative']
+        self.assertEqual(rel['excluded']['input'], {'no_history_records': 1, 'tokens_unknown': 1, 'no_floor': 1})
+        self.assertEqual(rel['excluded']['cost'], {'no_history_records': 1, 'tokens_unknown': 1, 'no_floor': 1,
+                                                   'cost_unknown': 1})
+        self.assertEqual((rel['fixed_share_of_input']['n'], rel['fixed_cost_share']['n']), (2, 1))
+
+    def test_claude_subagents_matched_or_excluded(self):
+        main = sess('p1', 100, 2, harness='claude')
+        sub_ok, sub_bad = sess('p1/agent-abc', 50, 2, harness='claude'), sess('p1/agent-zzz', 50, 2, harness='claude')
+        sub_ok['is_subagent'] = sub_bad['is_subagent'] = True
+        records = [rec('claude', 'p1', 100, 0, 0, 5), rec('claude', 'p1', 10, 0, 100, 5),
+                   rec('claude', 'p1', 50, 0, 0, 5, thread_kind='subagent', agent='abc'),
+                   rec('claude', 'p1', 5, 0, 50, 5, thread_kind='subagent', agent='abc')]
+        rel = self.build([main, sub_ok, sub_bad], records)['harnesses']['claude']['relative']
+        self.assertEqual(rel['fixed_share_of_input']['n'], 2)  # main sums exclude subagent rows
+        self.assertAlmostEqual(rel['fixed_share_of_input']['pct'], (200 + 100) / (210 + 105) * 100)
+        self.assertEqual(rel['excluded']['input'], {'subagent_unmatched': 1})
+
+    def test_claude_subagents_match_by_transcript_path_not_type(self):
+        main = sess('p1', 100, 2, harness='claude')
+        subs = [sess(f'p1/agent-{i}', 50, 2, harness='claude') for i in ('abc123', 'def456')]
+        for x in subs:
+            x['is_subagent'] = True
+        base = '/x/p1/subagents/'
+        records = [rec('claude', 'p1', 100, 0, 0, 5), rec('claude', 'p1', 10, 0, 100, 5)]
+        for path, k in ((base + 'agent-abc123.jsonl', 1), (base + 'workflows/wf_9/agent-def456.jsonl', 2)):
+            records += [rec('claude', 'p1', 50 * k, 0, 0, 5, thread_kind='subagent', agent='implementer', sources=[path]),
+                        rec('claude', 'p1', 5 * k, 0, 50 * k, 5, thread_kind='subagent', agent='implementer', sources=[path])]
+        rel = self.build([main] + subs, records)['harnesses']['claude']['relative']
+        self.assertEqual(rel['excluded']['input'], {})
+        self.assertEqual(rel['subagents'], {'sessions': 2, 'matched': 2, 'excluded': 0})
+        self.assertEqual(rel['fixed_share_of_input']['n'], 3)
+        # abc123 has input 105 (fixed 100), def456 input 210 but fixed capped at floor x calls = 100: not merged by type
+        self.assertAlmostEqual(rel['fixed_share_of_input']['pct'], (200 + 100 + 100) / (210 + 105 + 210) * 100)
+
+    def test_output_lower_bound_marked(self):
+        a, ra = profile('pi', 'a', 1)
+        b, rb = profile('claude', 'b', 1)
+        rb[0]['warnings'] = ['output_not_final']
+        res = self.build([a, b], ra + rb)['harnesses']
+        self.assertFalse(res['pi']['relative']['fixed_per_1k_output']['output_lower_bound'])
+        self.assertTrue(res['claude']['relative']['fixed_per_1k_output']['output_lower_bound'])
+        self.assertIn('lower bound', overhead.render(self.build([a, b], ra + rb)))
+
+    def test_sorted_table_and_header_note(self):
+        lo, rlo = profile('pi', 'a', 1)  # 95.2%
+        hi = sess('h', 100, 2, harness='opencode')
+        rhi = [rec('opencode', 'h', 100, 0, 0, 1), rec('opencode', 'h', 900, 0, 100, 1)]  # 200 / 1100
+        text = overhead.render(self.build([hi, lo], rlo + rhi))
+        self.assertTrue(text.startswith(
+            'Relative measures are usage-normalized. Token counts come from each provider\'s own tokenizer (Claude 4.7+ '
+            'counts about 30% more tokens for the same text), so compare percentages across providers rather than raw tokens.'))
+        head = text.split('\n\n')[1]
+        self.assertIn('fixed % of input', head)
+        self.assertLess(head.index('opencode  '), head.index('pi  '))
+        self.assertIn('recurring re-read cost (total, depends on usage):', text)
+
+    def test_json_fields_and_no_records(self):
+        data = json.loads(json.dumps(self.two()))
+        rel = data['harnesses']['pi']['relative']
+        self.assertEqual(set(rel), {'floor_per_call', 'fixed_share_of_input', 'fixed_per_1k_output', 'fixed_cost_share',
+                                    'calls_per_session', 'excluded', 'subagents'})
+        self.assertEqual(set(rel['floor_per_call']), {'median', 'p10', 'p90', 'n'})
+        con = sqlite3.connect(':memory:')
+        overhead.save(con, 'pi', [sess('a', 100, 2, harness='pi')])
+        none = overhead.summarize(con)['harnesses']['pi']['relative']
+        self.assertIsNone(none['fixed_share_of_input']['pct'])
+        self.assertEqual(none['excluded']['input'], {'no_history_records': 1})
+
+
 class CliTests(unittest.TestCase):
     def test_refresh_json_and_text(self):
         with tempfile.TemporaryDirectory() as tmp:
