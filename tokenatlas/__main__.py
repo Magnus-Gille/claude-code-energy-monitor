@@ -38,6 +38,9 @@ def default_db():
 
 
 def main(argv=None):
+    # Windows pipes default to a legacy code page without '≥' or '→'; replace such characters rather than crash.
+    for stream in (sys.stdout,sys.stderr):
+        if hasattr(stream,'reconfigure'):stream.reconfigure(errors='replace')
     if Path(sys.argv[0]).name.lower() in ('energy-monitor','energy-monitor.exe','energy-monitor-script.py'):
         print('energy-monitor is deprecated; use tokenatlas',file=sys.stderr)
     parser=argparse.ArgumentParser(prog='tokenatlas',description='Local observed token history; no network or LLM calls.')
