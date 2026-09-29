@@ -23,8 +23,15 @@
 # list via REMOTE_HOSTS_OVERRIDE (space-separated tag:host pairs), e.g. on m5's
 # cron pulling only from the laptop:
 #   REMOTE_HOSTS_OVERRIDE="laptop:magnus-macbook-air" /path/to/remote_sync.sh
+#
+# ENERGY_MONITOR_DB (optional): if set and non-empty, the local import goes into that database
+# (`energy-monitor --db "$ENERGY_MONITOR_DB" import ...`) instead of the default one, e.g. to try
+# the sync without touching your real history.
 
 set -euo pipefail
+
+# Cron has a minimal PATH, and pipx/venv installs link energy-monitor into ~/.local/bin.
+export PATH="$HOME/.local/bin:$PATH"
 
 DEST="$HOME/.claude"
 
@@ -75,7 +82,9 @@ sync_history() {
     local tag="$1" host="$2"
     local state="$HOME/.local/state/agentmon" remote_dir
     remote_dir="$state/remote"
-    if ! ssh -- "$host" 'command -v energy-monitor' >/dev/null 2>&1; then
+    # Non-interactive ssh has a minimal PATH too, so each remote call prepends ~/.local/bin.
+    # Single quotes: the remote shell expands $HOME and ~, not this one.
+    if ! ssh -- "$host" 'PATH="$HOME/.local/bin:$PATH"; command -v energy-monitor' >/dev/null 2>&1; then
         echo "  history: not installed on $tag"
         return 0
     fi
@@ -85,8 +94,7 @@ sync_history() {
     fi
     { mkdir -p "$remote_dir" && chmod 700 "$remote_dir"; } || { echo "  history: ERROR cannot create $remote_dir" >&2; return 0; }
     local err
-    # Single quotes: the remote shell expands ~, not this one.
-    if ! err=$(ssh -- "$host" energy-monitor snapshot '~/.local/state/agentmon/snapshot.sqlite3' 2>&1 >/dev/null); then
+    if ! err=$(ssh -- "$host" 'PATH="$HOME/.local/bin:$PATH" energy-monitor snapshot ~/.local/state/agentmon/snapshot.sqlite3' 2>&1 >/dev/null); then
         echo "  history: ERROR snapshot failed on $tag: $err" >&2
         return 0
     fi
@@ -102,7 +110,9 @@ sync_history() {
         echo "  history: ERROR cannot store snapshot for $tag: $err" >&2
         return 0
     fi
-    if err=$(energy-monitor import "$remote_dir/$tag.sqlite3" --label "$tag" 2>&1 >/dev/null); then
+    local db_args=()
+    [[ -n "${ENERGY_MONITOR_DB:-}" ]] && db_args=(--db "$ENERGY_MONITOR_DB")
+    if err=$(energy-monitor "${db_args[@]+"${db_args[@]}"}" import "$remote_dir/$tag.sqlite3" --label "$tag" 2>&1 >/dev/null); then
         echo "  history: OK"
     else
         echo "  history: ERROR import failed for $tag: $err" >&2
