@@ -331,6 +331,49 @@ class HistoryTests(unittest.TestCase):
             self.assertNotIn('PRIVATE ASSISTANT TEXT',saved)
             self.assertEqual(h.records()[0]['source_type'],'database')
 
+    def test_sqlite_fingerprint_ignores_shm_but_tracks_db_and_wal(self):
+        db=self.root/'fp.db'
+        wal=Path(str(db)+'-wal'); shm=Path(str(db)+'-shm')
+        for f in (db,wal,shm): f.write_bytes(b'one')
+        fp=lambda: History.fingerprint(db,include_sqlite_sidecars=True)
+        base=fp()
+        shm.write_bytes(b'different content')
+        os.utime(shm,ns=(1,10**18))
+        self.assertEqual(fp(),base)
+        wal.write_bytes(b'one-more')
+        changed_wal=fp()
+        self.assertNotEqual(changed_wal,base)
+        os.utime(wal,ns=(1,2*10**18))
+        self.assertNotEqual(fp(),changed_wal)
+        db.write_bytes(b'db changed')
+        self.assertNotEqual(fp(),changed_wal)
+
+    def test_opencode_wal_refresh_with_shm_rebuild_is_ok_and_then_skipped(self):
+        db=self.root/'wal-opencode.db'
+        connection=create_opencode_db(db)
+        connection.execute('PRAGMA journal_mode=WAL')
+        connection.execute('PRAGMA wal_autocheckpoint=0')
+        connection.execute('INSERT INTO session VALUES (?,?,?,?,?,?,?)',
+            ('session','project',None,'/work/app','1.18.32',1,2))
+        data={'role':'assistant','providerID':'openai','modelID':'gpt-test','agent':'build',
+              'time':{'created':1788429600000,'completed':1788429601000},
+              'tokens':{'input':10,'output':5,'reasoning':3,'cache':{'read':20,'write':2},'total':37}}
+        connection.execute('INSERT INTO message VALUES (?,?,?,?,?)',
+            ('message','session',1788429600000,1788429601000,json.dumps(data)))
+        connection.commit()  # writer stays open: WAL is un-checkpointed
+        try:
+            self.assertGreater(Path(str(db)+'-wal').stat().st_size,0)
+            with History(self.db) as h:
+                first=h.refresh('opencode',db)
+                second=h.refresh('opencode',db)
+        finally:
+            connection.close()
+        self.assertEqual(first['status'],'ok')
+        self.assertEqual(first['changed_during_read'],0)
+        self.assertEqual(first['observations_seen'],1)
+        self.assertEqual(second['files_skipped'],1)
+        self.assertEqual(second['files_parsed'],0)
+
     def test_opencode_schema_error_is_reported_as_partial_import(self):
         db=self.root/'unsupported-opencode.db'
         connection=sqlite3.connect(db)
