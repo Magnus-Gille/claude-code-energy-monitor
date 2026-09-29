@@ -490,7 +490,9 @@ class History:
     def fingerprint(path, include_sqlite_sidecars=False):
         paths = [Path(path)]
         if include_sqlite_sidecars:
-            paths.extend(Path(str(path) + suffix) for suffix in ('-wal', '-shm'))
+            # -shm is deliberately excluded: SQLite readers rewrite this derived WAL index
+            # (touching mtime/ctime) even for read-only opens, and it holds no data.
+            paths.extend(Path(str(path) + suffix) for suffix in ('-wal',))
         values = [COLLECTOR_VERSION]
         for candidate in paths:
             try:
