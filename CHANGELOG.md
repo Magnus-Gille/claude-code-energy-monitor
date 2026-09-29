@@ -11,6 +11,8 @@ All notable changes to this project are documented in this file. The project fol
 - Cross-harness attribution by project, session, turn, model, effort, agent, and origin.
 - Offline HTML reporting with filters, drilldown, exports, and qualified cache-read-share comparisons.
 - Wheel installation, reinstall, uninstall, and private-data retention smoke coverage.
+- Claude desktop Cowork transcripts (`local-agent-mode-sessions/*/*/local_*/.claude/projects`) are imported by `refresh --harness claude` with origin `local-agent`; `audit.jsonl` is never read.
+- `energy-monitor snapshot` and `import` merge history from other machines (see `docs/remote-machines.md`); `remote_sync.sh` pulls it.
 - CI coverage for Python 3.10 through 3.13 across Linux, macOS, and Windows, plus Chromium and WebKit.
 
 ### Changed

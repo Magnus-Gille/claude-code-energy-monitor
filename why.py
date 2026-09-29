@@ -26,6 +26,17 @@ CLAUDE_STATE = Path.home() / ".claude"
 CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 PI_SESSIONS = Path.home() / ".pi" / "agent" / "sessions"
 OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+# Claude desktop Cowork (macOS only): local_*/.claude/projects hold ordinary Claude Code transcripts.
+# Never read the sibling audit.jsonl: it is an SDK stream copy of the same calls under other id keys.
+COWORK_SESSIONS = Path.home() / "Library" / "Application Support" / "Claude" / "local-agent-mode-sessions"
+
+
+def cowork_roots() -> list[Path]:
+    """Every <org>/<acct>/local_*/.claude/projects directory; a missing base is simply empty."""
+    try:
+        return sorted(p for p in COWORK_SESSIONS.glob("*/*/local_*/.claude/projects") if p.is_dir())
+    except OSError:
+        return []
 
 
 @dataclass(frozen=True)
@@ -398,6 +409,7 @@ def collect_claude(
             if is_subagent_path else None
         fallback_session = path_session or _meta_text(path.stem, default="unknown")
         fallback_project = _claude_project_fallback(path, root)
+        cowork = path.is_relative_to(COWORK_SESSIONS)
         last_user_turn: str | None = None
         for line_number, row in _read_json_lines(path, strict=strict):
             message = _mapping(row.get("message"))
@@ -451,7 +463,8 @@ def collect_claude(
             if existing is None:
                 existing = {**values, "output_final": has_stop, "timestamp": timestamp, "_first": timestamp,
                             "session_id": session_id, "parent_session_id": parent_session_id,
-                            "_fallback": (fallback_project, _claude_project_id(path, root))}
+                            "_fallback": (fallback_project, _claude_project_id(path, root)),
+                            "_cowork": cowork}
                 calls[key] = existing
             else:
                 for token_field in ("fresh_input", "cache_read", "cache_write", "output", "reasoning"):
@@ -506,6 +519,8 @@ def collect_claude(
             ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')):
             continue
         fallback_project, fallback_id = values.pop("_fallback")
+        if values.pop("_cowork"):
+            values.setdefault("entrypoint", "local-agent")  # Cowork rows often carry no entrypoint
         del values["_first"]
         for name, default in (
             ("model", "unknown"), ("effort", "unknown"), ("entrypoint", "unknown"),

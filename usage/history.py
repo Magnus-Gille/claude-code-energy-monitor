@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import sqlite3
 import stat
+import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +25,9 @@ SCHEMA_VERSION = 2  # PRAGMA user_version of the SQLite layout
 COLLECTOR_VERSION = 5
 FIELDS = ('fresh_input', 'cache_read', 'cache_write', 'output')
 ALL_FIELDS = FIELDS + ('reasoning',)
+
+
+_REMOTE_PATH = re.compile(r'm-[^/:\\]*:')  # imported source paths are '<machine>:<path>'; local ones are absolute
 
 
 def _owned_by_current_user(info):
@@ -615,6 +621,86 @@ class History:
         c.execute('INSERT OR IGNORE INTO files(harness,path) VALUES (?,?)', (harness, path))
         return c.execute('SELECT id FROM files WHERE harness=? AND path=?', (harness, path)).fetchone()[0]
 
+    def snapshot(self, out):
+        """Write a consistent private copy of this database (sqlite backup API, temp file, atomic replace)."""
+        out = Path(out).expanduser().absolute()
+        if out == self.path or out.resolve() == self.path.resolve() or (out.exists() and out.samefile(self.path)):
+            raise ValueError('snapshot output must not be the history database')
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix='.snapshot-', dir=out.parent)
+        os.close(fd)
+        try:
+            target = sqlite3.connect(tmp)
+            try:
+                self.connection.backup(target)
+            finally:
+                target.close()
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, out)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+        return dict(snapshot=str(out), machine=self.machine, schema_version=SCHEMA_VERSION)
+
+    def import_snapshot(self, snapshot, label):
+        """Merge another machine's history; the snapshot is only copied, never opened in place."""
+        label = label.strip() if isinstance(label, str) else ''
+        if not label or len(label) > 64 or not label.isprintable():
+            raise ValueError('--label must be 1-64 printable characters')
+        snapshot = Path(snapshot).expanduser()
+        if not snapshot.is_file():
+            raise ValueError('snapshot is not a readable file')
+        with tempfile.TemporaryDirectory(prefix='agentmon-import-') as tmp:
+            copy = Path(tmp) / 'snapshot.sqlite3'
+            shutil.copyfile(snapshot, copy)
+            os.chmod(copy, 0o600)
+            try:
+                raw = sqlite3.connect(str(copy))
+                try:
+                    version = raw.execute('PRAGMA user_version').fetchone()[0]
+                    found = raw.execute("SELECT value FROM meta WHERE key='machine'").fetchone() if version in (1, SCHEMA_VERSION) else None
+                finally:
+                    raw.close()
+            except sqlite3.Error as exc:
+                raise ValueError(f'snapshot is not a history database: {exc}') from exc
+            if version not in (1, SCHEMA_VERSION):
+                raise ValueError(f'unsupported snapshot schema version {version}')
+            if not found:
+                raise ValueError('snapshot has no machine id')
+            with History(copy) as source:  # migrates v1 and adds the tariff column on the copy only
+                machine, items = source.machine, source.records()
+        result = dict(harness='import', root=label, source_machine=machine, observations_seen=len(items),
+                      new=0, merged=0, status='ok', last_attempt=utcnow())
+        if machine == self.machine:
+            result.update(skipped=True, warning='snapshot is this machine\'s own history; nothing imported')
+            return result
+        c = self.connection
+        c.execute('BEGIN IMMEDIATE')
+        self._strings, self._values = {}, {}
+        try:
+            for item in items:
+                sources = [p if _REMOTE_PATH.match(p) else f'{machine}:{p}' for p in item.pop('sources')]
+                key = _key(item)
+                old = self._existing(c, key)
+                result['merged' if old else 'new'] += 1
+                if old:
+                    item = merge_observations(old, item)
+                observation = self._insert(c, _encode(item, key))
+                for path in sources:
+                    c.execute('INSERT OR IGNORE INTO sources VALUES (?,?)',
+                              (observation, self._file_id(c, item['harness'], path)))
+            labels = c.execute("SELECT value FROM meta WHERE key='machine_labels'").fetchone()
+            labels = {**(json.loads(labels[0]) if labels else {}), machine: label}
+            c.execute('INSERT OR REPLACE INTO meta VALUES (?,?)', ('machine_labels', json.dumps(labels, sort_keys=True)))
+            result['last_success'] = utcnow()
+            c.execute('INSERT OR REPLACE INTO imports VALUES (?,?,?)', ('import', label, json.dumps(result)))
+            c.commit()
+            return result
+        except Exception:
+            c.rollback()
+            self._strings, self._values = {}, {}
+            raise
+
     def records(self, start=None, end=None, harness=None, project=None, session=None, turn=None):
         session_harness = None
         raw_session = session
@@ -656,7 +742,8 @@ class History:
             'SELECT count(*), min(ts_us), max(ts_us), coalesce(sum(complete=0),0), coalesce(sum(turn_id IS NULL),0)'
             ' FROM observations').fetchone()
         imports = [json.loads(r[0]) for r in self.connection.execute('SELECT data FROM imports ORDER BY harness,root')]
-        missing = sum(not Path(r[0]).exists() for r in self.connection.execute('SELECT path FROM files'))
+        missing = sum(not _REMOTE_PATH.match(r[0]) and not Path(r[0]).exists()
+                      for r in self.connection.execute('SELECT path FROM files'))
         return dict(schema_version=SCHEMA_VERSION, machine=self.machine, observations=count,
                     first_event=None if first is None else _ts_text(first),
                     last_event=None if last is None else _ts_text(last),

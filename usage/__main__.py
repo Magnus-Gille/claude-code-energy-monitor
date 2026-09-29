@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import sqlite3
+import sys
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -14,6 +15,15 @@ from usage.history import History, summarize
 from usage.report import build_report, render_report, write_report
 
 
+def aggregate(results):
+    """Fold per-root refresh results: summed counters, worst status, and the per-root list."""
+    order=('ok','partial','missing')
+    total={k:sum(r[k] for r in results) for k,v in results[0].items() if type(v) is int}
+    return dict(harness=results[0]['harness'],status=max((r['status'] for r in results),key=lambda s:order.index(s) if s in order else len(order)),
+                last_attempt=max(r['last_attempt'] for r in results),errors=[e for r in results for e in r['errors']],
+                coverage_complete=False,roots=results,**total)
+
+
 def main(argv=None):
     parser=argparse.ArgumentParser(description='Local observed token history; no network or LLM calls.')
     parser.add_argument('--version',action='version',version=f'%(prog)s {__version__}')
@@ -23,6 +33,11 @@ def main(argv=None):
     refresh=commands.add_parser('refresh',help='Import changed files; preserve retained observations.')
     refresh.add_argument('--harness',choices=('claude','codex','pi','opencode'),required=True)
     refresh.add_argument('--root',type=Path,help='Override the harness session directory.')
+    snapshot=commands.add_parser('snapshot',help='Write a consistent private copy of the history database.')
+    snapshot.add_argument('out',type=Path)
+    importer=commands.add_parser('import',help="Merge another machine's snapshot into this database.")
+    importer.add_argument('snapshot',type=Path)
+    importer.add_argument('--label',required=True,help='Name for the source machine, e.g. pi:huginmunin.local.')
     report=commands.add_parser('report',help='Report saved observations without rereading source logs.')
     report.add_argument('--start',help='Inclusive ISO timestamp; offset required.')
     report.add_argument('--end',help='Exclusive ISO timestamp; offset required.')
@@ -68,7 +83,7 @@ def main(argv=None):
             if start and end and start>=end:raise ValueError('--start must precede --end')
             if args.html and args.html.expanduser().resolve()==args.db.expanduser().resolve():
                 raise ValueError('HTML output must not replace the history database')
-        if args.command!='refresh' and not args.db.expanduser().is_file():
+        if args.command not in ('refresh','import') and not args.db.expanduser().is_file():
             raise ValueError('history database does not exist; run refresh first')
         if args.command=='rate' and (args.unit or args.thread or args.outcome) and not (args.unit and args.thread and args.outcome):
             raise ValueError('rating needs --unit, --thread and --outcome')
@@ -103,8 +118,18 @@ def main(argv=None):
             if args.command=='refresh':
                 roots={'claude':why.CLAUDE_PROJECTS,'codex':why.CODEX_SESSIONS,
                        'pi':why.PI_SESSIONS,'opencode':why.OPENCODE_DB}
-                root=args.root or roots[args.harness]
-                result=history.refresh(args.harness,root)
+                if args.root or args.harness!='claude':
+                    result=history.refresh(args.harness,args.root or roots[args.harness])
+                else:
+                    # Main root, then each Cowork transcript root (macOS; absent elsewhere and simply skipped).
+                    cowork=why.cowork_roots()
+                    results=[history.refresh('claude',root) for root in [roots['claude'],*cowork]]
+                    result=results[0] if len(results)==1 else aggregate(results)
+            elif args.command=='snapshot':
+                result=history.snapshot(args.out)
+            elif args.command=='import':
+                result=history.import_snapshot(args.snapshot,args.label)
+                if result.get('warning'):print(f"usage: warning: {result['warning']}",file=sys.stderr)
             elif args.command=='doctor':
                 history.connection.execute('BEGIN')
                 result=history.doctor()
