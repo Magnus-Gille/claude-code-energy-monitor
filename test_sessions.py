@@ -38,9 +38,9 @@ def rec(harness, session, minute, model='m-a', *, agent='main', kind='main', par
             'sources': [src] if src else []}
 
 
-def sub(session, agent, minute, wf=None, **kw):
+def sub(session, agent, minute, wf=None, atype=None, **kw):
     path = f'/p/{session}/subagents/' + (f'workflows/{wf}/' if wf else '') + f'agent-{agent}.jsonl'
-    return rec('claude', session, minute, agent=agent, kind='subagent', parent=session, src=path, **kw)
+    return rec('claude', session, minute, agent=atype or agent, kind='subagent', parent=session, src=path, **kw)
 
 
 def claude_root():
@@ -68,6 +68,21 @@ class TreeTests(unittest.TestCase):
         self.assertEqual(sorted(c['id'] for c in wf['children']), ['w1', 'w2'])
         self.assertEqual(tree['own']['observations'], 2)
         self.assertEqual(tree['observations'], 6)
+
+    def test_same_type_subagents_split_by_agent_id(self):
+        rows = [rec('claude', 'S', 0), sub('S', 'a546438a7f4c8fe18', 1, atype='implementer'),
+                sub('S', 'b7f0c1d2e3a495867', 2, atype='implementer'),
+                sub('S', 'c1', 3, atype='c1'),
+                sub('S', 'w9999999999', 4, wf='wf_1', atype='researcher')]
+        tree = sessions.build_tree(rows, 'S', price=fake_price)['root']
+        subs = [c for c in tree['children'] if c['kind'] == 'subagent']
+        self.assertEqual(sorted(c['id'] for c in subs), ['a546438a7f4c8fe18', 'b7f0c1d2e3a495867', 'c1'])
+        labels = {c['id']: c['label'] for c in subs}
+        self.assertEqual(labels['a546438a7f4c8fe18'], 'implementer a546438a')
+        self.assertEqual(labels['c1'], 'c1')
+        self.assertEqual(sessions.thread_key(next(c for c in subs if c['id'] == 'c1')), 'claude:agent:c1')
+        wf = find(tree, lambda n: n['kind'] == 'workflow')
+        self.assertEqual([sessions.thread_key(c) for c in wf['children']], ['claude:agent:w9999999999'])
 
     def test_codex_parent_child(self):
         rows = [rec('codex', 'P', 0), rec('codex', 'C', 2, parent='P', kind='subagent', agent='worker'),
@@ -209,6 +224,17 @@ class OutcomeTests(unittest.TestCase):
         text = sessions.render(result, eff, 'D')
         self.assertIn('unrated', text); self.assertIn('coordination', text.lower())
 
+    def test_v0_agent_id_matches_typed_subagent(self):
+        rows = [rec('claude', 'S', 0), sub('S', 'a546438a7f4c8fe18', 1, atype='implementer'),
+                sub('S', 'b7f0c1d2e3a495867', 2, atype='implementer')]
+        self.path.write_text(line('u1', [ag('a546438a7f4c8fe18')], 'pass', v=0, kind='x', executor='y') + '\n')
+        result = sessions.build_tree(rows, 'S', price=fake_price)
+        eff = sessions.efficiency(result, sessions.load_outcomes(self.path, 'S'))
+        self.assertEqual(eff['warnings'], [])
+        self.assertEqual(eff['models']['m-a']['pass_units'], 1)
+        self.assertEqual(eff['models']['m-a']['total'], 150)
+        self.assertEqual(eff['unrated'], ['claude:agent:b7f0c1d2e3a495867'])
+
     def test_zero_passes_is_na(self):
         self.path.write_text(line('u2', [ag('a2')], 'redo') + '\n')
         result = sessions.build_tree(outcome_rows(), 'S', price=fake_price)
@@ -232,7 +258,7 @@ class CliTests(unittest.TestCase):
         patcher.start(); self.addCleanup(patcher.stop)
 
     @staticmethod
-    def write(path, session, agent, request, ts):
+    def write(path, session, agent, request, ts, attr=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         row = {'type': 'assistant', 'uuid': 'r' + request, 'requestId': request, 'sessionId': session,
                'cwd': '/w/app', 'version': 'v', 'timestamp': ts,
@@ -241,6 +267,8 @@ class CliTests(unittest.TestCase):
                                      'cache_creation_input_tokens': 0, 'output_tokens': 5}}}
         if agent:
             row['agentId'] = agent
+        if attr:
+            row['attributionAgent'] = attr
         path.write_text(json.dumps(row) + '\n')
 
     def run_main(self, *argv):
@@ -252,10 +280,20 @@ class CliTests(unittest.TestCase):
 
     def test_session_text_and_json(self):
         text = self.run_main('session', 'S')
-        self.assertIn('subagent a1', text); self.assertIn('table retrieved 2026-09-01', text)
+        self.assertIn('a1 [path]', text); self.assertIn('table retrieved 2026-09-01', text)
         data = json.loads(self.run_main('session', 'S', '--json'))
         self.assertEqual(data['total']['observations'], 2)
         self.assertEqual(data['root']['children'][0]['link'], 'path')
+
+    def test_rate_lists_agent_id_keys_for_typed_subagents(self):
+        proj = self.root / 'logs/proj'
+        self.write(proj / 'S/subagents/agent-i111111111.jsonl', 'S', 'i111111111', 'req2', '2026-09-10T10:06:00Z', 'implementer')
+        self.write(proj / 'S/subagents/agent-i222222222.jsonl', 'S', 'i222222222', 'req3', '2026-09-10T10:07:00Z', 'implementer')
+        with History(self.db) as h:
+            h.refresh('claude', self.root / 'logs')
+        listing = self.run_main('rate', 'S')
+        self.assertIn('claude:agent:i111111111', listing)
+        self.assertIn('claude:agent:i222222222', listing)
 
     def test_rate_lists_appends_and_rejects(self):
         listing = self.run_main('rate', 'S')

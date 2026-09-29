@@ -10,6 +10,7 @@ HEADLESS = ('codex_exec', 'exec', 'sdk-cli', 'sdk-py', 'sdk-ts')
 OUTCOMES = ('pass', 'partial', 'redo', 'wrong')
 CLASSES = ('fresh_input', 'cache_write', 'cache_read', 'output', 'reasoning')
 WINDOW_SLACK = timedelta(minutes=10)
+_AGENT_FILE = re.compile(r'(?:^|/)agent-([^/]+)\.jsonl$')
 _WORKFLOW = re.compile(r'subagents/workflows/(wf_[^/]+)/')
 
 
@@ -17,10 +18,7 @@ def default_pricer(prices_path=None):
     """Return (price callable, table retrieved date) from usage.pricing; imported lazily."""
     from usage import pricing
     table = pricing.load_prices(prices_path)
-    got = table.get('retrieved') if isinstance(table, dict) else getattr(table, 'retrieved', None)
-    if got is None and isinstance(table, dict):
-        got = (table.get('meta') or {}).get('retrieved')
-    return (lambda obs: pricing.price_observation(obs, table)), got or 'unknown'
+    return (lambda obs: pricing.price_observation(obs, table)), table.get('retrieved_on') or 'unknown'
 
 
 def _t(ts):
@@ -165,10 +163,13 @@ def build_tree(records, root, *, infer=True, price=None):
         if h == 'claude':
             groups, workflows = {}, {}
             for r in subs.get(sid, []):
-                groups.setdefault(r['agent'], []).append(r)
+                found = next((m.group(1) for m in map(_AGENT_FILE.search, r['sources']) if m), None)
+                groups.setdefault(found or r['agent'], []).append(r)
             for agent_id, agent_rows in groups.items():
+                agent_type = next((x['agent'] for x in agent_rows if x.get('agent')), agent_id)
+                name = agent_id if agent_type == agent_id else f'{agent_type} {agent_id[:8]}'
                 match = next((_WORKFLOW.search(s) for x in agent_rows for s in x['sources'] if _WORKFLOW.search(s)), None)
-                leaf = node('subagent', agent_id, 'path', f'subagent {agent_id}', agent_rows, 'claude', [])
+                leaf = node('subagent', agent_id, 'path', name, agent_rows, 'claude', [])
                 if match:
                     workflows.setdefault(match.group(1), []).append(leaf)
                 else:

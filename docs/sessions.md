@@ -9,7 +9,8 @@ Node figures include children; the root main thread is also shown as *coordinati
 ## How links are derived
 
 - `root`: the main thread of the given session (`harness:id` when the id exists in several harnesses).
-- `path`: Claude subagents share the parent session id; they are grouped by agent id under the root.
+- `path`: Claude subagents share the parent session id; they are grouped by agent id (from the `agent-<id>.jsonl` source file, not the agent type) under the
+  root and labelled `<type> <id first 8>`.
   Workflow agents (`subagents/workflows/wf_<run>/`) sit under a `workflow wf_<run>` node.
 - `explicit`: sessions whose `parent_session` names a node (Codex, OpenCode, Claude), recursively.
 - `inferred`: headless children (origin `codex_exec`, `exec`, `sdk-cli`, `sdk-py`, `sdk-ts`) with no
