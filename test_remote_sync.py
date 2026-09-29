@@ -10,6 +10,7 @@ SCRIPT = Path(__file__).with_name('remote_sync.sh')
 STUB = '#!/bin/bash\necho "{name} $*" >> "$STUB_LOG"\n{body}\n'
 
 
+@unittest.skipIf(os.name == 'nt', 'remote_sync.sh targets macOS/Linux hosts')
 class RemoteSyncTest(unittest.TestCase):
     def run_script(self, hosts, mv_fails_first=False, rm_fails=False):
         tmp = tempfile.TemporaryDirectory()

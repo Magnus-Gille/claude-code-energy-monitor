@@ -267,6 +267,7 @@ class OutcomeTests(unittest.TestCase):
         self.assertIn('n/a', sessions.render(result, eff, 'D'))
 
 
+@unittest.skipIf(os.name == 'nt', 'POSIX permissions and O_NOFOLLOW; Windows relies on the user profile ACL')
 class OutcomeFileSafetyTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
@@ -402,7 +403,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(json.loads(printed), saved)
         self.assertEqual((saved['v'], saved['root_session'], saved['outcome'], saved['note']), (1, 'S', 'pass', 'ok'))
         self.assertEqual(saved['threads'], [{'harness': 'claude', 'agent_id': 'a1'}])
-        self.assertEqual(stat.S_IMODE(outcomes.stat().st_mode), 0o600)
+        if os.name != 'nt':  # Windows has no POSIX permission bits
+            self.assertEqual(stat.S_IMODE(outcomes.stat().st_mode), 0o600)
         self.assertIn('pass', self.run_main('session', 'S'))
         with self.assertRaises(SystemExit) as cm, redirect_stdout(io.StringIO()):
             main(['--db', str(self.db), 'rate', 'S', '--unit', 'u2', '--thread', 'claude:agent:zzz', '--outcome', 'pass'])

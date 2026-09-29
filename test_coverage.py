@@ -151,12 +151,14 @@ class SnapshotImportTests(unittest.TestCase):
 
     def test_snapshot_is_consistent_private_and_atomic(self):
         self.snapshot()
-        self.assertEqual(stat.S_IMODE(self.snap.stat().st_mode), 0o600)
+        if os.name != 'nt':  # Windows has no POSIX permission bits
+            self.assertEqual(stat.S_IMODE(self.snap.stat().st_mode), 0o600)
         with History(self.snap) as h, History(self.remote) as r:
             self.assertEqual(h.records(), r.records()); self.assertEqual(h.machine, r.machine)
         self.assertEqual([p.name for p in self.root.iterdir() if p.name.startswith('.')], [])
         self.snap.chmod(0o644); self.snapshot()  # overwrite in place, mode restored
-        self.assertEqual(stat.S_IMODE(self.snap.stat().st_mode), 0o600)
+        if os.name != 'nt':  # Windows has no POSIX permission bits
+            self.assertEqual(stat.S_IMODE(self.snap.stat().st_mode), 0o600)
 
     def test_snapshot_refuses_the_database_itself(self):
         with History(self.remote) as h: before = h.records()
@@ -183,8 +185,8 @@ class SnapshotImportTests(unittest.TestCase):
             self.assertEqual(rows['remote-only']['machine'], self.remote_machine)
             self.assertEqual(rows['local-only']['machine'], self.local_machine)
             self.assertEqual(rows['shared']['tokens']['output'], 9)  # max-merge, not double count
-            self.assertEqual(rows['remote-only']['sources'], [f'{self.remote_machine}:{self.root}/r/r2.jsonl'])
-            prefixed = f'{self.remote_machine}:{self.root}/r/r.jsonl'
+            self.assertEqual(rows['remote-only']['sources'], [f"{self.remote_machine}:{self.root / 'r' / 'r2.jsonl'}"])
+            prefixed = f"{self.remote_machine}:{self.root / 'r' / 'r.jsonl'}"
             self.assertIn(prefixed, rows['shared']['sources'])
             files = h.connection.execute('SELECT root,fingerprint FROM files WHERE path=?', (prefixed,)).fetchone()
             self.assertEqual(tuple(files), (None, None))
@@ -262,6 +264,7 @@ class sqlite_ro:
     def __exit__(self, *_): self.c.close()
 
 
+@unittest.skipIf(os.name == 'nt', 'remote_sync.sh targets macOS/Linux hosts')
 class RemoteSyncScriptTests(unittest.TestCase):
     def test_script_syntax_and_history_step(self):
         script = Path(__file__).with_name('remote_sync.sh')
