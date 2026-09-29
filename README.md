@@ -657,3 +657,13 @@ check: `PLAYWRIGHT_MODULE=/path/to/@playwright/test node test_report_browser.cjs
 Use an existing Playwright installation and its bundled browser; no browser dependency is installed
 by these commands. The browser test blocks network access and checks filters, totals, zoom, drilldown,
 exports and mobile overflow.
+
+## Demo data and screenshots
+
+`scripts/demo.py` regenerates the product-page screenshots from entirely fictional data:
+
+```
+python3 scripts/demo.py OUTDIR [--seed N] [--no-screens] [--shared]
+```
+
+It builds a temporary HOME with synthetic Claude Code, Codex, Pi and OpenCode logs (about 30 days in September 2026, three fictional projects under `/Users/demo/code`, dummy lorem-style content), runs `python3 -m tokenatlas` against it (`refresh`, `overhead --refresh`, `session demo-orchestrated`, `report --html`) and writes `demo-report.html`, `session.txt`, `overhead.txt`, `demo-summary.json` and, unless `--no-screens`, `overview.png`, `session.png` and `overhead.png`. Real logs and state are never read. The HTML report keeps the fictional project labels by default; `--shared` redacts them. The screenshots need Playwright (`PLAYWRIGHT_MODULE`, else a cached npx copy) via `scripts/demo_screens.cjs`.
