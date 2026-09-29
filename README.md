@@ -90,6 +90,20 @@ verified billing. Nontrivial Claude `iterations` are retained and flagged rather
 than silently ignored or added twice. Claude subagent transcripts often lack the final
 usage row of a request, so their output can be a lower bound (warning `output_not_final`). See [accounting and storage decisions](docs/history-accounting.md).
 
+## Session trees and outcomes
+
+```bash
+# Tree of one root session: subagents, workflows, child sessions, per-model totals
+energy-monitor session <session-id> [--json] [--no-infer]
+
+# List thread keys, then rate a unit of work (appends to outcomes.jsonl next to the database)
+energy-monitor rate <session-id>
+energy-monitor rate <session-id> --unit review --thread claude:agent:<id> --outcome pass --note "ok"
+```
+
+Costs are API-equivalent list prices, not what was paid; unknown cost prints `n/a`. Once outcomes exist,
+`session` also shows cost per passed result per model. Details and limits: [docs/sessions.md](docs/sessions.md).
+
 ## Install the history and Tokenatlas CLI
 
 Python 3.10 or newer is required. `pipx` keeps the command isolated from other Python tools:

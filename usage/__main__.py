@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import why
 from usage import __version__
+from usage import sessions
 from usage.history import History, summarize
 from usage.report import build_report, render_report, write_report
 
@@ -38,6 +39,18 @@ def main(argv=None):
     report.add_argument('--html',type=Path,help='Write a standalone interactive offline HTML report.')
     report.add_argument('--private',action='store_true',help='Keep project labels and session IDs in HTML; default HTML uses pseudonyms.')
     report.add_argument('--records',action='store_true',help='Include per-observation counters and source-file references. Reports contain private local paths.')
+    for name,text in (('session','Show the session tree, per-model totals and outcomes for one root session.'),
+                      ('rate','List threads of a session, or record an outcome rating for a unit.')):
+        sub=commands.add_parser(name,help=text)
+        sub.add_argument('id',help='Root session id, or harness:id when ambiguous.')
+        sub.add_argument('--outcomes',type=Path,help='Outcomes JSONL; default outcomes.jsonl next to the database.')
+        sub.add_argument('--prices',type=Path,help='Override the price table.')
+        if name=='session':
+            sub.add_argument('--json',action='store_true')
+            sub.add_argument('--no-infer',action='store_true',help='Do not link headless children by time and cwd.')
+        else:
+            sub.add_argument('--unit');sub.add_argument('--thread',action='append',default=[])
+            sub.add_argument('--outcome',choices=sessions.OUTCOMES);sub.add_argument('--note',default='')
     commands.add_parser('doctor',help='Show source availability, import errors and known coverage limits.')
     args=parser.parse_args(argv)
     try:
@@ -57,7 +70,36 @@ def main(argv=None):
                 raise ValueError('HTML output must not replace the history database')
         if args.command!='refresh' and not args.db.expanduser().is_file():
             raise ValueError('history database does not exist; run refresh first')
+        if args.command=='rate' and (args.unit or args.thread or args.outcome) and not (args.unit and args.thread and args.outcome):
+            raise ValueError('rating needs --unit, --thread and --outcome')
         with History(args.db) as history:
+            if args.command in ('session','rate'):
+                history.connection.execute('BEGIN')
+                price,retrieved=sessions.default_pricer(args.prices)
+                result=sessions.build_tree(history.records(),args.id,infer=not getattr(args,'no_infer',False),price=price)
+                path=args.outcomes or Path(args.db).with_name('outcomes.jsonl')
+                rated=sessions.load_outcomes(path,args.id)
+                if args.command=='session':
+                    eff=sessions.efficiency(result,rated) if rated else None
+                    if args.json:
+                        result['efficiency']=eff;result['prices_retrieved']=retrieved
+                        print(json.dumps(result,indent=2,sort_keys=True))
+                    else:print(sessions.render(result,eff,retrieved))
+                elif not args.unit:
+                    for node in sessions.iter_nodes(result['root']):
+                        if node is not result['root']:
+                            print(f"{sessions.thread_key(node)}  {', '.join(node['models']) or '-'}  {sessions._tokens(node)}"
+                                  f"  {sessions._money(node['cost'],node['cost_coverage'],node['lower_bound'])}")
+                else:
+                    keys={sessions.thread_key(n) for n in sessions.iter_nodes(result['root']) if n is not result['root']}
+                    for key in args.thread:
+                        if key not in keys:raise ValueError(f'unknown thread {key!r}; run rate {args.id} to list threads')
+                    line={'v':1,'root_session':result['root']['id'],'unit':args.unit,
+                          'threads':[sessions._thread_of_key(k) for k in args.thread],'outcome':args.outcome,
+                          'note':args.note,'ts':datetime.now(ZoneInfo('UTC')).strftime('%Y-%m-%dT%H:%M:%SZ')}
+                    sessions.append_outcome(path,line)
+                    print(json.dumps(line,sort_keys=True))
+                return 0
             if args.command=='refresh':
                 roots={'claude':why.CLAUDE_PROJECTS,'codex':why.CODEX_SESSIONS,
                        'pi':why.PI_SESSIONS,'opencode':why.OPENCODE_DB}
