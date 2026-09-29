@@ -1,14 +1,51 @@
-# Current state — 2026-09-29 (after the 1.2.0 merge)
+# Current state — 2026-09-29 (after #21)
 
-1.2.0 is merged to `master` as `cb0e5ed` (#19). It contains durable multi-harness history for Claude
-Code, Codex, Pi, and OpenCode, and the offline Tokenatlas report. #10 and #11 are closed. #14 now
-covers only its benchmark part. The release tag and package publication have not happened and need
-the owner's approval.
+`master` holds 1.2.0 (#19, `cb0e5ed`) plus #21 (`2670a94`): list-price cost per session and model,
+Claude desktop Cowork import, cross-machine snapshot/import, and a fixed-context overhead comparison.
+#22 (open) fixes `remote_sync.sh` for user-installed `energy-monitor` on the Raspberry Pi. The
+Raspberry Pi (`huginmunin.local`) runs `energy-monitor`, pinned to `2670a94`, in a venv.
 
-Next: D2, a per-session model breakdown with list-price cost (#12 core). It includes recovering Claude
-subagent output that transcripts record only as a lower bound (N1).
+**Not yet done:** the release tag and package publication. They wait for the owner's own testing.
+Whether the tag is 1.2.0 at `cb0e5ed` plus 1.3.0 at current master, or a single 1.3.0, is still open.
 
 # Project Status
+
+## Session — 2026-09-29 (afternoon): cost, coverage, and overhead (#21), Raspberry Pi
+
+**Pricing:** `usage/pricing.py` and `usage/prices.json` hold 29 models. The conductor verified every
+price against its primary source on 2026-09-29.
+- Each class is priced separately (input, 5m/1h cache writes, cache read, output), including
+  long-context tiers, Claude fast mode and US inference, and service tiers.
+- An unknown price or tariff gives `n/a`, never 0.
+- Unpriced models: `codex-auto-review`, `gpt-5.3-codex-spark`, and two Berget models.
+
+**Session trees:** `energy-monitor session` and `rate`.
+- Subagents are keyed by the agent id from the transcript file name. Workflow runs, explicit
+  children and inferred headless children are included; ambiguous threads are listed as unassigned.
+- Cost per passed unit is read from an outcomes JSONL; the conductor's delegation ledger works
+  as-is.
+- In the acceptance session, the conductor thread was $20.74 of ≥$29.24. Sonnet leaves cost ≥$0.56
+  per passed unit, Luna reviews $0.25.
+
+**Coverage:**
+- Claude desktop Cowork transcripts add 4,090 previously missing calls. `audit.jsonl` is never read,
+  and 2,311 of 2,324 audit ids match.
+- Ordinary ChatGPT and Claude desktop chat leave no local usage data. The ChatGPT cache is
+  encrypted; Claude chat is a web view.
+- `snapshot` and `import --label` merge another machine's history. On the Raspberry Pi this gave
+  968 observations (Codex 697, OpenCode 197, Pi 74); the round trip is idempotent.
+
+**Overhead:** `energy-monitor overhead` compares harnesses usage-normalized. Fixed share of input:
+Pi 6.7%, Claude Code 16.2%, OpenCode 20.2%, Codex 20.7%.
+- Component sizes are exact for Claude and Codex.
+- Skill use is exact for Claude and OpenCode, heuristic for Codex.
+
+**Reviews:** three read-only `gpt-5.6-luna` xhigh passes. Their 8 + 3 findings are fixed with
+regression tests, including a crash on 6,555 real Codex rows without a model. Windows CI failures
+were test portability only.
+
+**Housekeeping:** the merged feature branches, worktrees and standalone clones are deleted. Their
+SHAs are recorded in the local recovery notes.
 
 ## Session — 2026-09-29: review fixes and merge of 1.2.0
 
