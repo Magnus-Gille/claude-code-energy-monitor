@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file. The project follows Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- List-price cost per observation (`usage/pricing.py`, packaged `usage/prices.json` with verified 2026-09-29 prices and source URLs): input, 5m/1h cache writes, cache read and output priced separately, long-context tiers, Claude fast mode and US inference; unknown prices or tariff dimensions give `n/a`/partial, never zero. Costs are API-equivalent at list price, not what was paid.
+- `energy-monitor session <id>`: a session tree (Claude subagents and Workflow runs, explicit children, inferred headless children, unassigned threads) with per-model tokens and cost, conductor overhead, and cost per passed unit from an optional outcomes file; `energy-monitor rate` records outcomes.
+- Claude desktop Cowork transcripts (`local-agent-mode-sessions/*/*/local_*/.claude/projects`) are imported by `refresh --harness claude` with origin `local-agent`; `audit.jsonl` is never read.
+- `energy-monitor snapshot` and `import` merge history from other machines (see `docs/remote-machines.md`); `remote_sync.sh` pulls it.
+- `energy-monitor overhead`: per-harness context floor, fixed-context component sizes (instruction files, skill listing, MCP instructions, system prompt), skill uses and an estimated recurring re-read cost. Only sizes, names and counts are stored.
+
+### Changed
+
+- Claude observations record their tariff (speed, service tier, inference geography); the collector version is 5, so existing files are re-read once.
+
 ## [1.2.0] - Unreleased
 
 ### Added
@@ -11,8 +25,6 @@ All notable changes to this project are documented in this file. The project fol
 - Cross-harness attribution by project, session, turn, model, effort, agent, and origin.
 - Offline HTML reporting with filters, drilldown, exports, and qualified cache-read-share comparisons.
 - Wheel installation, reinstall, uninstall, and private-data retention smoke coverage.
-- Claude desktop Cowork transcripts (`local-agent-mode-sessions/*/*/local_*/.claude/projects`) are imported by `refresh --harness claude` with origin `local-agent`; `audit.jsonl` is never read.
-- `energy-monitor snapshot` and `import` merge history from other machines (see `docs/remote-machines.md`); `remote_sync.sh` pulls it.
 - CI coverage for Python 3.10 through 3.13 across Linux, macOS, and Windows, plus Chromium and WebKit.
 
 ### Changed
