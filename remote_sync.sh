@@ -12,6 +12,9 @@
 # <tag>_interactive_daily_rollup.jsonl so multiple machines don't overwrite each
 # other. advisor.py/stepcount.py merge all of them by globbing *_journal.jsonl /
 # *_daily_rollup.jsonl — no further code change needed to add a machine here.
+# When energy-monitor is installed on a remote it also snapshots its history DB, which is
+# copied to ~/.local/state/agentmon/remote/<tag>.sqlite3 and merged with `energy-monitor import`
+# (see docs/remote-machines.md). Hosts without it print "history: not installed on <tag>".
 # A remote with no headless scanner (or no interactive use) just reports "not found"
 # for the files it doesn't produce.
 #
@@ -37,10 +40,16 @@ else
     REMOTE_HOSTS=("${DEFAULT_REMOTE_HOSTS[@]}")
 fi
 
+# Tags become file names and hosts become ssh/scp/rsync arguments: accept only plain characters and never a
+# host that could be read as an option.  (rsync gets `--` too; ssh/scp get it before the host.)
+valid_pair() {
+    [[ "$1" =~ ^[A-Za-z0-9_-]+$ && "$2" =~ ^[A-Za-z0-9._@:-]+$ && "$2" != -* ]]
+}
+
 pull() {
     local tag="$1" host="$2" remote_name="$3" local_name="$4" label="$5"
     local rsync_err
-    rsync_err=$(rsync -az "$host:~/.claude/$remote_name" "$DEST/$local_name" 2>&1) && {
+    rsync_err=$(rsync -az -- "$host:~/.claude/$remote_name" "$DEST/$local_name" 2>&1) && {
         echo "  $label: OK"
         return
     }
@@ -60,9 +69,53 @@ pull() {
     fi
 }
 
+# Merge the remote machine's history database (energy-monitor snapshot -> scp -> local import).
+# Any failure is reported for this host only; the loop continues with the next one.
+sync_history() {
+    local tag="$1" host="$2"
+    local state="$HOME/.local/state/agentmon" remote_dir
+    remote_dir="$state/remote"
+    if ! ssh -- "$host" 'command -v energy-monitor' >/dev/null 2>&1; then
+        echo "  history: not installed on $tag"
+        return 0
+    fi
+    if ! command -v energy-monitor >/dev/null 2>&1; then
+        echo "  history: ERROR energy-monitor is not installed locally" >&2
+        return 0
+    fi
+    { mkdir -p "$remote_dir" && chmod 700 "$remote_dir"; } || { echo "  history: ERROR cannot create $remote_dir" >&2; return 0; }
+    local err
+    # Single quotes: the remote shell expands ~, not this one.
+    if ! err=$(ssh -- "$host" energy-monitor snapshot '~/.local/state/agentmon/snapshot.sqlite3' 2>&1 >/dev/null); then
+        echo "  history: ERROR snapshot failed on $tag: $err" >&2
+        return 0
+    fi
+    if ! err=$(scp -q -- "$host:.local/state/agentmon/snapshot.sqlite3" "$remote_dir/$tag.sqlite3.part" 2>&1); then
+        rm -f -- "$remote_dir/$tag.sqlite3.part" 2>/dev/null || true
+        echo "  history: ERROR scp failed for $tag: $err" >&2
+        return 0
+    fi
+    # Under set -e an unguarded failure here would abort the whole loop, not just this host.
+    if ! err=$(chmod 600 "$remote_dir/$tag.sqlite3.part" 2>&1 &&
+               mv -f "$remote_dir/$tag.sqlite3.part" "$remote_dir/$tag.sqlite3" 2>&1); then
+        rm -f -- "$remote_dir/$tag.sqlite3.part" 2>/dev/null || true
+        echo "  history: ERROR cannot store snapshot for $tag: $err" >&2
+        return 0
+    fi
+    if err=$(energy-monitor import "$remote_dir/$tag.sqlite3" --label "$tag" 2>&1 >/dev/null); then
+        echo "  history: OK"
+    else
+        echo "  history: ERROR import failed for $tag: $err" >&2
+    fi
+}
+
 for entry in "${REMOTE_HOSTS[@]}"; do
     tag="${entry%%:*}"
     host="${entry#*:}"
+    if [[ "$entry" != *:* ]] || ! valid_pair "$tag" "$host"; then
+        echo "Skipping invalid tag:host entry '$entry'" >&2
+        continue
+    fi
 
     echo "Syncing energy data from $tag ($host)..."
 
@@ -70,6 +123,7 @@ for entry in "${REMOTE_HOSTS[@]}"; do
     pull "$tag" "$host" "pi_daily_rollup.jsonl" "${tag}_daily_rollup.jsonl" "rollup"
     pull "$tag" "$host" "interactive_journal_raw.jsonl" "${tag}_interactive_journal.jsonl" "interactive journal"
     pull "$tag" "$host" "interactive_rollup_raw.jsonl" "${tag}_interactive_daily_rollup.jsonl" "interactive rollup"
+    sync_history "$tag" "$host"
 done
 
 echo "Done."

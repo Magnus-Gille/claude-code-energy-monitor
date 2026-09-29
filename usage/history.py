@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import sqlite3
 import stat
+import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,9 +22,12 @@ import why
 
 OBSERVATION_VERSION = 1  # the 'v' field inside observation dicts
 SCHEMA_VERSION = 2  # PRAGMA user_version of the SQLite layout
-COLLECTOR_VERSION = 4
+COLLECTOR_VERSION = 5
 FIELDS = ('fresh_input', 'cache_read', 'cache_write', 'output')
 ALL_FIELDS = FIELDS + ('reasoning',)
+
+
+_REMOTE_PATH = re.compile(r'm-[^/:\\]*:')  # imported source paths are '<machine>:<path>'; local ones are absolute
 
 
 def _owned_by_current_user(info):
@@ -143,6 +149,9 @@ def normalize(record, machine):
     model, effort = text(record.model, default='unknown'), text(record.effort, default='unknown')
     version = getattr(record, 'harness_version', None)
     version = str(version) if isinstance(version, int) and not isinstance(version, bool) else text(version, limit=64)
+    tariff = getattr(record, 'tariff', None)
+    tariff = {k: v for k in ('speed', 'service_tier', 'inference_geo')
+              if (v := text((tariff or {}).get(k), limit=64)) is not None} or None
     confidence = {k: 'absent' if v is None else 'observed' for k, v in tokens.items()}
     if 'output_not_final' in warnings:
         for k in ('output', 'reasoning'):
@@ -166,7 +175,7 @@ def normalize(record, machine):
         'project_id': project_id, 'project_label': record.project,
         'cwd': text(getattr(record, 'cwd', None), limit=4096),
         'turn_id': text(getattr(record, 'turn_id', None)),
-        'turn_confidence': getattr(record, 'turn_confidence', 'absent'),
+        'turn_confidence': getattr(record, 'turn_confidence', 'absent'), 'tariff': tariff,
         'tokens': tokens, 'raw_usage': raw, 'duration_ms': None,
         'accounting_basis': 'request_top_level', 'billing_verified': False,
         'warnings': sorted(set(warnings)), 'complete': not warnings,
@@ -196,6 +205,7 @@ def merge_observations(a, b):
         # The earliest copy owns a request; on equal time keep the stored one (a).
         owner = b if b['ts'] < a['ts'] else a
         result['session'], result['parent_session'] = owner['session'], owner['parent_session']
+    result['tariff'] = {**(other.get('tariff') or {}), **(winner.get('tariff') or {})} or None
     flags = [x.get('output_final') for x in (a, b)]
     output_final = True if True in flags else False if False in flags else None
     raw = merge_usage(a['raw_usage'], b['raw_usage'])
@@ -207,7 +217,7 @@ def merge_observations(a, b):
         project=result['project_label'], project_id=result['project_id'], cwd=result['cwd'],
         entrypoint=result['origin'], thread_kind=result['thread_kind'], agent=result['agent'],
         parent_session_id=result['parent_session'], turn_id=result['turn_id'],
-        turn_confidence=result['turn_confidence'], harness_version=result['harness_version'],
+        turn_confidence=result['turn_confidence'], tariff=result.get('tariff'), harness_version=result['harness_version'],
         session_started_at=(datetime.fromisoformat(result['session_started_at'])
                             if result.get('session_started_at') else None),
         raw_usage=raw, id_synthetic=result['id_synthetic'], output_final=output_final)
@@ -221,8 +231,8 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MICRO = timedelta(microseconds=1)
 _REFS = ('id', 'machine', 'harness', 'provider', 'harness_version', 'collector', 'source_type', 'session',
          'parent_session', 'session_started_at', 'thread_kind', 'agent', 'origin', 'model', 'effort',
-         'project_id', 'project_label', 'cwd', 'turn_id', 'turn_confidence', 'warnings', 'confidence')
-_JSON_REFS = ('warnings', 'confidence')
+         'project_id', 'project_label', 'cwd', 'turn_id', 'turn_confidence', 'tariff', 'warnings', 'confidence')
+_JSON_REFS = ('tariff', 'warnings', 'confidence')
 _FLAGS = ('id_synthetic', 'complete', 'output_final')
 _TOKENS = ALL_FIELDS
 _CONSTANTS = (('v', OBSERVATION_VERSION), ('kind', 'usage_observation'), ('duration_ms', None),
@@ -319,7 +329,7 @@ def _encode(item, key=None):
     for name in _REFS:
         value = item.get(name)
         if name in _JSON_REFS:
-            value = _compact(value)
+            value = None if name == 'tariff' and value is None else _compact(value)
         elif value is not None and type(value) is not str:
             raise ValueError(f'observation field {name} must be text or null')
         refs.append(value)
@@ -347,8 +357,9 @@ def _decode(row):
     packed, extra = rest[n + len(_TOKENS):]
     item = {'v': OBSERVATION_VERSION, 'kind': 'usage_observation', 'id': refs['id'],
             'id_synthetic': bool(flags['id_synthetic']), 'ts': _ts_text(ts_us)}
-    for name in _REFS[1:-2]:
+    for name in _REFS[1:-3]:
         item[name] = refs[name]
+    item['tariff'] = None if refs['tariff'] is None else json.loads(refs['tariff'])
     item.update(tokens=tokens, raw_usage=_unpack_raw(packed, extra), duration_ms=None,
                 accounting_basis='request_top_level', billing_verified=False,
                 warnings=json.loads(refs['warnings']), complete=bool(flags['complete']),
@@ -399,6 +410,8 @@ class History:
                 'CREATE TABLE IF NOT EXISTS imports (harness TEXT, root TEXT, data TEXT, PRIMARY KEY(harness,root))',
             ):
                 c.execute(sql)
+            if not any(r['name'] == 'tariff' for r in c.execute('PRAGMA table_info(observations)')):
+                c.execute('ALTER TABLE observations ADD COLUMN tariff INTEGER')  # additive within schema 2
             if migrate:
                 self._migrate_v1(c)
             c.execute('INSERT OR IGNORE INTO meta VALUES (?,?)', ('machine', 'm-' + uuid.uuid4().hex))
@@ -608,6 +621,86 @@ class History:
         c.execute('INSERT OR IGNORE INTO files(harness,path) VALUES (?,?)', (harness, path))
         return c.execute('SELECT id FROM files WHERE harness=? AND path=?', (harness, path)).fetchone()[0]
 
+    def snapshot(self, out):
+        """Write a consistent private copy of this database (sqlite backup API, temp file, atomic replace)."""
+        out = Path(out).expanduser().absolute()
+        if out == self.path or out.resolve() == self.path.resolve() or (out.exists() and out.samefile(self.path)):
+            raise ValueError('snapshot output must not be the history database')
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix='.snapshot-', dir=out.parent)
+        os.close(fd)
+        try:
+            target = sqlite3.connect(tmp)
+            try:
+                self.connection.backup(target)
+            finally:
+                target.close()
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, out)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+        return dict(snapshot=str(out), machine=self.machine, schema_version=SCHEMA_VERSION)
+
+    def import_snapshot(self, snapshot, label):
+        """Merge another machine's history; the snapshot is only copied, never opened in place."""
+        label = label.strip() if isinstance(label, str) else ''
+        if not label or len(label) > 64 or not label.isprintable():
+            raise ValueError('--label must be 1-64 printable characters')
+        snapshot = Path(snapshot).expanduser()
+        if not snapshot.is_file():
+            raise ValueError('snapshot is not a readable file')
+        with tempfile.TemporaryDirectory(prefix='agentmon-import-') as tmp:
+            copy = Path(tmp) / 'snapshot.sqlite3'
+            shutil.copyfile(snapshot, copy)
+            os.chmod(copy, 0o600)
+            try:
+                raw = sqlite3.connect(str(copy))
+                try:
+                    version = raw.execute('PRAGMA user_version').fetchone()[0]
+                    found = raw.execute("SELECT value FROM meta WHERE key='machine'").fetchone() if version in (1, SCHEMA_VERSION) else None
+                finally:
+                    raw.close()
+            except sqlite3.Error as exc:
+                raise ValueError(f'snapshot is not a history database: {exc}') from exc
+            if version not in (1, SCHEMA_VERSION):
+                raise ValueError(f'unsupported snapshot schema version {version}')
+            if not found:
+                raise ValueError('snapshot has no machine id')
+            with History(copy) as source:  # migrates v1 and adds the tariff column on the copy only
+                machine, items = source.machine, source.records()
+        result = dict(harness='import', root=label, source_machine=machine, observations_seen=len(items),
+                      new=0, merged=0, status='ok', last_attempt=utcnow())
+        if machine == self.machine:
+            result.update(skipped=True, warning='snapshot is this machine\'s own history; nothing imported')
+            return result
+        c = self.connection
+        c.execute('BEGIN IMMEDIATE')
+        self._strings, self._values = {}, {}
+        try:
+            for item in items:
+                sources = [p if _REMOTE_PATH.match(p) else f'{machine}:{p}' for p in item.pop('sources')]
+                key = _key(item)
+                old = self._existing(c, key)
+                result['merged' if old else 'new'] += 1
+                if old:
+                    item = merge_observations(old, item)
+                observation = self._insert(c, _encode(item, key))
+                for path in sources:
+                    c.execute('INSERT OR IGNORE INTO sources VALUES (?,?)',
+                              (observation, self._file_id(c, item['harness'], path)))
+            labels = c.execute("SELECT value FROM meta WHERE key='machine_labels'").fetchone()
+            labels = {**(json.loads(labels[0]) if labels else {}), machine: label}
+            c.execute('INSERT OR REPLACE INTO meta VALUES (?,?)', ('machine_labels', json.dumps(labels, sort_keys=True)))
+            result['last_success'] = utcnow()
+            c.execute('INSERT OR REPLACE INTO imports VALUES (?,?,?)', ('import', label, json.dumps(result)))
+            c.commit()
+            return result
+        except Exception:
+            c.rollback()
+            self._strings, self._values = {}, {}
+            raise
+
     def records(self, start=None, end=None, harness=None, project=None, session=None, turn=None):
         session_harness = None
         raw_session = session
@@ -649,7 +742,8 @@ class History:
             'SELECT count(*), min(ts_us), max(ts_us), coalesce(sum(complete=0),0), coalesce(sum(turn_id IS NULL),0)'
             ' FROM observations').fetchone()
         imports = [json.loads(r[0]) for r in self.connection.execute('SELECT data FROM imports ORDER BY harness,root')]
-        missing = sum(not Path(r[0]).exists() for r in self.connection.execute('SELECT path FROM files'))
+        missing = sum(not _REMOTE_PATH.match(r[0]) and not Path(r[0]).exists()
+                      for r in self.connection.execute('SELECT path FROM files'))
         return dict(schema_version=SCHEMA_VERSION, machine=self.machine, observations=count,
                     first_event=None if first is None else _ts_text(first),
                     last_event=None if last is None else _ts_text(last),

@@ -26,6 +26,17 @@ CLAUDE_STATE = Path.home() / ".claude"
 CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 PI_SESSIONS = Path.home() / ".pi" / "agent" / "sessions"
 OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+# Claude desktop Cowork (macOS only): local_*/.claude/projects hold ordinary Claude Code transcripts.
+# Never read the sibling audit.jsonl: it is an SDK stream copy of the same calls under other id keys.
+COWORK_SESSIONS = Path.home() / "Library" / "Application Support" / "Claude" / "local-agent-mode-sessions"
+
+
+def cowork_roots() -> list[Path]:
+    """Every <org>/<acct>/local_*/.claude/projects directory; a missing base is simply empty."""
+    try:
+        return sorted(p for p in COWORK_SESSIONS.glob("*/*/local_*/.claude/projects") if p.is_dir())
+    except OSError:
+        return []
 
 
 @dataclass(frozen=True)
@@ -56,6 +67,7 @@ class AttributionRecord:
     raw_usage: dict = field(default_factory=dict)
     id_synthetic: bool = False
     output_final: bool | None = None
+    tariff: dict | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -324,6 +336,21 @@ def _meta_text(*values: object, default: str | None = None, limit: int = 256) ->
     return default
 
 
+def _claude_tariff(usage: object) -> dict | None:
+    """Pricing dimensions Claude reports per request; only bounded printable strings survive."""
+    usage = usage if isinstance(usage, dict) else {}
+    found = {key: text for key in ("speed", "service_tier", "inference_geo")
+             if (text := _meta_text(usage.get(key), limit=64)) is not None}
+    return found or None
+
+
+def _merge_tariff(existing: dict | None, incoming: dict | None, latest: bool) -> dict | None:
+    """Per key: the latest valid value wins, a sparse row never erases an earlier key."""
+    if not incoming:
+        return existing
+    return {**(existing or {}), **incoming} if latest else {**incoming, **(existing or {})}
+
+
 def _explicit_turn_id(row: dict, message: dict) -> str | None:
     return _first_text(
         row,
@@ -382,6 +409,7 @@ def collect_claude(
             if is_subagent_path else None
         fallback_session = path_session or _meta_text(path.stem, default="unknown")
         fallback_project = _claude_project_fallback(path, root)
+        cowork = path.is_relative_to(COWORK_SESSIONS)
         last_user_turn: str | None = None
         for line_number, row in _read_json_lines(path, strict=strict):
             message = _mapping(row.get("message"))
@@ -435,7 +463,8 @@ def collect_claude(
             if existing is None:
                 existing = {**values, "output_final": has_stop, "timestamp": timestamp, "_first": timestamp,
                             "session_id": session_id, "parent_session_id": parent_session_id,
-                            "_fallback": (fallback_project, _claude_project_id(path, root))}
+                            "_fallback": (fallback_project, _claude_project_id(path, root)),
+                            "_cowork": cowork}
                 calls[key] = existing
             else:
                 for token_field in ("fresh_input", "cache_read", "cache_write", "output", "reasoning"):
@@ -474,6 +503,8 @@ def collect_claude(
             }.items():
                 if value is not None and (latest or existing.get(name) is None):
                     existing[name] = value
+            if (tariff := _claude_tariff(usage)) is not None:
+                existing["tariff"] = _merge_tariff(existing.get("tariff"), tariff, latest)
             if latest or "id_synthetic" not in existing:
                 existing["id_synthetic"] = id_synthetic
 
@@ -488,11 +519,13 @@ def collect_claude(
             ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')):
             continue
         fallback_project, fallback_id = values.pop("_fallback")
+        if values.pop("_cowork"):
+            values.setdefault("entrypoint", "local-agent")  # Cowork rows often carry no entrypoint
         del values["_first"]
         for name, default in (
             ("model", "unknown"), ("effort", "unknown"), ("entrypoint", "unknown"),
             ("agent", "main"), ("thread_kind", "main"), ("cwd", None), ("turn_id", None),
-            ("turn_confidence", "absent"), ("harness_version", None),
+            ("turn_confidence", "absent"), ("harness_version", None), ("tariff", None),
             ("project", fallback_project), ("project_id", fallback_id),
         ):
             values.setdefault(name, default)
