@@ -8,3 +8,8 @@ draft-issue.md
 token-distributions.png
 daily_histograms.png
 .env
+build/
+dist/
+*.egg-info/
+.worktrees/
+.session-recovery/

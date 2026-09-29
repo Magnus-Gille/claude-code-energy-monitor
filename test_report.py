@@ -1,0 +1,255 @@
+import base64
+import gzip
+import json
+import os
+import re
+import stat
+import tempfile
+import unittest
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from usage.history import ALL_FIELDS
+from usage.report import WARNING_SEPARATOR, build_report, render_report, write_report as _write_report
+write_report = _write_report
+
+
+def decode_html(html):
+    """Payload embedded in the report page: base64 -> gunzip -> JSON."""
+    match = re.search(r'<script id="report-data" type="application/octet-stream\+base64">([A-Za-z0-9+/=]*)</script>', html)
+    return json.loads(gzip.decompress(base64.b64decode(match.group(1))).decode('ascii'))
+
+
+def page_text(html):
+    """The page without its base64 payload, whose random-looking text can contain any short string."""
+    return re.sub(r'(<script id="report-data"[^>]*>)[A-Za-z0-9+/=]*(</script>)', r'\1\2', html)
+
+
+def expand(report):
+    """Python twin of the template's expand(): per-record dicts from the columnar block."""
+    c, out, ms = report['columns'], [], 0
+    for i in range(c['n']):
+        ms += c['ts'][i]
+        off = c['dict']['off'][c['idx']['off'][i]]
+        sign = '-' if off < 0 else '+'
+        suffix = f'{sign}{abs(off) // 60:02d}:{abs(off) % 60:02d}'
+        local = datetime.fromtimestamp((ms + off * 60000) / 1000, ZoneInfo('UTC')).replace(tzinfo=None)
+        row = {k: c['dict'][k][c['idx'][k][i]] for k in c['dict'] if k not in ('off', 'warnings')}
+        warnings = c['dict']['warnings'][c['idx']['warnings'][i]]
+        row.update(ms=ms, date=local.date().isoformat(),
+                   hour=local.replace(minute=0, second=0, microsecond=0).isoformat() + suffix,
+                   minute=local.replace(second=0, microsecond=0).isoformat() + suffix,
+                   id=None if c['id'][i] is None else (c['id_prefix'] + f"{c['id'][i]:03d}" if c['id_prefix'] else c['id'][i]),
+                   tokens={k: c['tokens'][k][i] for k in ALL_FIELDS},
+                   complete=bool(c['complete'][i]), id_synthetic=bool(c['id_synthetic'][i]),
+                   warnings=warnings.split(WARNING_SEPARATOR) if warnings else [])
+        out.append(row)
+    return out
+
+
+def observation(identity='one', **changes):
+    item = dict(id=identity, ts='2026-10-25T00:30:00+00:00', harness='claude',
+                provider='anthropic', project_id='/private/client/app', project_label='app',
+                session='private-session', parent_session=None, turn_id='private-turn',
+                turn_confidence='observed', model='model-a', effort='high',
+                thread_kind='main', agent='private-agent', origin='cli',
+                tokens=dict(fresh_input=10, cache_read=20, cache_write=5, output=7, reasoning=3),
+                complete=True, id_synthetic=False, warnings=[],
+                cwd='/private/client/app', sources=['/private/log.jsonl'],
+                raw_usage={'secret': 'PRIVATE PROMPT'}, machine='private-machine')
+    item.update(changes)
+    return item
+
+
+class ReportTests(unittest.TestCase):
+    def test_redaction_is_default_and_allowlist_excludes_private_fields(self):
+        report = build_report([observation()], {'imports': [{'root': '/private/logs', 'harness': 'claude', 'status': 'ok'}]})
+        html = render_report(report)
+        encoded = json.dumps(decode_html(html))
+        for secret in ('/private/', 'PRIVATE PROMPT', 'private-session', 'private-agent', 'private-turn', 'private-machine'):
+            self.assertNotIn(secret, page_text(html))
+        for secret in ('/private/', 'PRIVATE PROMPT', 'private-session', 'private-agent', 'private-turn', 'private-machine'):
+            self.assertNotIn(secret, encoded)
+        self.assertEqual(report['privacy'], 'redacted')
+        self.assertEqual(expand(report)[0]['tokens']['reasoning'], 3)
+
+    def test_project_collisions_are_distinct_and_private_labels_unique(self):
+        rows = [observation(), observation('two', project_id='/other/client/app')]
+        result = expand(build_report(rows, {}, redact=False))
+        self.assertNotEqual(result[0]['project_id'], result[1]['project_id'])
+        self.assertNotEqual(result[0]['project_label'], result[1]['project_label'])
+        self.assertTrue(all('app' in r['project_label'] for r in result))
+        self.assertNotIn('/private/', json.dumps(result))
+
+    def test_session_identity_is_scoped_by_harness(self):
+        rows = [observation(), observation('two', harness='pi', provider='test')]
+        redacted = expand(build_report(rows, {}))
+        private = expand(build_report(rows, {}, redact=False))
+        self.assertNotEqual(redacted[0]['session'], redacted[1]['session'])
+        self.assertEqual({row['session'] for row in private}, {
+            'claude:private-session', 'pi:private-session',
+        })
+
+    def test_template_uses_neutral_copy_and_cache_comparison_mounts(self):
+        html = render_report(build_report([], {}))
+        self.assertIn('<h1>Tokenanvändning</h1>', html)
+        for label in ('Totalt', 'Input', 'Cache write', 'Cache read', 'Output'):
+            self.assertIn(label, html)
+        self.assertIn('id="cache-comparisons"', html)
+        for dimension in ('session', 'harness', 'model', 'project_id'):
+            self.assertIn(f'data-cache-dimension="{dimension}"', html)
+        for old_copy in ('Din användning, förklarad', 'Vart tog alla tokens vägen?',
+                         'Se mönstret. Hitta toppen.', 'Vad driver användningen?',
+                         'Synlig täckning. Ärliga gränser.'):
+            self.assertNotIn(old_copy, html)
+
+    def test_dst_repeated_hour_remains_distinct(self):
+        rows = [observation(), observation('two', ts='2026-10-25T01:30:00+00:00')]
+        result = expand(build_report(rows, {}))
+        self.assertEqual(result[0]['date'], result[1]['date'])
+        self.assertNotEqual(result[0]['hour'], result[1]['hour'])
+        self.assertTrue(result[0]['hour'].endswith('+02:00'))
+        self.assertTrue(result[1]['hour'].endswith('+01:00'))
+
+    def test_nulls_and_ambiguous_identity_are_preserved(self):
+        row = observation(id_synthetic=True, complete=False)
+        row['tokens']['cache_read'] = None
+        result = expand(build_report([row], {}))[0]
+        self.assertIsNone(result['tokens']['cache_read'])
+        self.assertTrue(result['id_synthetic'])
+        self.assertFalse(result['complete'])
+
+    def test_safe_json_cannot_break_out_of_script(self):
+        report = build_report([observation(model='</script><script>alert(1)</script>')], {}, redact=False)
+        html = render_report(report, template='<script type="application/json">__USAGE_DATA__</script>')
+        self.assertEqual(html.count('</script>'), 1)
+        self.assertNotIn('<script>alert', html)
+        self.assertEqual(expand(decode_html(html.replace('application/json', 'application/octet-stream+base64').replace('<script ', '<script id="report-data" ')))[0]['model'],
+                         '</script><script>alert(1)</script>')
+
+    def test_empty_report_coverage_is_not_claimed_complete(self):
+        report = build_report([], {})
+        self.assertEqual(report['columns']['n'], 0)
+        self.assertEqual(expand(report), [])
+        self.assertFalse(report['coverage']['coverage_complete'])
+        self.assertFalse(report['coverage']['billing_verified'])
+
+    def test_write_is_private_and_replaces_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'report.html'
+            write_report(path, 'one')
+            write_report(path, 'two')
+            self.assertEqual(path.read_text(), 'two')
+            if os.name != 'nt':
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(len(list(Path(tmp).iterdir())), 1)
+
+
+class ReportReviewTests(unittest.TestCase):
+    def test_lone_surrogate_renders_and_writes(self):
+        report = build_report([observation(project_id='/work/\ud800')], {}, redact=False)
+        html = render_report(report)
+        with tempfile.TemporaryDirectory() as tmp:
+            write_report(Path(tmp) / 'r.html', html)
+            self.assertTrue((Path(tmp) / 'r.html').is_file())
+
+    def test_redacted_report_only_shows_public_provider_and_model_names(self):
+        rows = [observation('a', provider='m5', model='qwen3-coder', origin='cli'),
+                observation('b', provider='inference-gille', model='gpt-oss-120b', origin='my-host-tui'),
+                observation('c', provider='anthropic', model='claude-opus-5-5'),
+                observation('d', provider='openai', model='gpt-5.6-luna', effort='xhigh')]
+        html = render_report(build_report(rows, {}))
+        shown = json.dumps(decode_html(html))
+        for private in ('m5', 'inference-gille', 'qwen3-coder', 'gpt-oss-120b', 'my-host-tui'):
+            self.assertNotIn(private, shown)
+            self.assertNotIn(private, page_text(html))
+        for public in ('anthropic', 'claude-opus-5-5', 'openai', 'gpt-5.6-luna', 'xhigh'):
+            self.assertIn(public, shown)
+        private = render_report(build_report(rows, {}, redact=False))
+        self.assertNotIn('inference-gille', private)
+        self.assertIn('inference-gille', json.dumps(decode_html(private)))
+
+    def test_redacted_models_use_public_family_allowlist(self):
+        visible = ('claude-opus-5-5', 'claude-haiku-4-5-20251001', 'gpt-5.6-luna', 'gpt-6-astra',
+                   'codex-auto-review', 'gpt-5.3-codex-spark', 'openai/gpt-oss-120b',
+                   'qwen/qwen3-coder', 'zai-org/GLM-4.7', 'mistralai/codestral-22b',
+                   'qwen/qwen3-coder:free', 'codestral-latest')
+        hidden = ('ft:gpt-4o-2024-08-06:acme-corp::abc123', 'magnus-macbook', 'stealth/ox-alpha',
+                  'gpt-4o:ft-acme',
+                  'big-pickle', '<synthetic>')
+        rows = [observation(f'v{i}', provider='openai', model=m) for i, m in enumerate(visible)]
+        rows += [observation(f'h{i}', provider='openai', model=m) for i, m in enumerate(hidden)]
+        rows += [observation('n1', provider='m5', model='claude-opus-5-5'),
+                 observation('n2', provider='inference-gille', model='gpt-5.6-luna')]
+        shown = [r['model'] for r in expand(build_report(rows, {}))]
+        self.assertTrue(set(visible) <= set(shown))
+        encoded = json.dumps(shown)
+        for model in hidden + ('m5', 'inference-gille'):
+            self.assertNotIn(model, encoded)
+        self.assertEqual(sum(v in visible for v in shown), len(visible))
+        self.assertTrue(all(v.startswith('model ') for v in shown if v not in visible))
+
+
+class PayloadV2Tests(unittest.TestCase):
+    def rows(self):
+        stamps = ['2026-10-25T00:30:00+00:00', '2026-10-25T01:30:00+00:00', '2026-03-29T00:59:59.123+00:00',
+                  '2026-03-29T01:00:00+00:00', '2026-06-01T12:00:00+02:00']
+        rows = [observation(f'id{i}', ts=t, session=f's{i % 2}', model=f'claude-m{i % 3}',
+                            warnings=['w one', 'w two'] if i == 1 else []) for i, t in enumerate(stamps)]
+        rows[0]['tokens']['cache_read'] = None
+        rows[2].update(complete=False, id_synthetic=True, parent_session='s0', effort=None)
+        rows[3]['tokens'] = dict.fromkeys(ALL_FIELDS)
+        return rows
+
+    def test_columns_round_trip_matches_python_local_time_and_fields(self):
+        for redact in (True, False):
+            rows = self.rows()
+            report = decode_html(render_report(build_report(rows, {}, redact=redact)))
+            self.assertEqual(report['version'], 2)
+            self.assertNotIn('records', report)
+            got = expand(report)
+            zone = ZoneInfo('Europe/Stockholm')
+            expected = sorted(rows, key=lambda r: (r['ts'], r['harness'], r['id']))
+            self.assertEqual(len(got), len(expected))
+            for g, r in zip(got, expected):
+                dt = datetime.fromisoformat(r['ts']).astimezone(zone)
+                self.assertEqual(g['date'], dt.date().isoformat())
+                self.assertEqual(g['hour'], dt.replace(minute=0, second=0, microsecond=0).isoformat())
+                self.assertEqual(g['minute'], dt.replace(second=0, microsecond=0).isoformat())
+                self.assertEqual(g['ms'], round(dt.timestamp() * 1000))
+                self.assertEqual(g['tokens'], r['tokens'])
+                self.assertEqual((g['complete'], g['id_synthetic']), (r['complete'], r['id_synthetic']))
+                self.assertEqual(g['warnings'], r['warnings'])
+                self.assertEqual(g['effort'], r['effort'])
+                if redact:
+                    self.assertNotIn(r['session'], g['session'])
+                    self.assertNotIn(r['id'], g['id'])
+                else:
+                    self.assertEqual((g['session'], g['id'], g['project_label']),
+                                     (f"claude:{r['session']}", r['id'], 'app'))
+            self.assertIn('2026-10-25T02:00:00+02:00', {g['hour'] for g in got})
+            self.assertIn('2026-10-25T02:00:00+01:00', {g['hour'] for g in got})
+
+    def test_render_is_deterministic_and_html_has_no_plain_private_strings(self):
+        report = build_report([observation()], {}, redact=False)
+        self.assertEqual(render_report(report), render_report(report))
+        html = render_report(report)
+        for private in ('private-session', 'private-turn', 'private-agent'):
+            self.assertNotIn(private, page_text(html))
+            self.assertIn(private, json.dumps(decode_html(html)))
+
+    def test_twenty_thousand_observations_stay_small(self):
+        rows = [observation(f'o{i}', ts=f'2026-05-{1 + i % 28:02d}T{i % 24:02d}:{i % 60:02d}:{i % 50:02d}+00:00',
+                            session=f's{i // 40}', turn_id=f't{i // 4}', model=f'claude-m{i % 5}',
+                            tokens=dict(fresh_input=i % 977, cache_read=(i * 37) % 150000, cache_write=i % 311,
+                                        output=(i * 13) % 4000, reasoning=i % 50)) for i in range(20000)]
+        size = len(render_report(build_report(rows, {})).encode())
+        print(f'20k-row report: {size} bytes')
+        self.assertLess(size, SIZE_LIMIT_20K)
+
+
+SIZE_LIMIT_20K = 700_000  # measured ~311 KB (was ~9 MB as v1 JSON); margin for dictionary growth
+
+if __name__ == '__main__':
+    unittest.main()

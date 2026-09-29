@@ -1,7 +1,103 @@
+# Current state — 2026-09-29
+
+`feat/history-a1` is committed and under pull-request review as the 1.2.0 release candidate:
+durable multi-harness history (#10), the offline Tokenatlas report (#11), and Pi/OpenCode history
+import (history part of #14). Hosted CI and an independent cross-model review are the remaining
+gates. Next delivery after merge: per-session model breakdown with list-price cost (#12 core).
+
 # Project Status
 
-**Last session:** 2026-09-03
-**Branch:** feat/usage-attribution-m0
+## Continued implementation — 2026-09-26
+
+- Restored work now lives in the persistent `.worktrees/history` checkout on `feat/history-a1`.
+  Changes remain uncommitted and unpublished; the installed monitors and external services are unchanged.
+- Added Pi history/`why.py` support from `~/.pi/agent/sessions`: provider-scoped response identity,
+  copied-fork deduplication, original-session attribution, project/model/token mapping, and explicit
+  synthetic fallback identity. Reasoning keeps Pi's existing subset-of-output semantics.
+- Added OpenCode support from its local WAL-backed SQLite database through a query-only connection.
+  Message records are parsed transiently; only session/message attribution and allowlisted counters
+  are retained. Transcript content, parts, credentials, account tables, and tool data are not retained. OpenCode's additive reasoning counter
+  is folded into normalized output and also retained as a separate subtotal.
+- Session identities are harness-scoped in JSON summaries and Tokenatlas, preventing equal raw IDs
+  from merging across harnesses. OpenCode database/WAL/SHM metadata participate in checkpoints;
+  concurrent changes force a retry, and unsupported schemas are recorded as partial imports.
+- Tokenatlas copy is shorter and neutral. New cache-read-share comparisons cover session, harness,
+  model, and project, with highest/lowest comparable groups, observation counts, input volume, and
+  explicit unknown/synthetic coverage. They follow all active filters and time zooms.
+- Live acceptance imported 7,138 OpenCode calls and 1,670 Pi observations from 44 session files.
+  The combined private report contained 8,808 observations and 2,363,267,733 known tokens.
+  Chromium and WebKit passed totals, cache comparison math, bucket conservation, filters, empty state,
+  zoom, drilldown, export, mobile overflow, zero console errors, and zero network requests.
+- Verification: 69 discovery tests, standalone interactive-export regression, Python compilation,
+  JavaScript syntax, and `git diff --check` pass. Desktop/mobile screenshots were visually reviewed.
+- Added 1.2.0 packaging with the `energy-monitor` console command, packaged offline template, Windows
+  timezone dependency, changelog, install/update/uninstall guidance, and retained-data semantics. The
+  release smoke builds a wheel from a clean source copy, installs outside the checkout, refreshes twice,
+  runs doctor/report, checks privacy and POSIX permissions, reinstalls, uninstalls, and verifies that the
+  user database remains. GitHub Actions covers Python 3.10-3.13 on Linux/macOS/Windows and offline
+  Chromium/WebKit; runner execution remains the only unverified release gate until the branch is pushed.
+- The first native quality reviewer could not start because its configured API credential was absent;
+  M5 file review was unavailable because no blind-context roots were configured. A native general
+  reviewer then completed an independent read-only review (runtime model/effort unavailable; usefulness:
+  pass). Its four findings were reproduced and fixed: default all-harness failure isolation, scoped session
+  filter round trips, malformed OpenCode row diagnostics, and dimension-specific cache-comparison tests.
+  Conductor review additionally fixed summary session collisions and unsupported-schema diagnostics.
+  Pricing (#12), benchmark integration (#13), and remaining surfaces (#15) remain pending.
+- A second independent native general review covered the complete release diff (runtime model/effort
+  unavailable; usefulness: pass). It found Windows ownership/mode portability, an occupied 1.1.0 tag,
+  Linux screenshot paths, and overstated machine-ID wording; all were fixed and reviewed again. The final
+  follow-up reports no local blockers. No commit, push, release tag, package publication, or deployment.
+
+**Last session:** 2026-09-26
+**Branch:** feat/history-a1
+
+## Local implementation ready (2026-09-26) — seminar A1 / issue #10
+
+- Issue #10 implemented locally in the isolated `feat/history-a1` worktree at
+  `/private/tmp/energy-history-a1`, based on `a5192ebd367e55c77a24c0be6dd47afbdce0f834`.
+  Changes are uncommitted and unpublished. The original checkout and installed statusline
+  remain unchanged. Issues #10–#16 contain the seminar backlog and staged OK/NOK demos.
+- Added `python3 -m usage refresh|report|doctor`: standard-library SQLite storage,
+  incremental changed-file import, atomic checkpoints/writer locking, retained history,
+  provenance, private file permissions, source/error diagnostics and local-time
+  day/hour/minute buckets. Supports Claude Code and locally available Codex rollouts.
+- Extended existing readers with stable event identities, full project identity,
+  observed/derived/absent turn references, parent session, harness version and allowlisted
+  usage counters. Copied logs merge; source removal never removes stored observations.
+  Reports group by project/session/turn/model/effort/harness/origin. Prompt and tool text
+  are not persisted. Malformed rows, unreadable directories/files, invalid usage timestamps,
+  partial tails and files changed during reading are surfaced.
+- Accounting decision: v1 stores request **observations**, not verified billed inferences.
+  Advisor iterations can have separate model/counters; retain original sanitized iteration
+  snapshots, derive compatible counter maxima separately, flag conflicts, and never add the
+  whole iteration array to parent usage. Unknown fields remain null. Ambiguous event identities
+  are excluded from known subtotals and shown separately. `billing_verified` and
+  `coverage_complete` remain false. See `docs/history-accounting.md` for evidence and scope.
+- README/FINDINGS now qualify older thinking-token/statusline claims by version/date and
+  reference the later validation. Historical findings are preserved rather than presented
+  as universal current behavior.
+- Verification: **45 unittest discovery tests pass**, standalone `test_interactive_export.py`
+  passes, top-level Python plus `usage` compile, and `git diff --check` passes. New regressions
+  for review findings and error cases were demonstrated red before correction. The suite
+  covers retention, copy/window identity, snapshot merging/replay, missing counters, DST,
+  concurrent writers, transactional rollback, read failures and diagnostics. Existing why/Pi/export behavior remains covered.
+- Live local import: 121 Claude files and 139 Codex files (Codex limited to 2026-09-26),
+  9,582 deduplicated observations, 54 project identities, 13 model groups, 6,960 linked
+  turn observations, no normalization warnings; 3.69 seconds. These counts are a snapshot,
+  not full-account coverage. A closed Codex session with 340 observations in two source
+  files and 60 turn groups reconciled exactly on normalized counters and event IDs.
+  Private demo database/reports are outside Git in an OS temporary directory.
+- Delegation evidence: parser/identity and historical-doc leaves requested native worker
+  `gpt-5.6-luna`, high; runtime-observed model/effort unavailable. Parser leaf **partial**:
+  18 focused tests passed, but conductor/reviewer corrections were needed for weak identity,
+  strict errors and iteration merging. Docs leaf **pass** after conductor review.
+  Independent read-only review requested native `gpt-6-sol`, high; runtime-observed values
+  unavailable; **pass** usefulness: four initial grounded defects and two followup gaps
+  were reproduced, fixed and regression-tested. Final integration and checks owned by root.
+  No separate CLI delegation or paid API evaluation was used. Munin unavailable in this session.
+- Next demo step: #11 offline HTML on this history. Cost/provenance is #12, benchmark runs
+  and quality/time comparison #13, Pi/OpenCode adapters #14, remaining surfaces #15.
+  No scheduler, deployment, sync, billing estimate or HTML was installed in A1.
 
 ## Completed This Session (2026-09-03) — cross-harness `why`
 

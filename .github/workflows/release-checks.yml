@@ -1,0 +1,79 @@
+name: Release checks
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: macos-latest
+            python: "3.12"
+          - os: windows-latest
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install build tools
+        run: python -m pip install "setuptools>=77" wheel
+      - name: Verify packaged Windows timezone data
+        if: runner.os == 'Windows'
+        run: |
+          python -m pip install .
+          python -c "from zoneinfo import ZoneInfo; ZoneInfo('Europe/Stockholm')"
+      - name: Unit and release-artifact tests
+        run: python -m unittest discover -v
+      - name: Interactive export regression
+        run: python test_interactive_export.py
+      - name: Compile Python
+        run: python -m compileall -q -x "[\\/]\.git[\\/]" .
+      - name: Diff hygiene
+        run: git diff --check
+
+  browser:
+    name: Offline report / ${{ matrix.browser }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, webkit]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Install build and browser tools
+        run: |
+          python -m pip install "setuptools>=77" wheel
+          npm install --no-save @playwright/test@1.54.2
+          npx playwright install --with-deps ${{ matrix.browser }}
+      - name: Build installed-package smoke report
+        env:
+          ENERGY_MONITOR_SMOKE_REPORT: ${{ runner.temp }}/tokenatlas-smoke.html
+        run: python test_release_artifact.py
+      - name: Check report offline
+        env:
+          BROWSER: ${{ matrix.browser }}
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/node_modules/@playwright/test
+          SCREENSHOT_DIR: ${{ runner.temp }}
+        run: node test_report_browser.cjs "${{ runner.temp }}/tokenatlas-smoke.html"

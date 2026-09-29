@@ -28,6 +28,9 @@ def _write_jsonl(path, records):
 def run():
     with tempfile.TemporaryDirectory() as home:
         os.environ["HOME"] = home
+        os.environ["USERPROFILE"] = home  # Path.home() on Windows
+        os.environ.pop("HOMEDRIVE", None)
+        os.environ.pop("HOMEPATH", None)
         claude_dir = Path(home) / ".claude"
         claude_dir.mkdir()
 

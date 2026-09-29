@@ -203,6 +203,104 @@ class CodexAttributionTests(unittest.TestCase):
 
         self.assertEqual([row.session_id for row in records], ["a-session", "z-session"])
 
+    def test_call_ids_survive_windows_and_copied_rollouts(self):
+        rows = [
+            _meta(),
+            _context("2026-09-02T23:00:00Z", "gpt-a", "high", "/work/project"),
+            _tokens("2026-09-02T23:59:59Z", 41, {
+                "input_tokens": 10, "output_tokens": 2,
+            }, {"input_tokens": 10, "output_tokens": 2}),
+            _tokens("2026-09-03T00:00:01Z", 42, {
+                "input_tokens": 20, "output_tokens": 4,
+            }, {"input_tokens": 30, "output_tokens": 6}),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "rollout-original.jsonl"
+            copied = root / "renamed-copy.jsonl"
+            _write_rollout(first, rows)
+            copied.write_text(first.read_text())
+            narrow = why.collect_codex(root, self.start, self.end, paths=[first, copied])
+            all_time = why.collect_codex(
+                root,
+                datetime(2026, 9, 2, tzinfo=timezone.utc),
+                self.end,
+                paths=[first, copied],
+            )
+
+        self.assertEqual(len(narrow), 1)
+        self.assertEqual(narrow[0].call_id, "session-1:42:token_count")
+        self.assertEqual(narrow[0].call_id, all_time[1].call_id)
+
+    def test_missing_context_fields_reset_and_turn_metadata_is_derived(self):
+        rows = [
+            _meta(),
+            {"timestamp": "2026-09-03T08:59:00Z", "type": "event_msg",
+             "payload": {"type": "task_started", "turn_id": "task-1"}},
+            _context("2026-09-03T09:00:00Z", "gpt-a", "high", "/work/one"),
+            _tokens("2026-09-03T09:01:00Z", 1, {
+                "input_tokens": 10, "output_tokens": 2,
+            }),
+            {"timestamp": "2026-09-03T09:02:00Z", "type": "turn_context",
+             "payload": {"cwd": "/work/two"}},
+            _tokens("2026-09-03T09:03:00Z", 2, {
+                "input_tokens": 20, "output_tokens": 4,
+            }, {"input_tokens": 30, "output_tokens": 6}),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "rollout-context-reset.jsonl"
+            _write_rollout(path, rows)
+            records = why.collect_codex(root, self.start, self.end, paths=[path])
+
+        self.assertEqual(records[0].turn_id, "task-1")
+        self.assertEqual(records[0].turn_confidence, "derived")
+        self.assertEqual(records[0].model, "gpt-a")
+        self.assertEqual(records[1].model, "unknown")
+        self.assertEqual(records[1].effort, "unknown")
+
+    def test_idless_session_meta_uses_synthetic_identity_per_event(self):
+        def idless_rollout(timestamp, output):
+            return [
+                {"timestamp": "2026-09-03T08:00:00Z", "type": "session_meta",
+                 "payload": {"model_provider": "openai"}},
+                _tokens(timestamp, None, {"input_tokens": 1, "output_tokens": output},
+                        {"input_tokens": output, "output_tokens": output}),
+            ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "rollout-a.jsonl"
+            second = root / "rollout-b.jsonl"
+            _write_rollout(first, idless_rollout("2026-09-03T08:01:00Z", 2))
+            _write_rollout(second, idless_rollout("2026-09-03T08:02:00Z", 3))
+            records = why.collect_codex(root, self.start, self.end, paths=[first, second])
+
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(record.id_synthetic for record in records))
+        self.assertNotEqual(records[0].call_id, records[1].call_id)
+
+
+class CodexHostileMetadataTests(unittest.TestCase):
+    def test_non_string_metadata_is_never_persisted(self):
+        secret = {"prompt": "SECRET"}
+        meta = _meta(session_id=secret, source={"subagent": {"thread_spawn": {
+            "agent_nickname": secret, "parent_thread_id": secret}}}, originator=secret)
+        meta["payload"].update(model_provider=secret, cwd=secret)
+        counts = {"input_tokens": 10, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 2}
+        rows = [meta, {"timestamp": "2026-09-03T10:00:00Z", "type": "turn_context",
+                       "payload": {"model": secret, "effort": secret, "cwd": secret, "turn_id": secret}},
+                _tokens("2026-09-03T10:00:01Z", 1, counts, counts)]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-x.jsonl"
+            _write_rollout(path, rows)
+            records = why.collect_codex(Path(tmp), datetime(2026, 9, 3, tzinfo=timezone.utc),
+                                        datetime(2026, 9, 4, tzinfo=timezone.utc))
+        self.assertEqual(len(records), 1)
+        self.assertNotIn("SECRET", repr(records[0]))
+        record = records[0]
+        self.assertEqual((record.provider, record.model, record.effort, record.entrypoint),
+                         ("openai", "unknown", "unknown", "unknown"))
 
 if __name__ == "__main__":
     unittest.main()
