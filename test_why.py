@@ -387,6 +387,11 @@ class ClaudeMetadataReviewTests(unittest.TestCase):
         self.assertEqual(result[2].output, 90)
         self.assertIs(self.collect({"p/s.jsonl": [row("2026-09-03T12:00:00Z", 3, "")]})[0].output_final, False)
 
+    def test_missing_stop_reason_key_is_not_output_final(self):
+        row = _claude_row("2026-09-03T12:00:00Z", "req", {"input_tokens": 5, "output_tokens": 3})
+        row["message"].pop("stop_reason", None)
+        self.assertIs(self.collect({"p/s.jsonl": [row]})[0].output_final, False)
+
     def test_explicit_parent_session_field_wins_over_path(self):
         row = _claude_row("2026-09-03T12:00:00Z", "req", self.usage, agentId="a1", parentSessionId="explicit")
         record = self.collect({"proj/dir-session/subagents/agent-a1.jsonl": [row]})[0]

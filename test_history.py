@@ -56,6 +56,23 @@ class HistoryTests(unittest.TestCase):
                     self.assertFalse(h.records()[0]['complete'])
                     self.assertIn('missing_token_fields',h.records()[0]['warnings'])
 
+    def test_refresh_replaces_partial_claude_request_with_final_row(self):
+        source=self.root/'logs/a.jsonl';write_claude(source,output=3)
+        rows=[json.loads(x) for x in source.read_text().splitlines()]
+        rows[-1]['message']['stop_reason']=None
+        source.write_text(''.join(json.dumps(x)+'\n' for x in rows))
+        with History(self.db) as h:
+            h.refresh('claude',source.parent)
+            [r]=h.records()
+            self.assertIn('output_not_final',r['warnings']);self.assertFalse(r['complete'])
+            final=json.loads(json.dumps(rows[-1]));final['timestamp']='2026-09-03T10:00:05Z'
+            final['message']['stop_reason']='end_turn';final['message']['usage']['output_tokens']=90
+            with source.open('a') as f: f.write(json.dumps(final)+'\n')
+            h.refresh('claude',source.parent)
+            [r]=h.records()
+            self.assertTrue(r['output_final']);self.assertTrue(r['complete'])
+            self.assertNotIn('output_not_final',r['warnings']);self.assertEqual(r['tokens']['output'],90)
+
     def test_ownership_check_degrades_safely_without_posix_getuid(self):
         with patch.object(os,'getuid',None,create=True):
             self.assertTrue(_owned_by_current_user(type('Info',(),{'st_uid':123})()))

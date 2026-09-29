@@ -22,8 +22,8 @@ PUBLIC_NAMES = dict(
 CONSERVATIVE_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._: -]{0,120}')
 PUBLIC_MODEL = re.compile(
     r'(?:(?:openai|anthropic|google|qwen|z-ai|zai-org|mistralai|meta-llama|deepseek|moonshotai|x-ai)/)?'
-    r'(?:claude|gpt|o[0-9]|codex|gemini|gemma|mistral|devstral|qwen|llama|deepseek|glm|kimi|grok)'
-    r'[A-Za-z0-9._-]{0,100}', re.IGNORECASE)
+    r'(?:claude|gpt|o[0-9]|codex|gemini|gemma|mistral|codestral|ministral|magistral|pixtral|devstral|qwen|llama|deepseek|glm|kimi|grok)'
+    r'[A-Za-z0-9._-]{0,100}(?::free)?', re.IGNORECASE)
 
 
 def build_report(records, source_status, timezone_name='Europe/Stockholm', redact=True):

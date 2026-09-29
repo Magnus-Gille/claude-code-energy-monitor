@@ -611,7 +611,7 @@ open -a Safari private.html
 The default HTML pseudonymizes projects, sessions, turns and agents. `--private` retains short unique
 project labels and session references. Neither mode embeds prompts, tool text, source paths, raw usage
 objects or machine IDs. Exact timestamps and model metadata remain in shared reports: pseudonymization
-is not guaranteed anonymity. JSON from the original `--records` command remains a private diagnostic
+is not guaranteed anonymity. Shared reports show a model name verbatim only when it is in a public model family under a public provider; a custom endpoint that reuses a public provider id with a family-like model name is shown, so review a shared report before sending it. JSON from the original `--records` command remains a private diagnostic
 export and has different privacy semantics.
 
 The report works without a server, network, CDN or runtime model calls. Filters cover dates, harness,

@@ -25,7 +25,7 @@ All notable changes to this project are documented in this file. The project fol
 ### Security
 
 - History persistence uses an explicit allowlist and never stores prompts, assistant text, tool content, credentials, hostnames, or hardware identifiers. It generates a random local ID to scope synthetic identities to one database.
-- Shared reports show provider, origin, effort, and model names only from explicit public allowlists and pseudonymize everything else, including fine-tune ids and host names.
+- Shared reports show provider, origin, effort, and model names only from explicit public allowlists and pseudonymize everything else, including fine-tune ids and host names; a custom endpoint reusing a public provider id with a family-like model name is still shown, so review shared reports.
 - Metadata strings, including iteration `model` and `type`, must be bounded printable text or they are dropped.
 - Shared reports pseudonymize project, session, turn, observation, and agent identities by default.
 - Generated reports are standalone and make no network or model calls.

@@ -125,8 +125,10 @@ class ReportReviewTests(unittest.TestCase):
     def test_redacted_models_use_public_family_allowlist(self):
         visible = ('claude-opus-5-5', 'claude-haiku-4-5-20251001', 'gpt-5.6-luna', 'gpt-6-astra',
                    'codex-auto-review', 'gpt-5.3-codex-spark', 'openai/gpt-oss-120b',
-                   'qwen/qwen3-coder', 'zai-org/GLM-4.7')
+                   'qwen/qwen3-coder', 'zai-org/GLM-4.7', 'mistralai/codestral-22b',
+                   'qwen/qwen3-coder:free', 'codestral-latest')
         hidden = ('ft:gpt-4o-2024-08-06:acme-corp::abc123', 'magnus-macbook', 'stealth/ox-alpha',
+                  'gpt-4o:ft-acme',
                   'big-pickle', '<synthetic>')
         rows = [observation(f'v{i}', provider='openai', model=m) for i, m in enumerate(visible)]
         rows += [observation(f'h{i}', provider='openai', model=m) for i, m in enumerate(hidden)]
