@@ -14,7 +14,11 @@ const playwright = require(process.env.PLAYWRIGHT_MODULE || '/usr/local/lib/node
     page.on('pageerror',e=>errors.push(e.message));
     page.on('request',r=>{if(/^https?:/.test(r.url()))requests.push(r.url())});
     await page.setContent(fs.readFileSync(process.argv[2],'utf8'),{waitUntil:'load'});
-    await page.waitForFunction(()=>window.reportReady);
+    // The page forbids eval (CSP), which waitForFunction's polling needs in WebKit; poll via evaluate instead.
+    for(const deadline=Date.now()+60000;!(await page.evaluate(()=>window.reportReady===true));){
+      if(Date.now()>deadline)throw new Error('report did not become ready: '+errors.join('; '));
+      await page.waitForTimeout(50);
+    }
     const check=await page.evaluate(()=>{
       const d={records:window.UsageReport.all};
       const total=d.records.filter(r=>!r.id_synthetic).reduce((n,r)=>n+['fresh_input','cache_read','cache_write','output'].reduce((s,k)=>s+(r.tokens[k]??0),0),0);

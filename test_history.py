@@ -729,7 +729,8 @@ class HistoryStorageTests(unittest.TestCase):
             self.assertEqual(len(h.records()), 3)
         with History(legacy) as h:
             self.assertEqual(len(h.records()), 3)
-        self.assertLessEqual(stat.S_IMODE(legacy.stat().st_mode), 0o600)
+        if os.name != 'nt':  # Windows has no POSIX permission bits
+            self.assertLessEqual(stat.S_IMODE(legacy.stat().st_mode), 0o600)
         self.assertGreater(size_before, 0)
 
     def test_failed_migration_leaves_v1_untouched(self):
