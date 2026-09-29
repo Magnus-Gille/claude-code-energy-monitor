@@ -398,8 +398,10 @@ def main(argv=None):
         ids = build_home(home, args.seed)
         db, outc = state / 'tokenatlas' / 'history.sqlite3', state / 'tokenatlas' / 'outcomes.jsonl'
         outcomes(outc, ids)
-        env = {'PATH': os.environ.get('PATH', ''), 'HOME': str(home), 'XDG_STATE_HOME': str(state), 'TZ': 'Europe/Stockholm',
-               'PYTHONDONTWRITEBYTECODE': '1'}
+        # USERPROFILE is what Path.home() reads on Windows; SYSTEMROOT is needed there by Python itself.
+        env = {'PATH': os.environ.get('PATH', ''), 'HOME': str(home), 'USERPROFILE': str(home),
+               'XDG_STATE_HOME': str(state), 'TZ': 'Europe/Stockholm', 'PYTHONDONTWRITEBYTECODE': '1',
+               **{k: os.environ[k] for k in ('SYSTEMROOT',) if k in os.environ}}
         for harness in ('claude', 'codex', 'pi', 'opencode'):
             cli(env, db, 'refresh', '--harness', harness)
         overhead_text = cli(env, db, 'overhead', '--refresh')

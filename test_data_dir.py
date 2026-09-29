@@ -3,7 +3,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -44,7 +44,7 @@ class DataDirMigrationTests(unittest.TestCase):
         self.assertEqual(err.strip(), f'moved history from {self.old} to {self.new}')
         for name in ('history.sqlite3', 'outcomes.jsonl', 'remote'):
             self.assertTrue((self.new / name).exists(), name)
-        with sqlite3.connect(self.new / 'history.sqlite3') as conn:
+        with closing(sqlite3.connect(self.new / 'history.sqlite3')) as conn:  # `with conn` alone does not close it
             conn.execute('select count(*) from sqlite_master').fetchone()
 
     def test_existing_new_directory_wins_with_warning(self):
