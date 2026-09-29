@@ -16,7 +16,7 @@ const playwright = require(process.env.PLAYWRIGHT_MODULE || '/usr/local/lib/node
     await page.setContent(fs.readFileSync(process.argv[2],'utf8'),{waitUntil:'load'});
     await page.waitForFunction(()=>window.reportReady);
     const check=await page.evaluate(()=>{
-      const d=JSON.parse(document.getElementById('report-data').textContent);
+      const d={records:window.UsageReport.all};
       const total=d.records.filter(r=>!r.id_synthetic).reduce((n,r)=>n+['fresh_input','cache_read','cache_write','output'].reduce((s,k)=>s+(r.tokens[k]??0),0),0);
       const a=window.UsageReport.aggregate(d.records);
        const sample=(dimension,name,tokens,extra={})=>({session:'fixed-session',harness:'fixed-harness',model:'fixed-model',project_id:'fixed-project',id_synthetic:false,tokens,[dimension]:name,...extra});
@@ -55,6 +55,9 @@ const playwright = require(process.env.PLAYWRIGHT_MODULE || '/usr/local/lib/node
     await page.setViewportSize({width:390,height:844});
      await page.screenshot({path:path.join(screenshotDir,'energy-report-mobile.png'),fullPage:false});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'mobile overflow');
+    const texts=await page.evaluate(()=>['total-label','total','total-note','cache','cache-note','observations','sessions-count','output','reasoning','selection','quality'].map(id=>[id,document.getElementById(id).textContent]));
+    const T=Object.fromEntries(texts);assert.match(T['total-label'],/^Tokens totalt/);assert.equal(T['total-note'],'Input + cache (läst och skrivet) + output');assert.match(T.cache,/^(Okänd|\d+,\d %)$/);assert.match(T['sessions-count'],/^i .* sessioner$/);assert.match(T.selection,/ anrop · /);assert.ok(/^varav reasoning |^Reasoning ingår; andel okänd$/.test(T.reasoning));
+    assert.equal(await page.evaluate(()=>[UsageReport.short(43812345678),UsageReport.short(136500000),UsageReport.short(12345)].join('|')),'43,8 mdr|136,5 milj.|'+(12345).toLocaleString('sv-SE'));
     assert.deepEqual(errors,[]);assert.deepEqual(requests,[]);
     console.log(JSON.stringify({pass:true,browser:browserName,records:check.records,known_tokens:check.actual,network_requests:requests.length,console_errors:errors.length,checks:'totals, cache comparisons, bucket conservation, filters, empty state, zoom, drilldown, export, mobile overflow'}));
   } finally {await browser.close()}

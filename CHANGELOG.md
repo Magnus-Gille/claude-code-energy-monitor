@@ -21,6 +21,8 @@ All notable changes to this project are documented in this file. The project fol
 - Claude subagent transcripts are linked to their parent session from the transcript path.
 - Claude output is flagged as a lower bound (`output_not_final`) when a request's transcript lacks the final usage row; the collector version is bumped so existing files are re-read.
 - Hour and minute buckets are ordered by instant across DST changes.
+- Tokenatlas embeds a gzip-compressed columnar payload decoded offline in the browser: a 379,401-observation history renders to 10.5 MB (private) or 7.2 MB (shared) instead of 270 MB, and loads in about 2 s.
+- Summary cards use plain terms with a one-line explanation (Tokens totalt, Cache-träffar, Anrop, Output-tokens) and Swedish number abbreviations (mdr, milj.).
 
 ### Security
 
