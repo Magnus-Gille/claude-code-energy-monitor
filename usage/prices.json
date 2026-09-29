@@ -1,0 +1,647 @@
+{
+ "schema": 1,
+ "retrieved_on": "2026-09-29",
+ "unit": "per_million_tokens",
+ "provider_aliases": {
+  "openai-codex": "openai"
+ },
+ "local_providers": [
+  "m5",
+  "ollama",
+  "inference-gille"
+ ],
+ "models": [
+  {
+   "provider": "anthropic",
+   "model": "claude-opus-5-5",
+   "aliases": [],
+   "currency": "USD",
+   "input": 4.0,
+   "cache_write_5m": 5.0,
+   "cache_write_1h": 8.0,
+   "cache_write": null,
+   "cache_read": 0.2,
+   "output": 20.0,
+   "long_context": null,
+   "modifiers": {
+    "speed=fast": {
+     "input": 8.0,
+     "cache_write_5m": 10.0,
+     "cache_write_1h": 16.0,
+     "cache_read": 0.4,
+     "output": 40.0
+    },
+    "inference_geo=us": {
+     "multiplier": 1.1
+    }
+   },
+   "free": false,
+   "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "retrieved_on": "2026-09-29",
+   "notes": "Fast-mode cache prices derived: 5m write 1.25x, 1h write 2x, read at the model's cache-read multiplier, all applied on top of fast input price (docs: caching multipliers stack on fast mode). Cache read is 0.05x base input. 1M context at standard pricing (no long-context tier)."
+  },
+  {
+   "provider": "anthropic",
+   "model": "claude-sonnet-5",
+   "aliases": [],
+   "currency": "USD",
+   "input": 2.0,
+   "cache_write_5m": 2.5,
+   "cache_write_1h": 4.0,
+   "cache_write": null,
+   "cache_read": 0.2,
+   "output": 10.0,
+   "long_context": null,
+   "modifiers": {
+    "inference_geo=us": {
+     "multiplier": 1.1
+    }
+   },
+   "free": false,
+   "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "retrieved_on": "2026-09-29",
+   "notes": "$2/$10 is now standard (footnote 3: introductory pricing became standard; planned Sep 1 2026 increase to $3/$15 will not occur). Fast mode not listed."
+  },
+  {
+   "provider": "anthropic",
+   "model": "claude-fable-5-1",
+   "aliases": [],
+   "currency": "USD",
+   "input": 10.0,
+   "cache_write_5m": 12.5,
+   "cache_write_1h": 20.0,
+   "cache_write": null,
+   "cache_read": 0.25,
+   "output": 50.0,
+   "long_context": null,
+   "modifiers": {
+    "inference_geo=us": {
+     "multiplier": 1.1
+    }
+   },
+   "free": false,
+   "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "retrieved_on": "2026-09-29",
+   "notes": "Cache read is 0.025x base input. Fast mode not listed."
+  },
+  {
+   "provider": "anthropic",
+   "model": "claude-opus-5",
+   "aliases": [],
+   "currency": "USD",
+   "input": 5.0,
+   "cache_write_5m": 6.25,
+   "cache_write_1h": 10.0,
+   "cache_write": null,
+   "cache_read": 0.5,
+   "output": 25.0,
+   "long_context": null,
+   "modifiers": {
+    "speed=fast": {
+     "input": 10.0,
+     "cache_write_5m": 12.5,
+     "cache_write_1h": 20.0,
+     "cache_read": 1.0,
+     "output": 50.0
+    },
+    "inference_geo=us": {
+     "multiplier": 1.1
+    }
+   },
+   "free": false,
+   "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "retrieved_on": "2026-09-29",
+   "notes": "Fast-mode cache prices derived: 5m write 1.25x, 1h write 2x, read at the model's cache-read multiplier, all applied on top of fast input price (docs: caching multipliers stack on fast mode). "
+  },
+  {
+   "provider": "anthropic",
+   "model": "claude-sonnet-5-5",
+   "aliases": [],
+   "currency": "USD",
+   "input": 2.0,
+   "cache_write_5m": 2.5,
+   "cache_write_1h": 4.0,
+   "cache_write": null,
+   "cache_read": 0.2,
+   "output": 10.0,
+   "long_context": null,
+   "modifiers": {
+    "inference_geo=us": {
+     "multiplier": 1.1
+    }
+   },
+   "free": false,
+   "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "retrieved_on": "2026-09-29",
+   "notes": "Fast mode not listed."
+  },
+  {
+   "provider": "anthropic",
+   "model": "claude-opus-4-7",
+   "aliases": [],
+   "currency": "USD",
+   "input": 5.0,
+   "cache_write_5m": 6.25,
+   "cache_write_1h": 10.0,
+   "cache_write": null,
+   "cache_read": 0.5,
+   "output": 25.0,
+   "long_context": null,
+   "modifiers": {
+    "inference_geo=us": {
+     "multiplier": 1.1
+    }
+   },
+   "free": false,
+   "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "retrieved_on": "2026-09-29",
+   "notes": "Fast mode not available on Opus 4.7 (requests with speed=fast return an error). Uses newer tokenizer."
+  },
+  {
+   "provider": "anthropic",
+   "model": "claude-haiku-4-5",
+   "aliases": [
+    "claude-haiku-4-5-20251001"
+   ],
+   "currency": "USD",
+   "input": 1.0,
+   "cache_write_5m": 1.25,
+   "cache_write_1h": 2.0,
+   "cache_write": null,
+   "cache_read": 0.1,
+   "output": 5.0,
+   "long_context": null,
+   "modifiers": {},
+   "free": false,
+   "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "retrieved_on": "2026-09-29",
+   "notes": "Pricing page row 'Claude Haiku 4.5'; the dated snapshot id claude-haiku-4-5-20251001 mapped by name (snapshot id itself not on the pricing page). inference_geo is documented for Claude 4.6 and later models only; earlier models do not support it, so no modifier."
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-6-astra",
+   "aliases": [],
+   "currency": "USD",
+   "input": 10,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": 12.5,
+   "cache_read": 1,
+   "output": 50,
+   "long_context": {
+    "above_input_tokens": 272000,
+    "input": 20,
+    "cache_read": 2,
+    "cache_write": 25,
+    "output": 75
+   },
+   "modifiers": {
+    "service_tier=fast": {
+     "input": 20,
+     "cache_read": 2,
+     "cache_write": 25,
+     "output": 100
+    },
+    "service_tier=flex": {
+     "input": 5,
+     "cache_read": 0.5,
+     "cache_write": 6.25,
+     "output": 25
+    }
+   },
+   "free": false,
+   "source_url": "https://developers.openai.com/api/docs/models/gpt-6-astra",
+   "retrieved_on": "2026-09-29",
+   "notes": "Long context (>272K input tokens per request) from the pricing page rendered table / model page rule 'more than 272K input tokens are priced at 2x input and cache rates and 1.5x output for the full request'. Fast mode 2x; Flex = Batch = 50% of Standard."
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-6-sol",
+   "aliases": [],
+   "currency": "USD",
+   "input": 2,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": 2.5,
+   "cache_read": 0.2,
+   "output": 10,
+   "long_context": {
+    "above_input_tokens": 272000,
+    "input": 4,
+    "cache_read": 0.4,
+    "cache_write": 5,
+    "output": 15
+   },
+   "modifiers": {
+    "service_tier=fast": {
+     "input": 4,
+     "cache_read": 0.4,
+     "cache_write": 5,
+     "output": 20
+    },
+    "service_tier=flex": {
+     "input": 1,
+     "cache_read": 0.1,
+     "cache_write": 1.25,
+     "output": 5
+    }
+   },
+   "free": false,
+   "source_url": "https://developers.openai.com/api/docs/models/gpt-6-sol",
+   "retrieved_on": "2026-09-29",
+   "notes": "Long context (>272K input tokens per request) from the pricing page rendered table / model page rule 'more than 272K input tokens are priced at 2x input and cache rates and 1.5x output for the full request'. Fast mode 2x; Flex = Batch = 50% of Standard."
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-6-luna",
+   "aliases": [],
+   "currency": "USD",
+   "input": 0.1,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": 0.125,
+   "cache_read": 0.01,
+   "output": 0.5,
+   "long_context": {
+    "above_input_tokens": 272000,
+    "input": 0.2,
+    "cache_read": 0.02,
+    "cache_write": 0.25,
+    "output": 0.75
+   },
+   "modifiers": {
+    "service_tier=fast": {
+     "input": 0.2,
+     "cache_read": 0.02,
+     "cache_write": 0.25,
+     "output": 1
+    },
+    "service_tier=flex": {
+     "input": 0.05,
+     "cache_read": 0.005,
+     "cache_write": 0.0625,
+     "output": 0.25
+    }
+   },
+   "free": false,
+   "source_url": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+   "retrieved_on": "2026-09-29",
+   "notes": "Long context (>272K input tokens per request) from the pricing page rendered table / model page rule 'more than 272K input tokens are priced at 2x input and cache rates and 1.5x output for the full request'. Fast mode 2x; Flex = Batch = 50% of Standard."
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-5.6-sol",
+   "aliases": [],
+   "currency": "USD",
+   "input": 4,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": 5,
+   "cache_read": 0.4,
+   "output": 20,
+   "long_context": {
+    "above_input_tokens": 272000,
+    "input": 8,
+    "cache_read": 0.8,
+    "cache_write": 10,
+    "output": 30
+   },
+   "modifiers": {
+    "service_tier=fast": {
+     "input": 8,
+     "cache_read": 0.8,
+     "cache_write": 10,
+     "output": 40
+    },
+    "service_tier=flex": {
+     "input": 2,
+     "cache_read": 0.2,
+     "cache_write": 2.5,
+     "output": 10
+    }
+   },
+   "free": false,
+   "source_url": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+   "retrieved_on": "2026-09-29",
+   "notes": "Long-context rule (model page): 'Prompts with >272K input tokens are priced at 2x input and 1.5x output for the full request.' Cache writes 1.25x uncached input. Long-context row is quoted verbatim from the Cyber models table on the pricing page. Promotional pricing 'available at least through November 21, 2026' (may rise afterwards)."
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-5.6-terra",
+   "aliases": [],
+   "currency": "USD",
+   "input": 2,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": 2.5,
+   "cache_read": 0.2,
+   "output": 12,
+   "long_context": {
+    "above_input_tokens": 272000,
+    "input": 4,
+    "cache_read": 0.4,
+    "cache_write": 5,
+    "output": 18
+   },
+   "modifiers": {
+    "service_tier=fast": {
+     "input": 4,
+     "cache_read": 0.4,
+     "cache_write": 5,
+     "output": 24
+    },
+    "service_tier=flex": {
+     "input": 1,
+     "cache_read": 0.1,
+     "cache_write": 1.25,
+     "output": 6
+    }
+   },
+   "free": false,
+   "source_url": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+   "retrieved_on": "2026-09-29",
+   "notes": "Long-context rule (model page): 'Prompts with >272K input tokens are priced at 2x input and 1.5x output for the full request.' Cache writes 1.25x uncached input. Long-context values DERIVED from the stated 2x input / 1.5x output rule (cached input and cache write 2x, by analogy with the explicit gpt-5.6-sol long row); the pricing page does not print a long-context row for this model. Long-context values follow the published gpt-5.6 rule (2x input, 1.5x output; cache writes 1.25x input), with cached input doubled as in the printed gpt-5.6-sol long-context row."
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-5.6-luna",
+   "aliases": [],
+   "currency": "USD",
+   "input": 0.2,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": 0.25,
+   "cache_read": 0.02,
+   "output": 1.2,
+   "long_context": {
+    "above_input_tokens": 272000,
+    "input": 0.4,
+    "cache_read": 0.04,
+    "cache_write": 0.5,
+    "output": 1.8
+   },
+   "modifiers": {
+    "service_tier=fast": {
+     "input": 0.4,
+     "cache_read": 0.04,
+     "cache_write": 0.5,
+     "output": 2.4
+    },
+    "service_tier=flex": {
+     "input": 0.1,
+     "cache_read": 0.01,
+     "cache_write": 0.125,
+     "output": 0.6
+    }
+   },
+   "free": false,
+   "source_url": "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
+   "retrieved_on": "2026-09-29",
+   "notes": "Long-context rule (model page): 'Prompts with >272K input tokens are priced at 2x input and 1.5x output for the full request.' Cache writes 1.25x uncached input. Long-context values DERIVED from the stated 2x input / 1.5x output rule (cache rates 2x by analogy with gpt-5.6-sol); not printed on the pricing page. Long-context values follow the published gpt-5.6 rule (2x input, 1.5x output; cache writes 1.25x input), with cached input doubled as in the printed gpt-5.6-sol long-context row."
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-5.5",
+   "aliases": [],
+   "currency": "USD",
+   "input": 5,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": null,
+   "cache_read": 0.5,
+   "output": 30,
+   "long_context": {
+    "above_input_tokens": 272000,
+    "input": 10,
+    "cache_read": null,
+    "cache_write": null,
+    "output": 45
+   },
+   "modifiers": {
+    "service_tier=fast": {
+     "input": 12.5,
+     "cache_read": 1.25,
+     "cache_write": null,
+     "output": 75
+    },
+    "service_tier=flex": {
+     "input": 2.5,
+     "cache_read": 0.25,
+     "cache_write": null,
+     "output": 15
+    }
+   },
+   "free": false,
+   "source_url": "https://developers.openai.com/api/docs/models/gpt-5.5",
+   "retrieved_on": "2026-09-29",
+   "notes": "No cache-write price listed ('-'). Long context (model page): 'prompts with >272K input tokens are priced at 2x input and 1.5x output for the full session for standard, batch, and flex.' Long-context cached-input value DERIVED as 2x (the rule text names only input and output); verify. Fast mode price on page: 12.5/1.25/75 (2.5x standard). Long-context cached input is not published (the rule names input and output only), so it is left unknown."
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-5.4",
+   "aliases": [],
+   "currency": "USD",
+   "input": 2.5,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": null,
+   "cache_read": 0.25,
+   "output": 15,
+   "long_context": {
+    "above_input_tokens": 272000,
+    "input": 5,
+    "cache_read": null,
+    "cache_write": null,
+    "output": 22.5
+   },
+   "modifiers": {
+    "service_tier=fast": {
+     "input": 5,
+     "cache_read": 0.5,
+     "cache_write": null,
+     "output": 30
+    },
+    "service_tier=flex": {
+     "input": 1.25,
+     "cache_read": 0.13,
+     "cache_write": null,
+     "output": 7.5
+    }
+   },
+   "free": false,
+   "source_url": "https://developers.openai.com/api/docs/models/gpt-5.4",
+   "retrieved_on": "2026-09-29",
+   "notes": "No cache-write price listed ('-'). Long context (model page): 'prompts with >272K input tokens are priced at 2x input and 1.5x output for the full session for standard, batch, and flex.' Long-context cached-input value DERIVED as 2x (the rule text names only input and output); verify. Fast mode price on page: 5/0.5/30 (2x standard). Flex cached input listed as $0.13 on the page (rounded from 0.125). Long-context cached input is not published (the rule names input and output only), so it is left unknown."
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-5.3-codex",
+   "aliases": [],
+   "currency": "USD",
+   "input": 1.75,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": null,
+   "cache_read": 0.175,
+   "output": 14,
+   "long_context": null,
+   "modifiers": {
+    "service_tier=fast": {
+     "input": 3.5,
+     "cache_read": 0.35,
+     "cache_write": null,
+     "output": 28
+    }
+   },
+   "free": false,
+   "source_url": "https://developers.openai.com/api/docs/models/gpt-5.3-codex",
+   "retrieved_on": "2026-09-29",
+   "notes": "From 'Specialized models > Codex' table (Standard and Fast mode tabs) and model page. No long-context or cache-write price listed."
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-5.1-codex-max",
+   "aliases": [],
+   "currency": "USD",
+   "input": 1.25,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": null,
+   "cache_read": 0.125,
+   "output": 10,
+   "long_context": null,
+   "modifiers": {},
+   "free": false,
+   "source_url": "https://developers.openai.com/api/docs/models/gpt-5.1-codex-max",
+   "retrieved_on": "2026-09-29",
+   "notes": "Model page 'Text tokens per 1M': Input $1.25, Cached input $0.125, Output $10.00. Not listed on the main pricing page tables. No long-context, fast or flex tier documented."
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-5-codex",
+   "aliases": [],
+   "currency": "USD",
+   "input": 1.25,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": null,
+   "cache_read": 0.125,
+   "output": 10,
+   "long_context": null,
+   "modifiers": {},
+   "free": false,
+   "source_url": "https://developers.openai.com/api/docs/models/gpt-5-codex",
+   "retrieved_on": "2026-09-29",
+   "notes": "Model page 'Text tokens per 1M': Input $1.25, Cached input $0.125, Output $10.00. Not listed on main pricing page tables. No long-context, fast or flex tier documented."
+  },
+  {
+   "provider": "openrouter",
+   "model": "qwen/qwen3-coder",
+   "aliases": [],
+   "currency": "USD",
+   "input": 0.3,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": null,
+   "cache_read": 0.1,
+   "output": 1.0,
+   "long_context": null,
+   "modifiers": {},
+   "free": false,
+   "source_url": "https://openrouter.ai/api/v1/models",
+   "retrieved_on": "2026-09-29",
+   "notes": "From OpenRouter's official models API pricing object (USD per token x 1e6): prompt \"0.0000003\", completion \"0.000001\", input_cache_read \"0.0000001\". Model page https://openrouter.ai/qwen/qwen3-coder is client-rendered and was not text-extractable."
+  },
+  {
+   "provider": "openrouter",
+   "model": "openai/gpt-oss-120b",
+   "aliases": [],
+   "currency": "USD",
+   "input": 0.037,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": null,
+   "cache_read": null,
+   "output": 0.17,
+   "long_context": null,
+   "modifiers": {},
+   "free": false,
+   "source_url": "https://openrouter.ai/api/v1/models",
+   "retrieved_on": "2026-09-29",
+   "notes": "From OpenRouter's official models API pricing object (USD per token x 1e6): prompt \"0.000000037\", completion \"0.00000017\"; no cache read field. Model page https://openrouter.ai/openai/gpt-oss-120b is client-rendered and was not text-extractable."
+  },
+  {
+   "provider": "openrouter",
+   "model": "z-ai/glm-5.3",
+   "aliases": [],
+   "currency": "USD",
+   "input": 1.4,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": null,
+   "cache_read": 0.26,
+   "output": 4.4,
+   "long_context": null,
+   "modifiers": {},
+   "free": false,
+   "source_url": "https://openrouter.ai/api/v1/models",
+   "retrieved_on": "2026-09-29",
+   "notes": "From OpenRouter's official models API pricing object (USD per token x 1e6): prompt \"0.0000014\", completion \"0.0000044\", input_cache_read \"0.00000026\". Model page https://openrouter.ai/z-ai/glm-5.3 is client-rendered and was not text-extractable."
+  },
+  {
+   "provider": "opencode",
+   "model": "muse-spark-1.3-contributor-free",
+   "aliases": [],
+   "currency": "USD",
+   "input": 0.0,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": null,
+   "cache_read": 0.0,
+   "output": 0.0,
+   "long_context": null,
+   "modifiers": {},
+   "free": true,
+   "source_url": "https://opencode.ai/docs/zen/",
+   "retrieved_on": "2026-09-29",
+   "notes": "Zen pricing table row: Input Free, Output Free, Cached Read Free, Cached Write '-'. Terms: 'Muse Spark 1.3 Contributor Free is available on OpenCode for a limited time. The team is using this time to collect feedback and improve the model.' and 'Heavily discounted token pricing in exchange for permission to use your prompts and completions to train future Meta models.'"
+  },
+  {
+   "provider": "opencode",
+   "model": "space-bunny-free",
+   "aliases": [],
+   "currency": "USD",
+   "input": 0.0,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": null,
+   "cache_read": 0.0,
+   "output": 0.0,
+   "long_context": null,
+   "modifiers": {},
+   "free": true,
+   "source_url": "https://opencode.ai/docs/zen/",
+   "retrieved_on": "2026-09-29",
+   "notes": "Zen pricing table row: Input Free, Output Free, Cached Read Free, Cached Write '-'. Terms: 'Space Bunny Free is a stealth model that's free on OpenCode for a limited time. Its provider follows a zero-retention policy and does not use your data for model training.'"
+  },
+  {
+   "provider": "opencode",
+   "model": "big-pickle",
+   "aliases": [],
+   "currency": "USD",
+   "input": 0.0,
+   "cache_write_5m": null,
+   "cache_write_1h": null,
+   "cache_write": null,
+   "cache_read": 0.0,
+   "output": 0.0,
+   "long_context": null,
+   "modifiers": {},
+   "free": true,
+   "source_url": "https://opencode.ai/docs/zen/",
+   "retrieved_on": "2026-09-29",
+   "notes": "Zen pricing table row: Input Free, Output Free, Cached Read Free, Cached Write '-'. Terms: 'Big Pickle is a stealth model that's free on OpenCode for a limited time.' and 'Big Pickle: During its free period, collected data may be used to improve the model.' Free for a limited time only; no end date given."
+  }
+ ],
+ "verified_by": "conductor, 2026-09-29: Anthropic and OpenAI rows checked against the pricing pages; OpenRouter via its /api/v1/models; OpenCode Zen docs; gpt-5.1-codex-max model page."
+}

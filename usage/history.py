@@ -19,7 +19,7 @@ import why
 
 OBSERVATION_VERSION = 1  # the 'v' field inside observation dicts
 SCHEMA_VERSION = 2  # PRAGMA user_version of the SQLite layout
-COLLECTOR_VERSION = 4
+COLLECTOR_VERSION = 5
 FIELDS = ('fresh_input', 'cache_read', 'cache_write', 'output')
 ALL_FIELDS = FIELDS + ('reasoning',)
 
@@ -143,6 +143,9 @@ def normalize(record, machine):
     model, effort = text(record.model, default='unknown'), text(record.effort, default='unknown')
     version = getattr(record, 'harness_version', None)
     version = str(version) if isinstance(version, int) and not isinstance(version, bool) else text(version, limit=64)
+    tariff = getattr(record, 'tariff', None)
+    tariff = {k: v for k in ('speed', 'service_tier', 'inference_geo')
+              if (v := text((tariff or {}).get(k), limit=64)) is not None} or None
     confidence = {k: 'absent' if v is None else 'observed' for k, v in tokens.items()}
     if 'output_not_final' in warnings:
         for k in ('output', 'reasoning'):
@@ -166,7 +169,7 @@ def normalize(record, machine):
         'project_id': project_id, 'project_label': record.project,
         'cwd': text(getattr(record, 'cwd', None), limit=4096),
         'turn_id': text(getattr(record, 'turn_id', None)),
-        'turn_confidence': getattr(record, 'turn_confidence', 'absent'),
+        'turn_confidence': getattr(record, 'turn_confidence', 'absent'), 'tariff': tariff,
         'tokens': tokens, 'raw_usage': raw, 'duration_ms': None,
         'accounting_basis': 'request_top_level', 'billing_verified': False,
         'warnings': sorted(set(warnings)), 'complete': not warnings,
@@ -196,6 +199,7 @@ def merge_observations(a, b):
         # The earliest copy owns a request; on equal time keep the stored one (a).
         owner = b if b['ts'] < a['ts'] else a
         result['session'], result['parent_session'] = owner['session'], owner['parent_session']
+    result['tariff'] = {**(other.get('tariff') or {}), **(winner.get('tariff') or {})} or None
     flags = [x.get('output_final') for x in (a, b)]
     output_final = True if True in flags else False if False in flags else None
     raw = merge_usage(a['raw_usage'], b['raw_usage'])
@@ -207,7 +211,7 @@ def merge_observations(a, b):
         project=result['project_label'], project_id=result['project_id'], cwd=result['cwd'],
         entrypoint=result['origin'], thread_kind=result['thread_kind'], agent=result['agent'],
         parent_session_id=result['parent_session'], turn_id=result['turn_id'],
-        turn_confidence=result['turn_confidence'], harness_version=result['harness_version'],
+        turn_confidence=result['turn_confidence'], tariff=result.get('tariff'), harness_version=result['harness_version'],
         session_started_at=(datetime.fromisoformat(result['session_started_at'])
                             if result.get('session_started_at') else None),
         raw_usage=raw, id_synthetic=result['id_synthetic'], output_final=output_final)
@@ -221,8 +225,8 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MICRO = timedelta(microseconds=1)
 _REFS = ('id', 'machine', 'harness', 'provider', 'harness_version', 'collector', 'source_type', 'session',
          'parent_session', 'session_started_at', 'thread_kind', 'agent', 'origin', 'model', 'effort',
-         'project_id', 'project_label', 'cwd', 'turn_id', 'turn_confidence', 'warnings', 'confidence')
-_JSON_REFS = ('warnings', 'confidence')
+         'project_id', 'project_label', 'cwd', 'turn_id', 'turn_confidence', 'tariff', 'warnings', 'confidence')
+_JSON_REFS = ('tariff', 'warnings', 'confidence')
 _FLAGS = ('id_synthetic', 'complete', 'output_final')
 _TOKENS = ALL_FIELDS
 _CONSTANTS = (('v', OBSERVATION_VERSION), ('kind', 'usage_observation'), ('duration_ms', None),
@@ -319,7 +323,7 @@ def _encode(item, key=None):
     for name in _REFS:
         value = item.get(name)
         if name in _JSON_REFS:
-            value = _compact(value)
+            value = None if name == 'tariff' and value is None else _compact(value)
         elif value is not None and type(value) is not str:
             raise ValueError(f'observation field {name} must be text or null')
         refs.append(value)
@@ -347,8 +351,9 @@ def _decode(row):
     packed, extra = rest[n + len(_TOKENS):]
     item = {'v': OBSERVATION_VERSION, 'kind': 'usage_observation', 'id': refs['id'],
             'id_synthetic': bool(flags['id_synthetic']), 'ts': _ts_text(ts_us)}
-    for name in _REFS[1:-2]:
+    for name in _REFS[1:-3]:
         item[name] = refs[name]
+    item['tariff'] = None if refs['tariff'] is None else json.loads(refs['tariff'])
     item.update(tokens=tokens, raw_usage=_unpack_raw(packed, extra), duration_ms=None,
                 accounting_basis='request_top_level', billing_verified=False,
                 warnings=json.loads(refs['warnings']), complete=bool(flags['complete']),
@@ -399,6 +404,8 @@ class History:
                 'CREATE TABLE IF NOT EXISTS imports (harness TEXT, root TEXT, data TEXT, PRIMARY KEY(harness,root))',
             ):
                 c.execute(sql)
+            if not any(r['name'] == 'tariff' for r in c.execute('PRAGMA table_info(observations)')):
+                c.execute('ALTER TABLE observations ADD COLUMN tariff INTEGER')  # additive within schema 2
             if migrate:
                 self._migrate_v1(c)
             c.execute('INSERT OR IGNORE INTO meta VALUES (?,?)', ('machine', 'm-' + uuid.uuid4().hex))

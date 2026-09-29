@@ -56,6 +56,7 @@ class AttributionRecord:
     raw_usage: dict = field(default_factory=dict)
     id_synthetic: bool = False
     output_final: bool | None = None
+    tariff: dict | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -324,6 +325,21 @@ def _meta_text(*values: object, default: str | None = None, limit: int = 256) ->
     return default
 
 
+def _claude_tariff(usage: object) -> dict | None:
+    """Pricing dimensions Claude reports per request; only bounded printable strings survive."""
+    usage = usage if isinstance(usage, dict) else {}
+    found = {key: text for key in ("speed", "service_tier", "inference_geo")
+             if (text := _meta_text(usage.get(key), limit=64)) is not None}
+    return found or None
+
+
+def _merge_tariff(existing: dict | None, incoming: dict | None, latest: bool) -> dict | None:
+    """Per key: the latest valid value wins, a sparse row never erases an earlier key."""
+    if not incoming:
+        return existing
+    return {**(existing or {}), **incoming} if latest else {**incoming, **(existing or {})}
+
+
 def _explicit_turn_id(row: dict, message: dict) -> str | None:
     return _first_text(
         row,
@@ -474,6 +490,8 @@ def collect_claude(
             }.items():
                 if value is not None and (latest or existing.get(name) is None):
                     existing[name] = value
+            if (tariff := _claude_tariff(usage)) is not None:
+                existing["tariff"] = _merge_tariff(existing.get("tariff"), tariff, latest)
             if latest or "id_synthetic" not in existing:
                 existing["id_synthetic"] = id_synthetic
 
@@ -492,7 +510,7 @@ def collect_claude(
         for name, default in (
             ("model", "unknown"), ("effort", "unknown"), ("entrypoint", "unknown"),
             ("agent", "main"), ("thread_kind", "main"), ("cwd", None), ("turn_id", None),
-            ("turn_confidence", "absent"), ("harness_version", None),
+            ("turn_confidence", "absent"), ("harness_version", None), ("tariff", None),
             ("project", fallback_project), ("project_id", fallback_id),
         ):
             values.setdefault(name, default)

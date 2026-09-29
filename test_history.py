@@ -474,7 +474,7 @@ class HistoryReviewTests(unittest.TestCase):
 
     def test_collector_version_change_invalidates_file_fingerprints(self):
         import usage.history as history
-        self.assertGreaterEqual(history.COLLECTOR_VERSION, 4)
+        self.assertGreaterEqual(history.COLLECTOR_VERSION, 5)
 
     def test_total_token_counters_survive_persistence(self):
         item = normalize(record(raw_usage={'input_tokens': 1, 'output_tokens': 1,
@@ -615,6 +615,7 @@ def _synthetic_items():
         record('o2', harness='opencode', provider='test', raw_usage={'input': 1, 'cache': {'read': None}},
                model='unknown', effort='unknown'),
         record('e1', raw_usage={}),
+        record('t1', tariff={'speed': 'fast', 'service_tier': 'standard'}, raw_usage={'input_tokens': 1}),
     ]
     return [normalize(r, 'm-test') for r in samples]
 
@@ -635,6 +636,37 @@ class HistoryStorageTests(unittest.TestCase):
         raw = {i['id']: i['raw_usage'] for i in items}
         self.assertEqual(raw['c2'], {'input_tokens': None, 'output_tokens': 0, 'cache_creation': {}, 'iterations': None})
         self.assertNotIn('cache_creation_input_tokens', raw['c2'])
+
+    def test_tariff_round_trips_and_merges_per_key(self):
+        with_tariff = normalize(record(tariff={'speed': 'fast', 'bogus': 'x', 'inference_geo': 'us'}), 'm')
+        self.assertEqual(with_tariff['tariff'], {'speed': 'fast', 'inference_geo': 'us'})
+        self.assertEqual(_decode(_encode(with_tariff)), with_tariff)
+        self.assertIsNone(normalize(record(), 'm')['tariff'])
+        later = normalize(record(tariff={'service_tier': 'standard'}, timestamp=datetime(2026, 9, 3, 11, tzinfo=timezone.utc)), 'm')
+        for pair in ((with_tariff, later), (later, with_tariff)):
+            self.assertEqual(merge_observations(*pair)['tariff'],
+                             {'speed': 'fast', 'inference_geo': 'us', 'service_tier': 'standard'})
+
+    def test_v2_database_without_tariff_column_gains_it_and_keeps_records(self):
+        path = self.root / 'h.sqlite3'
+        with History(path) as h:
+            h.refresh('claude', self.root / 'none')  # creates the schema
+            for item in _synthetic_items()[:3]:
+                h._insert(h.connection, _encode(dict(item, tariff=None)))
+            before = h.records()
+        self.assertEqual(len(before), 3)
+        connection = sqlite3.connect(str(path))
+        try:
+            connection.execute('ALTER TABLE observations DROP COLUMN tariff')
+        except sqlite3.OperationalError:
+            self.skipTest('SQLite without DROP COLUMN')
+        self.assertNotIn('tariff', [r[1] for r in connection.execute('PRAGMA table_info(observations)')])
+        connection.commit(); connection.close()
+        with History(path) as h:
+            self.assertIn('tariff', [r[1] for r in h.connection.execute('PRAGMA table_info(observations)')])
+            self.assertEqual(h.records(), before)
+            self.assertEqual({r['tariff'] for r in h.records()}, {None})
+            self.assertEqual(h.connection.execute('PRAGMA user_version').fetchone()[0], 2)
 
     def test_codec_refuses_fields_it_cannot_restore(self):
         item = _synthetic_items()[0]

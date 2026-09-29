@@ -38,7 +38,7 @@ py-modules = ["why"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-usage = ["report_template.html"]
+usage = ["report_template.html", "prices.json"]
 
 [tool.setuptools.dynamic]
 version = { attr = "usage.__version__" }

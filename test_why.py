@@ -327,6 +327,20 @@ class ClaudeMetadataReviewTests(unittest.TestCase):
             self.assertEqual(record.output, 9)
             self.assertEqual(record.timestamp, datetime(2026, 9, 3, 12, 0, 5, tzinfo=timezone.utc))
 
+    def test_tariff_is_captured_and_merged_across_streaming_rows(self):
+        first = _claude_row("2026-09-03T12:00:00Z", "req", {"input_tokens": 5, "output_tokens": 1,
+                            "speed": "fast", "service_tier": "standard", "inference_geo": "not_available"})
+        later = _claude_row("2026-09-03T12:00:05Z", "req", {"input_tokens": 5, "output_tokens": 9,
+                            "service_tier": "priority", "speed": {"bad": 1}, "inference_geo": "x" * 100})
+        bare = _claude_row("2026-09-03T12:00:09Z", "req", {"input_tokens": 5, "output_tokens": 9})
+        for rows in ([first, later, bare], [bare, later, first]):
+            record = self.collect({"project/session-main.jsonl": rows})[0]
+            # latest valid value wins per key; invalid values and sparse rows never erase
+            self.assertEqual(record.tariff, {"speed": "fast", "service_tier": "priority",
+                                             "inference_geo": "not_available"})
+        record = self.collect({"project/session-main.jsonl": [bare]})[0]
+        self.assertIsNone(record.tariff)
+
     def test_copied_request_session_owner_is_earliest_row_then_first_seen(self):
         def files(first_ts, second_ts, first="aaa", second="zzz"):
             return {"p/a.jsonl": [_claude_row(first_ts, "req", self.usage, sessionId=first)],
