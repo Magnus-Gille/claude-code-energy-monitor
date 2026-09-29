@@ -361,6 +361,7 @@ class CliTests(unittest.TestCase):
 
     def test_session_text_and_json(self):
         text = self.run_main('session', 'S')
+        self.assertIn(' · Total ', text); self.assertNotIn('Totalt', text)
         self.assertIn('a1 [path]', text); self.assertIn('table retrieved 2026-09-01', text)
         data = json.loads(self.run_main('session', 'S', '--json'))
         self.assertEqual(data['total']['observations'], 2)

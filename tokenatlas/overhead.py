@@ -168,8 +168,9 @@ def _claude_attachment(row, a):
 def _scan_claude(root):
     out = []
     for path in sorted(Path(root).rglob('*.jsonl')):
-        sub = 'subagents' in path.parts
-        parent = path.parent.parent.name if sub else None
+        parts = path.as_posix().replace('\\', '/').split('/')
+        sub = 'subagents' in parts
+        parent = parts[parts.index('subagents') - 1] if sub else None
         row = _session('claude', f'{parent}/{path.stem}' if sub else path.stem, sub)
         requests, uses, pending = set(), [], {}
         for r in _rows(path):

@@ -366,7 +366,7 @@ def _money(cost, coverage=1, lower=False):
 def _tokens(a):
     t = a['tokens']
     return (f"Input {_num(t['fresh_input'])} · Cache write {_num(t['cache_write'])} · Cache read {_num(t['cache_read'])}"
-            f" · Output {_num(t['output'])} · Totalt {_num(a['total'])}")
+            f" · Output {_num(t['output'])} · Total {_num(a['total'])}")
 
 
 def render(result, eff, retrieved):

@@ -173,6 +173,18 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(sub['floor_tokens'], 901)
         self.assertEqual((sub['calls'], sub['components'][0]['chars']), (1, 200))
 
+    def test_workflow_subagent_keyed_to_session_above_subagents_and_joins(self):
+        usage = {'input_tokens': 1, 'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 900}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'projects'
+            write_jsonl(root / PRIVATE / 's1' / 'subagents' / 'workflows' / 'wf_x' / 'agent-w1.jsonl', [
+                asst('q1', 'n1', '2026-09-10T10:05:01.000Z', usage)])
+            rows = overhead.scan('claude', root)
+        self.assertEqual([r['session'] for r in rows], ['s1/agent-w1'])
+        self.assertTrue(rows[0]['is_subagent'])
+        joined = {('claude', ('s1', 'file', 'w1')): {'input': 1}}
+        self.assertEqual(overhead._lookup(joined, 'claude', rows[0]['session'], True), ({'input': 1}, None))
+
     def test_codex_blocks_floor_and_heuristic_skill_read(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, skills, agents, env = codex_root(tmp)
