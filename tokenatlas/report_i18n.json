@@ -145,7 +145,8 @@
 "missing_src": "{n} tidigare importerade källfiler saknas nu. Sparad historik finns kvar.",
 "priv_shared": "Delningsläge: projekt, sessioner, turer och agenter har pseudonymer. Exakta tidpunkter och modeller finns kvar; rapporten är inte garanterat anonym.",
 "priv_local": "Privat rapport: projektnamn och sessionsidentiteter visas. Kontrollera innehållet innan du delar filen.",
-"generated": "Skapad {t} UTC · {tz}"
+"generated": "Skapad {t} UTC · {tz}",
+"sessions_n_one": "1 session"
 },
 "en": {
 "title": "TokenAtlas · Local token usage",
@@ -293,6 +294,16 @@
 "missing_src": "{n} previously imported source files are now missing. Saved history remains.",
 "priv_shared": "Sharing mode: projects, sessions, turns and agents are pseudonymized. Exact times and models remain; the report is not guaranteed to be anonymous.",
 "priv_local": "Private report: project names and session identities are shown. Check the contents before sharing the file.",
-"generated": "Created {t} UTC · {tz}"
+"generated": "Created {t} UTC · {tz}",
+"cache_item_one": "1 request · {i} input tokens",
+"sessions_n_one": "1 session",
+"calls_one": "1 request",
+"sub_calls_one": "1 subagent request · {q} · {m} models",
+"turn_sum_one": "{name} · {tok} tokens · 1 request",
+"sessions_calls_one": "1 request · {s} sessions",
+"q_inc_one": "1 request lacks some token data; the total is a lower bound.",
+"q_amb_one": "1 request has an uncertain identity and is not counted in the total ({tok} tokens).",
+"src_calls_one": "1 request in the report",
+"missing_src_one": "1 previously imported source file is now missing. Saved history remains."
 }
 }

@@ -22,7 +22,7 @@
 // I18N = {sv, en}; t(key, vars) fills {name}. Server pseudonyms are \x01 codes (loc).
 let I18N;const FAIL={sv:'Rapportdata kunde inte läsas: {e}. Öppna filen i en nyare webbläsare med stöd för DecompressionStream.',en:'Could not read the report data: {e}. Use a newer browser with DecompressionStream.'};
 let LANG='sv';
-const t=(k,v)=>{const s=I18N[LANG][k]??I18N.sv[k]??k;return v?s.replace(/\{(\w+)\}/g,(m,n)=>v[n]):s};
+const t=(k,v)=>{const s=(v&&String(v.n)==='1'&&I18N[LANG][k+'_one'])||(I18N[LANG][k]??I18N.sv[k]??k);return v?s.replace(/\{(\w+)\}/g,(m,n)=>v[n]):s};
 // Storage may throw (blocked cookies): then the choice is just not remembered.
 const store={get(){try{return localStorage.getItem('tokenatlas-lang')}catch(e){return null}},set(v){try{localStorage.setItem('tokenatlas-lang',v)}catch(e){}}};
 const isLang=v=>v==='sv'||v==='en';

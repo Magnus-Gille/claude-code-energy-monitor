@@ -118,7 +118,8 @@ class ReportTests(unittest.TestCase):
         match = re.search(r'<script id="report-i18n" type="application/octet-stream\+base64">([A-Za-z0-9+/=]+)</script>', html)
         i18n = json.loads(gzip.decompress(base64.b64decode(match.group(1))).decode('utf-8'))
         self.assertEqual(set(i18n), {'sv', 'en'})
-        self.assertEqual(set(i18n['sv']), set(i18n['en']))
+        base = lambda lang: {k for k in i18n[lang] if not k.endswith('_one')}  # singular forms are per language
+        self.assertEqual(base('sv'), base('en'))
         self.assertEqual(i18n['sv']['p4_title'], 'Dyraste prompterna')
         self.assertEqual(i18n['en']['p4_title'], 'Costliest prompts')
         used = set(re.findall(r'data-t(?:-[a-z-]+)?="([a-z_0-9]+)"', html))
@@ -324,3 +325,15 @@ SIZE_LIMIT_20K = 700_000  # measured ~311 KB (was ~9 MB as v1 JSON); margin for 
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class I18nPlurals(unittest.TestCase):
+    def test_count_strings_have_singular_forms(self):
+        import json, re
+        texts = json.loads((Path(__file__).parent / 'tokenatlas' / 'report_i18n.json').read_text(encoding='utf-8'))
+        for lang, noun in (('en', r'\{n\} (?:[a-z]+ )?(?:requests|sessions)\b'), ('sv', r'\{n\} sessioner\b')):
+            for key, value in texts[lang].items():
+                if isinstance(value, str) and re.search(noun, value) and not key.endswith('_one'):
+                    self.assertIn(key + '_one', texts[lang], (lang, key))
+        template = (Path(__file__).parent / 'tokenatlas' / 'report_template.html').read_text(encoding='utf-8')
+        self.assertIn("+'_one'", template)
