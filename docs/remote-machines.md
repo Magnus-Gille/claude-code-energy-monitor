@@ -13,7 +13,8 @@ or tag:
     ~/.local/share/tokenatlas/venv/bin/pip install "git+https://github.com/Magnus-Gille/tokenatlas@<commit>"
     ln -sf ~/.local/share/tokenatlas/venv/bin/tokenatlas ~/.local/bin/tokenatlas
 
-`pipx install "git+https://github.com/Magnus-Gille/tokenatlas@<commit>"` works as well.
+`pipx install "git+https://github.com/Magnus-Gille/tokenatlas@<commit>"` works as well, and so does a released
+version from PyPI: `~/.local/share/tokenatlas/venv/bin/pip install "tokenatlas==<version>"`.
 
 Refresh on a schedule (cron, `crontab -e`). Cron has a short `PATH`, so use the full path.
 `refresh --all` covers every harness installed here and reports the others as `absent` (exit 0):
