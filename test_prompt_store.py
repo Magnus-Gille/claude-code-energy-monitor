@@ -210,6 +210,20 @@ class StoreUnit(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.path.parent.iterdir()), ['.top-prompts-new', 'keep.txt', 'top-prompts.json'])
 
     @unittest.skipIf(os.name == 'nt', 'POSIX file safety')
+    def test_update_and_forget_clean_stale_temps_even_when_nothing_is_written(self):
+        import time
+        recs = rows((1, 1000000))
+        self.update(recs)
+        old = self.path.with_name('.top-prompts-old')
+        for action in (lambda: self.update(recs), lambda: prompt_store.forget(self.path)):
+            old.write_text('x')
+            os.utime(old, (time.time() - 7200,) * 2)
+            before = self.path.read_bytes()
+            action()
+            self.assertFalse(old.exists())
+            if self.path.exists():self.assertEqual(self.path.read_bytes(), before)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX file safety')
     def test_forget_unlinks_a_symlink_not_its_target_and_warns_on_hard_links(self):
         target = self.path.with_name('elsewhere.json')
         target.write_text('precious')
@@ -346,6 +360,31 @@ class Cli(Base):
         self.keep('3')
         self.assertTrue(json.loads(self.run_cli(*shared)[1])['skipped'])
 
+    def test_filtered_top_never_prints_text_outside_the_global_top_k(self):
+        self.keep('3')
+        jl(why.CLAUDE_PROJECTS / 'proj' / 'sess2.jsonl', [user('2026-09-03T13:00:00Z', 'u4'), claude_row('2026-09-03T13:00:05Z', 'r4', 5000000)])
+        self.assertEqual(self.run_cli('refresh', '--harness', 'claude')[0], 0)
+        self.assertEqual(len(prompt_store.load(self.store)), 3)  # u1 is stored but no longer in the global top 3
+        window = ('--end', '2026-09-03T10:30:00+00:00')
+        self.assertNotIn('secret u1', self.top(*window)[1])
+        res = json.loads(self.top('--json', '--with-text', *window)[1])
+        self.assertEqual([(p['turn_id'], p['text']) for p in res['prompts']], [('u1', None)])
+        res = json.loads(self.top('--json', '--with-text', '--start', '2026-09-03T11:00:00+00:00')[1])
+        self.assertEqual({p['turn_id']: p['text'] for p in res['prompts']}, {'u2': 'secret u2', 'u3': 'secret u3', 'u4': None})
+
+    def test_young_private_report_rebuilds_when_visible_previews_change_shared_stays_throttled(self):
+        self.keep('1')
+        private = ('report', '--html', str(self.html), '--private', '--if-changed', '--max-age', '1h')
+        shared = ('report', '--html', str(self.html), '--if-changed', '--max-age', '1h')
+        self.run_cli(*private)
+        self.assertEqual(json.loads(self.run_cli(*private)[1])['reason'], 'unchanged')
+        self.keep('2')
+        self.assertNotIn('skipped', json.loads(self.run_cli(*private)[1]))
+        self.assertEqual(sorted(payload(self.html.read_text())['prompt_texts'].values()), ['secret u2', 'secret u3'])
+        self.run_cli(*shared)
+        self.keep('3')
+        self.assertTrue(json.loads(self.run_cli(*shared)[1])['skipped'])
+
 
 class ReportBuild(unittest.TestCase):
     def test_redacted_with_texts_raises(self):
@@ -397,8 +436,13 @@ class ReportBuild(unittest.TestCase):
         a = report_state(1, 'm', {}, {}, 'tok')
         self.assertEqual(a, report_state(1, 'm', {}, {}, 'tok', texts_hash=None))
         b = report_state(1, 'm', {}, {}, 'tok', texts_hash='abc')
-        self.assertEqual(a[0], b[0])
-        self.assertNotEqual(a[1], b[1])
+        self.assertNotEqual(a, b)
+
+    def test_texts_hash_is_identity_not_data(self):
+        a = report_state(1, 'm', {}, {}, 'tok')
+        b = report_state(1, 'm', {}, {}, 'tok', texts_hash='abc')
+        self.assertNotEqual(a[0], b[0])
+        self.assertEqual(a[1], b[1])
 
     def test_texts_hash(self):
         self.assertIsNone(prompt_store.texts_hash({}))

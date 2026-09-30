@@ -130,6 +130,12 @@ def default_db():
     return new/'history.sqlite3'
 
 
+def _visible_texts(history,db):
+    """The stored prompt texts a private report may embed (the current global top k); the history is read only when a store exists."""
+    store=prompt_store.store_path(db)
+    return prompt_store.visible(store,history.records(),pricing.load_prices()) if os.path.lexists(store) else {}
+
+
 def main(argv=None):
     # Windows pipes default to a legacy code page without '≥' or '→'; replace such characters rather than crash.
     for stream in (sys.stdout,sys.stderr):
@@ -270,13 +276,12 @@ def main(argv=None):
                 history.connection.execute('BEGIN')
                 source_status=history.doctor()
                 spec=_spec('redacted' if args.shared else 'local',DEFAULT_TIMEZONE,'day',{})
-                texts=None if args.shared else prompt_store.load(prompt_store.store_path(args.db))  # shared reports ignore the store
+                texts=None if args.shared else _visible_texts(history,args.db)  # shared reports ignore the store
                 state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts))
                 if path.exists() and read_report_state(path)==state:
                     result={'html':str(path.resolve()),'skipped':True,'reason':'unchanged'}
                 else:
                     records=history.records()
-                    if texts is not None:texts=prompt_store.visible(prompt_store.store_path(args.db),records,pricing.load_prices())
                     payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared,prompt_texts=texts)
                     payload['initial_granularity']='day'
                     write_report(path,render_report(payload,state=state))
@@ -306,7 +311,7 @@ def main(argv=None):
                 filtered=any(x is not None for x in (start,end,args.harness,args.project))
                 keep={prompts.ident(r) for r in history.records(start,end,args.harness,args.project)} if filtered else None
                 result=prompts.top_prompts(everything,table,args.limit,args.by,keep)
-                texts=prompt_store.load(store)
+                texts=prompt_store.visible(store,everything,table)  # only the global top k: never text outside it
                 if kept:result['text_store']=kept
                 if not args.json:
                     print(render_top(result,texts))
@@ -328,7 +333,7 @@ def main(argv=None):
                 if args.html:
                     path=_output_path(args.html,args.db)
                     spec=_spec('local' if args.private else 'redacted',args.timezone,args.granularity,vars(args))
-                    texts=prompt_store.load(prompt_store.store_path(args.db)) if args.private else None
+                    texts=_visible_texts(history,args.db) if args.private else None
                     state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts))
                     if path.exists() and (args.if_changed or max_age is not None):
                         found=read_report_state(path)

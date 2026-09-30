@@ -79,12 +79,12 @@ def coverage_key(source_status):
 
 
 def report_state(revision, machine, spec, coverage, token=None, texts_hash=None):
-    """(identity, data) 32-hex pair. Identity: version, options, database and template; data: revision token, counter, coverage and, for private reports, the stored prompt texts."""
+    """(identity, data) 32-hex pair. Identity: version, options, database, template and, for private reports, the embedded prompt previews; data: revision token, counter and coverage."""
     dump = lambda body: json.dumps(body, sort_keys=True, separators=(',', ':'))
     template = hashlib.sha256(Path(__file__).with_name('report_template.html').read_bytes()).hexdigest()
-    identity = dump({'format': 2, 'version': __version__, 'spec': spec, 'machine': machine})
-    data = dump({'token': token, 'revision': int(revision), 'coverage': coverage,
-                 **({'prompt_texts': texts_hash} if texts_hash else {})})
+    identity = dump({'format': 2, 'version': __version__, 'spec': spec, 'machine': machine,
+                     **({'prompt_texts': texts_hash} if texts_hash else {})})
+    data = dump({'token': token, 'revision': int(revision), 'coverage': coverage})
     return tuple(hashlib.sha256(text.encode()).hexdigest()[:32] for text in (identity + template, data))
 
 

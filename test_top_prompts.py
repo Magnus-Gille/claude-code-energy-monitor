@@ -106,6 +106,19 @@ class Binding(unittest.TestCase):
         self.assertNotEqual(ident(rows[1]), ident(rows[3]))
 
 
+class AgentlessSubagents(unittest.TestCase):
+    def test_agentless_claude_subagent_files_are_separate_threads(self):
+        def sub(i, ts, source, agent):
+            r = ob(i, ts, kind='subagent', parent='s', agent=agent)
+            r['sources'] = [source]
+            return r
+        for agent in (None, '', 'main', 'unknown'):
+            rows = [ob('a', '00', turn='t1'), sub('x1', '01', '/l/s/subagents/agent-1.jsonl', agent), ob('b', '10', turn='t2'),
+                    sub('x2', '11', '/l/s/subagents/agent-2.jsonl', agent), sub('x1b', '12', '/l/s/subagents/agent-1.jsonl', agent)]
+            got = assign_prompts(rows)
+            self.assertEqual((got['x1'][2], got['x2'][2], got['x1b'][2]), ('t1', 't2', 't1'), agent)
+
+
 class Currency(unittest.TestCase):
     def test_non_usd_is_unpriced_everywhere(self):
         from tokenatlas.pricing import price_vector
@@ -116,6 +129,12 @@ class Currency(unittest.TestCase):
         self.assertEqual((p['cost'], p['cost_complete']), (4.0, False))
         only = top_prompts([eur], TABLE, k=5)['prompts'][0]
         self.assertEqual((only['cost'], only['cost_complete']), (None, False))
+
+
+    def test_free_model_without_currency_counts_as_zero(self):
+        free = dict(TABLE, models=[dict(CLAUDE, free=True, currency=None)])
+        p = top_prompts([ob('f', '00', turn='t1', fresh=1000000)], free, k=5)['prompts'][0]
+        self.assertEqual((p['cost'], p['cost_complete']), (0, True))
 
 
 class Rank(unittest.TestCase):

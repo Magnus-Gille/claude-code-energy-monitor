@@ -19,8 +19,12 @@ def ident(r):
 
 
 def _thread(r):
-    """A subagent thread: a Claude subagent is (session, agent) inside its parent's session, other harnesses use a child session."""
-    return (r['harness'], r['session'], r.get('agent')) if r['harness'] == 'claude' else (r['harness'], r['session'])
+    """A subagent thread: a Claude subagent is (session, agent) inside its parent's session, other harnesses use a child session.
+    Without a usable agent id the subagent's first source file stands in, so separate files stay separate threads."""
+    if r['harness'] != 'claude':return (r['harness'], r['session'])
+    agent = r.get('agent')
+    if agent in (None, '', 'main', 'unknown') and r.get('sources'):agent = r['sources'][0]
+    return (r['harness'], r['session'], agent)
 
 
 def assign_prompts(records):
@@ -68,7 +72,8 @@ def assign_prompts(records):
 def _cost(r, table):
     """List-price cost in USD, or None: a non-USD price is never mixed into a USD sum."""
     priced = price_observation(r, table)
-    return priced['cost'] if priced['cost'] is not None and priced.get('currency') == 'USD' else None
+    if priced['cost'] is None:return None
+    return priced['cost'] if priced.get('currency') == 'USD' or (priced.get('status') == 'free' and priced.get('currency') is None) else None
 
 
 def top_prompts(records, table, k=5, by='cost', keep=None):

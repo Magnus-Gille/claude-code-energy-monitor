@@ -204,8 +204,11 @@ def merge_observations(a, b, authoritative_turns=False):
         if result.get(k) in (None, '', 'unknown', 'absent') and v not in (None, '', 'unknown', 'absent'):
             result[k] = v
     if result['harness'] == 'claude' and a['session'] != b['session']:
-        # The earliest copy owns a request; on equal time keep the stored one (a).
-        owner = b if b['ts'] < a['ts'] else a
+        # The earliest copy owns a request. On equal time a local re-read keeps the stored one (a); an import
+        # picks the lexically smaller session, then the JSON dump, so the result never depends on import order.
+        if a['ts'] == b['ts'] and not authoritative_turns:
+            owner = min((a, b), key=lambda x: (x['session'], json.dumps(x, sort_keys=True)))
+        else:owner = b if b['ts'] < a['ts'] else a
         result['session'], result['parent_session'] = owner['session'], owner['parent_session']
         result['turn_id'], result['turn_confidence'] = owner.get('turn_id'), owner.get('turn_confidence')
     if authoritative_turns and b.get('session') == result['session']:

@@ -105,7 +105,7 @@ def _clean_temps(directory):
 
 
 def _write(path,data):
-    path=Path(path);_clean_temps(path.parent)
+    path=Path(path)
     fd,tmp=tempfile.mkstemp(prefix='.top-prompts-',dir=path.parent)  # replace swaps the path itself, so a symlink there is replaced, never followed
     try:
         with os.fdopen(fd,'wb') as stream:
@@ -118,6 +118,7 @@ def _write(path,data):
 
 def update(path,records,table,machine,k=5,by='cost',extract=prompt_text.extract_prompt):
     """Keep text for the global top k prompts only: keep known entries, add local new ones, retry unreadable ones, evict the rest."""
+    _clean_temps(Path(path).parent)
     top=prompts.top_prompts(records,table,k,by)['prompts']
     old_raw,bad=_read(path)  # an unsafe file is not trusted: start over and replace it
     try:old={(e['harness'],e['session'],e['turn_id']):e for e in _entries(old_raw)} if old_raw else {}
@@ -146,6 +147,7 @@ def update(path,records,table,machine,k=5,by='cost',extract=prompt_text.extract_
 
 def forget(path):
     """Delete the store; a symlink is unlinked, never followed. Warns when other hard links still hold the text."""
+    _clean_temps(Path(path).parent)
     try:
         st=os.lstat(path)
         if stat.S_ISREG(st.st_mode) and st.st_nlink>1:_warn(f'{path}: other hard links still hold the text')
