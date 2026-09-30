@@ -64,6 +64,13 @@ def _present(root):
     return True
 
 
+def _with_problems(entry,problems):
+    """Add Cowork traversal errors to a Claude refresh result and make it at least partial."""
+    order=('ok','partial','missing','error')
+    rank=lambda s:order.index(s) if s in order else len(order)
+    return dict(entry,errors=[*entry.get('errors',[]),*problems],status=max(entry['status'],'partial',key=rank)) if problems else entry
+
+
 def refresh_all(history):
     """Refresh every harness from its default roots; absent ones are reported, an OSError only fails its own harness."""
     roots={'claude':why.CLAUDE_PROJECTS,'codex':why.CODEX_SESSIONS,'pi':why.PI_SESSIONS,'opencode':why.OPENCODE_DB}
@@ -79,7 +86,7 @@ def refresh_all(history):
                 entries.append({'harness':name,'status':'absent'});continue
             results=[history.refresh(name,r) for r in found]
             entry=(results[0] if len(results)==1 else aggregate(results)) if results else {'harness':name,'status':'ok','errors':[]}
-            if problems:entry=dict(entry,errors=[*entry.get('errors',[]),*problems],status=max(entry['status'],'partial',key=rank))
+            entry=_with_problems(entry,problems)
         except OSError as exc:
             entry={'harness':name,'status':'error','errors':[f'{type(exc).__name__}: {exc}']}
         entries.append(entry)
@@ -244,9 +251,9 @@ def main(argv=None):
                     result=history.refresh(args.harness,args.root or roots[args.harness])
                 else:
                     # Main root, then each Cowork transcript root (macOS; absent elsewhere and simply skipped).
-                    cowork=why.cowork_roots()
+                    cowork,problems=why.cowork_scan()
                     results=[history.refresh('claude',root) for root in [roots['claude'],*cowork]]
-                    result=results[0] if len(results)==1 else aggregate(results)
+                    result=_with_problems(results[0] if len(results)==1 else aggregate(results),problems)
             elif args.command=='snapshot':
                 result=history.snapshot(args.out)
             elif args.command=='import':

@@ -14,6 +14,7 @@ import json
 import math
 import os
 import sqlite3
+import stat
 import sys
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
@@ -50,8 +51,17 @@ def cowork_scan() -> tuple[list[Path], list[str]]:
         level = [child for parent in level for child in entries(parent, keep)]
     for session in level:
         projects = Path(session) / ".claude" / "projects"
-        if projects.is_dir():
+        try:
+            mode = os.stat(projects).st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            continue  # a session without transcripts
+        except OSError as exc:
+            errors.append(f"{projects}: {type(exc).__name__}: {exc}")
+            continue
+        if stat.S_ISDIR(mode):
             roots.append(projects)
+        else:
+            errors.append(f"{projects}: not a directory")
     return sorted(roots), errors
 
 

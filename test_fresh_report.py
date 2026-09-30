@@ -157,6 +157,43 @@ class RefreshErrors(Base):
         self.assertEqual(code, 2)
         self.assertEqual(why.cowork_roots(), [why.COWORK_SESSIONS / 'o1/a/local_1/.claude/projects'])
 
+    @unittest.skipIf(os.name == 'nt' or (hasattr(os, 'geteuid') and os.geteuid() == 0), 'needs POSIX non-root')
+    def test_single_claude_refresh_reports_cowork_errors(self):
+        self.claude()
+        blocked = why.COWORK_SESSIONS / 'o2/b'
+        (blocked / 'local_2').mkdir(parents=True)
+        blocked.chmod(0)
+        self.addCleanup(blocked.chmod, 0o700)
+        code, out, _ = self.run_cli('refresh', '--harness', 'claude')
+        result = json.loads(out)
+        self.assertNotEqual(result['status'], 'ok')
+        self.assertTrue(any('PermissionError' in e for e in result['errors']), result)
+        self.assertEqual(code, 2)
+
+    def test_wrong_type_cowork_projects_is_an_error(self):
+        self.claude()
+        bad = why.COWORK_SESSIONS / 'o/a/local_1/.claude/projects'
+        bad.parent.mkdir(parents=True)
+        bad.write_text('not a directory')
+        (why.COWORK_SESSIONS / 'o/a/local_2').mkdir()  # a session without transcripts is normal, not an error
+        code, out, _ = self.run_cli('refresh', '--all')
+        claude = {x['harness']: x for x in json.loads(out)['harnesses']}['claude']
+        self.assertNotEqual(claude['status'], 'ok')
+        self.assertEqual([e for e in claude['errors'] if 'local_' in e], [f'{bad}: not a directory'])
+        self.assertEqual(code, 2)
+
+    @unittest.skipIf(os.name == 'nt' or (hasattr(os, 'geteuid') and os.geteuid() == 0), 'needs POSIX non-root')
+    def test_unreadable_cowork_projects_is_an_error(self):
+        self.claude()
+        dot = why.COWORK_SESSIONS / 'o/a/local_1/.claude'
+        (dot / 'projects').mkdir(parents=True)
+        dot.chmod(0)
+        self.addCleanup(dot.chmod, 0o700)
+        code, out, _ = self.run_cli('refresh', '--all')
+        claude = {x['harness']: x for x in json.loads(out)['harnesses']}['claude']
+        self.assertTrue(any('PermissionError' in e for e in claude['errors']), claude)
+        self.assertEqual(code, 2)
+
     def test_oserror_in_one_harness_does_not_stop_others(self):
         demo.build_home(self.home, 1)
         real = History.refresh
@@ -366,6 +403,23 @@ class ConditionalReport(Base):
         os.mkfifo(fifo)
         self.assertIsNone(report_mod.read_report_state(fifo))
         self.assertIsNone(report_mod.read_report_state(Path(self.tmp.name)))
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'needs mkfifo')
+    def test_fifo_swapped_in_after_stat_does_not_block(self):
+        # A path that stats as a regular file but opens as a FIFO (the stat/open race) must not block.
+        import threading
+        fifo = Path(self.tmp.name) / 'swap.html'
+        os.mkfifo(fifo)
+        regular, result = os.stat(__file__), []
+        with patch.object(report_mod.os, 'stat', lambda *a, **k: regular):
+            reader = threading.Thread(target=lambda: result.append(report_mod.read_report_state(fifo)), daemon=True)
+            reader.start()
+            reader.join(5)
+        if reader.is_alive():
+            with contextlib.suppress(OSError):  # let the blocked reader go
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            self.fail('read_report_state blocked on a FIFO')
+        self.assertEqual(result, [None])
 
     def test_case_alias_of_existing_database_is_rejected(self):
         d = self.tmp.name
