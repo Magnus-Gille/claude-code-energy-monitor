@@ -203,11 +203,12 @@ harness (fixed share of input, per 1k output, share of cost, calls per session),
 Python 3.10 or newer is required. `pipx` keeps the command isolated from other Python tools:
 
 ```bash
-pipx install git+https://github.com/Magnus-Gille/tokenatlas
+pipx install tokenatlas
 tokenatlas --version
 ```
 
-For a checkout, use `pipx install /path/to/tokenatlas`. On systems with an externally managed Python (for example Raspberry Pi OS), use the venv recipe in [docs/remote-machines.md](docs/remote-machines.md). The old `energy-monitor` command remains as a deprecated alias that prints a one-line notice.
+TokenAtlas is published on [PyPI](https://pypi.org/project/tokenatlas/). For the latest unreleased code use
+`pipx install git+https://github.com/Magnus-Gille/tokenatlas`, and for a checkout `pipx install /path/to/tokenatlas`. On systems with an externally managed Python (for example Raspberry Pi OS), use the venv recipe in [docs/remote-machines.md](docs/remote-machines.md). The old `energy-monitor` command remains as a deprecated alias that prints a one-line notice.
 
 Upgrade or remove the command with:
 
