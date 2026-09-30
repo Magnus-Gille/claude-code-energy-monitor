@@ -452,7 +452,7 @@ class ReportBuild(unittest.TestCase):
 
     def test_template_card_uses_textcontent(self):
         html = page_text(render_report(build_report(rows((1, 1)), {}, redact=False, table=TABLE)))
-        self.assertIn('Dyraste prompterna', html)
+        self.assertIn('data-t="p4_title"', html)
         self.assertIn('id="top-prompts"', html)
 
 
