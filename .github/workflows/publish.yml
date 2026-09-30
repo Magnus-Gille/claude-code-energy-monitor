@@ -2,6 +2,8 @@ name: Publish to PyPI
 
 # Trusted publishing (OIDC): no API token is stored anywhere. PyPI must list this repository,
 # this workflow file (publish.yml) and the environment "pypi" as a trusted publisher for "tokenatlas".
+# A release published with a personal token (`gh release create`) triggers this workflow; one created by another
+# workflow's GITHUB_TOKEN does not, so run it on demand (workflow_dispatch) for such tags.
 on:
   release:
     types: [published]
