@@ -23,6 +23,7 @@ from tokenatlas import why
 OBSERVATION_VERSION = 1  # the 'v' field inside observation dicts
 SCHEMA_VERSION = 2  # PRAGMA user_version of the SQLite layout
 COLLECTOR_VERSION = 5
+HARNESS_REVISION = {'pi': 1}  # bump to force a re-read of one harness's files only (appended to its fingerprint)
 FIELDS = ('fresh_input', 'cache_read', 'cache_write', 'output')
 ALL_FIELDS = FIELDS + ('reasoning',)
 
@@ -504,7 +505,7 @@ class History:
             self.connection.close()
 
     @staticmethod
-    def fingerprint(path, include_sqlite_sidecars=False):
+    def fingerprint(path, include_sqlite_sidecars=False, harness=None):
         paths = [Path(path)]
         if include_sqlite_sidecars:
             # -shm is deliberately excluded: SQLite readers rewrite this derived WAL index
@@ -517,6 +518,8 @@ class History:
                 values.append([candidate.name, s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns])
             except FileNotFoundError:
                 values.append([candidate.name, None])
+        if harness in HARNESS_REVISION:
+            values.append(['revision', HARNESS_REVISION[harness]])
         return json.dumps(values)
 
     def refresh(self, harness, root):
@@ -556,7 +559,7 @@ class History:
                        'pi':why.collect_pi, 'opencode':why.collect_opencode}[harness]
             for path in paths:
                 try:
-                    before = self.fingerprint(path, harness == 'opencode')
+                    before = self.fingerprint(path, harness == 'opencode', harness)
                     previous = c.execute('SELECT fingerprint,diagnostics FROM files WHERE harness=? AND path=?',
                                          (harness, str(path))).fetchone()
                     if previous and previous['fingerprint'] == before:
@@ -598,7 +601,7 @@ class History:
                             result['errors'].append(f'{path}: {type(exc).__name__}: {exc}')
                             continue
                     result['files_parsed'] += 1
-                    changed = before != self.fingerprint(path, harness == 'opencode')
+                    changed = before != self.fingerprint(path, harness == 'opencode', harness)
                     if changed:
                         result['changed_during_read'] += 1
                         if harness != 'opencode':

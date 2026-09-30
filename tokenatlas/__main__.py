@@ -15,6 +15,7 @@ from tokenatlas import why
 from tokenatlas import __version__
 from tokenatlas import sessions
 from tokenatlas.history import History, summarize
+from tokenatlas import pricing, prompts
 from tokenatlas.report import build_report, coverage_key, read_report_state, render_report, report_state, write_report
 
 DEFAULT_TIMEZONE='Europe/Stockholm'
@@ -94,6 +95,21 @@ def refresh_all(history):
     return {'status':worst,'harnesses':entries}
 
 
+def render_top(result):
+    """Compact table of ranked prompts; cost is list-price, '≥' when some requests could not be priced."""
+    zone=ZoneInfo(DEFAULT_TIMEZONE)
+    rows=[('#','when','harness','project','models','req','sub','Mtok','cost','resume')]
+    for i,p in enumerate(result['prompts'],1):
+        cost='n/a' if p['cost'] is None else ('' if p['cost_complete'] else '≥')+f"${p['cost']:.2f}"
+        when=datetime.fromisoformat(p['first_ts']).astimezone(zone).strftime('%Y-%m-%d %H:%M')
+        rows.append((str(i),when,p['harness'],p['project_label'] or '-',','.join(p['models']) or '-',str(p['requests']),
+                     str(p['subagents']),f"{p['total_tokens']/1e6:.2f}",cost,p['resume'] or '-'))
+    widths=[max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    lines=['  '.join(c.ljust(w) for c,w in zip(r,widths)).rstrip() for r in rows]
+    if len(result['prompts'])<result['total_prompts']:lines.append(f"showing {len(result['prompts'])} of {result['total_prompts']} prompts")
+    return '\n'.join(lines)
+
+
 def default_db():
     """Default history path; one-time move of the pre-rename agentmon directory (never used with --db)."""
     base=Path(os.environ.get('XDG_STATE_HOME',Path.home()/'.local/state'))
@@ -161,6 +177,15 @@ def main(argv=None):
         else:
             sub.add_argument('--unit');sub.add_argument('--thread',action='append',default=[])
             sub.add_argument('--outcome',choices=sessions.OUTCOMES);sub.add_argument('--note',default='')
+    top=commands.add_parser('top',help='Rank the most expensive user prompts, subagent work rolled up into each.')
+    top.add_argument('-n','--limit',type=int,default=5)
+    top.add_argument('--by',choices=('cost','tokens'),default='cost')
+    top.add_argument('--start',help='Inclusive ISO timestamp; offset required.')
+    top.add_argument('--end',help='Exclusive ISO timestamp; offset required.')
+    top.add_argument('--harness',choices=('claude','codex','pi','opencode'))
+    top.add_argument('--project',help='Exact full project identity, not basename.')
+    top.add_argument('--prices',type=Path,help='Override the price table.')
+    top.add_argument('--json',action='store_true')
     overhead=commands.add_parser('overhead',help='Fixed context overhead: floor tokens, instruction and skill sizes.')
     overhead.add_argument('--refresh',action='store_true',help='Rescan the default session roots first.')
     overhead.add_argument('--harness',choices=('claude','codex','pi','opencode'))
@@ -172,10 +197,12 @@ def main(argv=None):
     try:
         start=end=None
         if args.command=='refresh' and args.all and args.root:raise ValueError('--root cannot be used with --all')
-        if args.command=='report':
-            max_age=parse_duration(args.max_age) if args.max_age is not None else None
-            if (args.if_changed or max_age is not None) and not args.html:raise ValueError('--if-changed and --max-age need --html')
-            ZoneInfo(args.timezone)
+        if args.command=='top' and args.limit<1:raise ValueError('--limit must be at least 1')
+        if args.command in ('report','top'):
+            if args.command=='report':
+                max_age=parse_duration(args.max_age) if args.max_age is not None else None
+                if (args.if_changed or max_age is not None) and not args.html:raise ValueError('--if-changed and --max-age need --html')
+                ZoneInfo(args.timezone)
             for name in ('start','end'):
                 value=getattr(args,name)
                 if value:
@@ -185,7 +212,7 @@ def main(argv=None):
                     if name=='start':start=parsed
                     else:end=parsed
             if start and end and start>=end:raise ValueError('--start must precede --end')
-            if args.html:_output_path(args.html,args.db)
+            if args.command=='report' and args.html:_output_path(args.html,args.db)
         if args.command=='open':path=_output_path(args.html or args.db.parent/'report.html',args.db)
         if args.command=='overhead':
             from tokenatlas import overhead as _overhead
@@ -254,6 +281,13 @@ def main(argv=None):
                     cowork,problems=why.cowork_scan()
                     results=[history.refresh('claude',root) for root in [roots['claude'],*cowork]]
                     result=_with_problems(results[0] if len(results)==1 else aggregate(results),problems)
+            elif args.command=='top':
+                history.connection.execute('BEGIN')
+                table=pricing.load_prices(args.prices)
+                result=prompts.top_prompts(history.records(start,end,args.harness,args.project),table,args.limit,args.by)
+                if not args.json:
+                    print(render_top(result))
+                    return 0
             elif args.command=='snapshot':
                 result=history.snapshot(args.out)
             elif args.command=='import':

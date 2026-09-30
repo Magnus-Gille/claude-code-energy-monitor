@@ -793,9 +793,12 @@ def collect_pi(
         version = session.get("version")
         harness_version = str(version) if isinstance(version, int) and not isinstance(version, bool) \
             else _meta_text(version, limit=64)
+        last_user_turn: str | None = None
         for _, row in rows:
             message = _mapping(row.get("message"))
             usage = message.get("usage")
+            if row.get("type") == "message" and _is_genuine_user_row(row):
+                last_user_turn = _meta_text(row.get("id"))
             if row.get("type") != "message" or message.get("role") != "assistant" or not isinstance(usage, dict):
                 continue
             timestamp = parse_iso_timestamp(row.get("timestamp") or message.get("timestamp"))
@@ -823,8 +826,8 @@ def collect_pi(
                 "timestamp": timestamp, "session_id": session_id, "call_id": call_id,
                 "model": _meta_text(message.get("model"), default="unknown"), "effort": "unknown",
                 "project": _project_name(cwd), "project_id": cwd or "unknown", "cwd": cwd,
-                "turn_id": None, "turn_confidence": "absent", "parent_session_id": None,
-                "harness_version": harness_version, "entrypoint": "unknown",
+                "turn_id": last_user_turn, "turn_confidence": "derived" if last_user_turn else "absent",
+                "parent_session_id": None, "harness_version": harness_version, "entrypoint": "unknown",
                 "thread_kind": "main", "agent": "main", "raw_usage": raw_usage,
                 "id_synthetic": id_synthetic,
                 "session_started": session_started or timestamp,
