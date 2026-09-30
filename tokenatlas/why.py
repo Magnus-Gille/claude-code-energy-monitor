@@ -597,6 +597,9 @@ def _codex_user_event_identity(row: dict, payload: dict) -> str | None:
     return None
 
 
+_CODEX_TURN_END = frozenset({"task_complete", "turn_complete", "turn_aborted"})
+
+
 def collect_codex(
     root: Path,
     start: datetime,
@@ -669,6 +672,9 @@ def collect_codex(
                 pending_turn_id = explicit_turn
             if row_type != "event_msg" or payload.get("type") != "token_count":
                 event_type = payload.get("type")
+                if row_type == "event_msg" and event_type in _CODEX_TURN_END:
+                    seen_explicit = False  # explicitness is per turn: a legacy-style turn may follow in the same file
+                    continue
                 if explicit_turn or seen_explicit:
                     continue
                 if event_type == "task_started":

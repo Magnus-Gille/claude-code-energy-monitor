@@ -129,6 +129,13 @@ class CodexTests(TmpCase):
             codex_user("beta", turn_id="T2"), codex_ctx(), codex_tokens(2),
         ], {"T1": "alpha", "T2": "beta"})
 
+    def test_legacy_turn_after_task_complete_in_a_mixed_file(self):
+        done = {"timestamp": TS, "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "T1"}}
+        self.check_against_parser([
+            codex_meta(), codex_user("alpha", turn_id="T1"), codex_ctx(), codex_tokens(1), codex_user("steer"), done,
+            codex_user("legacy", id="ev2"), codex_ctx(), codex_tokens(2),
+        ], {"T1": "alpha", "ev2": "legacy"})
+
     def test_explicit_turn_id_on_later_turn_context(self):
         self.check_against_parser([
             codex_meta(), codex_user("gamma"), codex_ctx(turn_id="C1"), codex_tokens(1),
@@ -284,6 +291,24 @@ class SanitizeTests(unittest.TestCase):
         for secret in cases:
             with self.subTest(secret=secret):
                 self.assertEqual(sanitize(f"use {secret} now"), "use [redacted] now")
+
+    def test_stripe_bearer_authorization_google_keys(self):
+        for text, want in (
+            ("k sk_live_abcdefghij now", "k [redacted] now"), ("k rk_test_abcdefghijKLM now", "k [redacted] now"),
+            ("k sk_live_abcdefghi now", "k sk_live_abcdefghi now"),  # 9 chars: too short
+            ("k xsk_live_abcdefghij now", "k xsk_live_abcdefghij now"),  # no word boundary
+            ("k whsec_abcdefghij now", "k [redacted] now"), ("k whsec_abcdefghi now", "k whsec_abcdefghi now"),
+            ("h Bearer abcdefghijkl now", "h Bearer [redacted] now"), ("h bEaReR abc.def~ghi+jk/l-m== now", "h bEaReR [redacted] now"),
+            ("h Bearer abcdefghijk now", "h Bearer abcdefghijk now"),  # 11 chars: too short
+            ("the bearer of bad news", "the bearer of bad news"),
+            ("Authorization: Basic dXNlcjpwYXNz rest", "Authorization: [redacted] rest"),
+            ("authorization: secretvalue rest", "authorization: [redacted] rest"),
+            ("Authorization: Bearer abc rest", "Authorization: [redacted] rest"),
+            ("an authorization flow", "an authorization flow"),
+            ("g AIza" + "A" * 35 + " now", "g [redacted] now"), ("g AIza" + "A" * 34 + " now", "g AIza" + "A" * 34 + " now"),
+            ("g AIza" + "A" * 36 + " now", "g AIza" + "A" * 36 + " now"), ("g xAIza" + "A" * 35 + " now", "g xAIza" + "A" * 35 + " now")):
+            with self.subTest(text=text):
+                self.assertEqual(sanitize(text), want)
 
     def test_pem_block(self):
         pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nabc/def\n-----END RSA PRIVATE KEY-----"

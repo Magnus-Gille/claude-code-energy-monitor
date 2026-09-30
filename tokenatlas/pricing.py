@@ -204,7 +204,8 @@ def price_vector(obs, table):
     fresh*in + (write-cw1h)*cw5m + cw1h*cw1h + read*cr + out*out, where cw1h is the 1-hour write tokens when the 5m/1h split is known."""
     early, r = _rates(obs, table)
     if early:
-        return ([0.0] * 5, 0) if early['status'] == 'free' else (None, 0)
+        return ([0.0] * 5, 0) if early['status'] == 'free' and early.get('currency') in (None, 'USD') else (None, 0)
+    if r['currency'] != 'USD':return None, 0  # unit prices are USD: never mix currencies
     parts, hour = _parts(r)
     if None in parts.values():
         return None, 0

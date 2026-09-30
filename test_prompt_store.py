@@ -83,14 +83,17 @@ class StoreUnit(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(prompt_store.load(self.path), {})
 
-    def test_none_entry_is_kept_and_not_retried(self):
+    def test_none_entry_is_retried_on_each_update(self):
         recs = rows((1, 3000000))
         recs[0]['turn_id'] = 'tnone'
         self.update(recs)
         self.assertEqual(prompt_store.load(self.path), {('claude', 's', 'tnone'): None})
         self.assertEqual(self.calls, ['tnone'])
         self.update(recs)
-        self.assertEqual(self.calls, ['tnone'])
+        self.assertEqual(self.calls, ['tnone', 'tnone'])
+        self.update(recs, extract=lambda h, src, s, t, limit=200: 'now readable')
+        self.assertEqual(prompt_store.load(self.path), {('claude', 's', 'tnone'): 'now readable'})
+        self.update(recs, extract=lambda *a, **k: self.fail('a stored text is not re-extracted'))
 
     def test_only_the_prompts_own_sources_are_tried(self):
         recs = rows((1, 3000000))
@@ -120,6 +123,109 @@ class StoreUnit(unittest.TestCase):
                 self.assertEqual(prompt_store.load(self.path), {})
             self.assertEqual(len(err.getvalue().strip().splitlines()), 1, bad)
             self.assertIn('top-prompts.json', err.getvalue())
+
+    def test_only_the_current_top_k_texts_are_shown(self):
+        self.update(rows((1, 1000000), (2, 3000000)))
+        recs = rows((1, 1000000), (2, 3000000), (3, 5000000))
+        self.assertEqual(set(prompt_store.load(self.path)), {('claude', 's', 't1'), ('claude', 's', 't2')})
+        shown = prompt_store.visible(self.path, recs, TABLE)  # recorded k=2: t3 and t2 are the top; t1 fell out
+        self.assertEqual(shown, {('claude', 's', 't2'): 'TEXT-t2'})
+        self.assertEqual(prompt_store.visible(self.path.with_name('none.json'), recs, TABLE), {})
+
+    def write_good(self, mode=0o600):
+        self.update(rows((1, 1000000)))
+        os.chmod(self.path, mode)
+
+    def warns(self, path):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = prompt_store.load(path)
+        return got, err.getvalue()
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX file safety')
+    def test_load_refuses_unsafe_files_with_one_line_warning(self):
+        self.write_good()
+        self.assertEqual(self.warns(self.path)[0], {('claude', 's', 't1'): 'TEXT-t1'})
+        os.chmod(self.path, 0o644)
+        got, err = self.warns(self.path)
+        self.assertEqual((got, len(err.strip().splitlines())), ({}, 1))
+        os.chmod(self.path, 0o600)
+        link = self.path.with_name('link.json')
+        os.link(self.path, link)
+        got, err = self.warns(self.path)
+        self.assertEqual((got, len(err.strip().splitlines())), ({}, 1))
+        link.unlink()
+        self.assertNotEqual(self.warns(self.path)[0], {})
+        with patch.object(prompt_store.os, 'getuid', return_value=os.getuid() + 1):
+            got, err = self.warns(self.path)
+        self.assertEqual((got, len(err.strip().splitlines())), ({}, 1))
+        target = self.path.with_name('real.json')
+        os.rename(self.path, target)
+        os.symlink(target, self.path)
+        got, err = self.warns(self.path)
+        self.assertEqual((got, len(err.strip().splitlines())), ({}, 1))
+        self.path.unlink()
+        self.path.mkdir()
+        got, err = self.warns(self.path)
+        self.assertEqual((got, len(err.strip().splitlines())), ({}, 1))
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX file safety')
+    def test_update_rewrites_an_unsafe_file_even_when_unchanged(self):
+        recs = rows((1, 1000000))
+        self.update(recs)
+        os.chmod(self.path, 0o644)
+        self.update(recs)
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+        self.assertEqual(prompt_store.load(self.path), {('claude', 's', 't1'): 'TEXT-t1'})
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX file safety')
+    def test_update_replaces_a_symlink_and_leaves_its_target(self):
+        target = self.path.with_name('elsewhere.json')
+        target.write_text('precious')
+        os.symlink(target, self.path)
+        self.update(rows((1, 1000000)))
+        self.assertFalse(self.path.is_symlink())
+        self.assertEqual(target.read_text(), 'precious')
+        self.assertEqual(prompt_store.load(self.path), {('claude', 's', 't1'): 'TEXT-t1'})
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX file safety')
+    def test_update_replaces_a_hard_linked_file(self):
+        recs = rows((1, 1000000))
+        self.update(recs)
+        other = self.path.with_name('other.json')
+        os.link(self.path, other)
+        self.update(recs)
+        self.assertEqual(self.path.stat().st_nlink, 1)
+        self.assertIn(b'TEXT-t1', other.read_bytes())
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX file safety')
+    def test_update_cleans_only_stale_own_temp_files(self):
+        import time
+        old, fresh, other = (self.path.with_name(n) for n in ('.top-prompts-old', '.top-prompts-new', 'keep.txt'))
+        for f in (old, fresh, other):f.write_text('x')
+        two_hours = time.time() - 7200
+        os.utime(old, (two_hours, two_hours))
+        os.utime(other, (two_hours, two_hours))
+        self.update(rows((1, 1000000)))
+        self.assertEqual(sorted(p.name for p in self.path.parent.iterdir()), ['.top-prompts-new', 'keep.txt', 'top-prompts.json'])
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX file safety')
+    def test_forget_unlinks_a_symlink_not_its_target_and_warns_on_hard_links(self):
+        target = self.path.with_name('elsewhere.json')
+        target.write_text('precious')
+        os.symlink(target, self.path)
+        prompt_store.forget(self.path)
+        self.assertFalse(self.path.is_symlink())
+        self.assertEqual(target.read_text(), 'precious')
+        self.write_good()
+        other = self.path.with_name('other.json')
+        os.link(self.path, other)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            prompt_store.forget(self.path)
+        self.assertFalse(self.path.exists())
+        self.assertIn('other hard links still hold the text', err.getvalue())
+        self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
 
     def test_forget(self):
         self.update(rows((1, 1000000)))
@@ -204,6 +310,24 @@ class Cli(Base):
             self.assertNotIn(SECRET, self.html.read_text())
             self.run_cli('open', '--html', str(self.html), '--no-refresh')
             self.assertIn('prompt_texts', payload(self.html.read_text()))
+
+    def test_private_reports_embed_only_the_current_top_k(self):
+        self.keep('3')
+        d = why.CLAUDE_PROJECTS / 'proj'
+        jl(d / 'sess2.jsonl', [user('2026-09-03T13:00:00Z', 'u4'), claude_row('2026-09-03T13:00:05Z', 'r4', 5000000)])
+        self.assertEqual(self.run_cli('refresh', '--harness', 'claude')[0], 0)
+        # the store still holds u1..u3 (recorded k=3), but u1 is no longer in the global top 3 {u4, u3, u2}
+        self.assertEqual(len(prompt_store.load(self.store)), 3)
+        self.assertEqual(self.run_cli('report', '--html', str(self.html), '--private')[0], 0)
+        self.assertEqual(sorted(payload(self.html.read_text())['prompt_texts'].values()), ['secret u2', 'secret u3'])
+        self.assertNotIn('secret u1', self.html.read_text())
+        # a filtered report still ranks over the full history
+        self.assertEqual(self.run_cli('report', '--html', str(self.html), '--private', '--start', '2026-09-03T12:00:00+00:00')[0], 0)
+        self.assertEqual(sorted(payload(self.html.read_text())['prompt_texts'].values()), ['secret u3'])
+        with patch.object(cli, '_open_in_browser'):
+            self.run_cli('open', '--html', str(self.html), '--no-refresh')
+        self.assertEqual(sorted(payload(self.html.read_text())['prompt_texts'].values()), ['secret u2', 'secret u3'])
+        self.assertNotIn('secret u1', self.html.read_text())
 
     def test_private_conditional_report_rebuilds_when_store_changes_shared_does_not(self):
         self.keep('1')

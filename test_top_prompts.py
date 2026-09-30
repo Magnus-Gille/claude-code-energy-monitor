@@ -7,7 +7,7 @@ from pathlib import Path
 
 from tokenatlas import why
 from tokenatlas.history import COLLECTOR_VERSION, History, merge_observations
-from tokenatlas.prompts import assign_prompts, top_prompts
+from tokenatlas.prompts import assign_prompts as _assign, ident, top_prompts
 from test_fresh_report import Base
 from test_pricing import TABLE, CLAUDE
 
@@ -19,6 +19,11 @@ def ob(i, ts, session='s', turn=None, kind='main', parent=None, agent='main', ha
             'ts': f'2026-09-03T10:{ts}:00+00:00', 'model': model, 'provider': provider, 'machine': 'm1',
             'project_id': project, 'project_label': Path(project).name, 'raw_usage': {}, 'tariff': None,
             'tokens': dict(fresh_input=fresh, cache_write=write, cache_read=read, output=out, reasoning=reasoning)}
+
+
+def assign_prompts(rows):
+    """{observation id: assignment} for rows with unique ids (assignments are positional)."""
+    return {r['id']: a for r, a in zip(rows, _assign(rows)) if a}
 
 
 class Assign(unittest.TestCase):
@@ -63,6 +68,54 @@ class Assign(unittest.TestCase):
         rows = [ob('a', '00', session='s', turn='t1', harness='codex'),
                 ob('sub', '05', session='s', kind='subagent', parent='s', harness='claude')]
         self.assertNotIn('sub', assign_prompts(rows))
+
+
+class Binding(unittest.TestCase):
+    def test_claude_subagent_thread_stays_with_its_first_turn(self):
+        rows = [ob('a', '00', turn='t1'), ob('s1', '05', kind='subagent', parent='s', agent='x'), ob('b', '10', turn='t2'),
+                ob('s2', '15', kind='subagent', parent='s', agent='x'), ob('s3', '16', kind='subagent', parent='s', agent='y')]
+        got = assign_prompts(rows)
+        self.assertEqual([got[i][2] for i in ('s1', 's2', 's3')], ['t1', 't1', 't2'])
+
+    def test_codex_child_session_crossing_turns(self):
+        rows = [ob('a', '00', session='p', turn='t1', harness='codex'),
+                ob('c1', '05', session='c', turn='ct', kind='subagent', parent='p', harness='codex'),
+                ob('b', '10', session='p', turn='t2', harness='codex'),
+                ob('c2', '15', session='c', turn='ct', kind='subagent', parent='p', harness='codex')]
+        got = assign_prompts(rows)
+        self.assertEqual((got['c1'][2], got['c2'][2], got['c2'][3]), ('t1', 't1', 'rolled_up'))
+
+    def test_window_excluding_parent_rows_still_attributes_to_parent_turn(self):
+        rows = [ob('a', '00', turn='t1', fresh=1000000), ob('sub', '05', kind='subagent', parent='s', agent='x', fresh=1000000),
+                ob('b', '10', turn='t2', fresh=1000000)]
+        res = top_prompts(rows, TABLE, k=5, keep={ident(rows[1])})
+        self.assertEqual([(p['turn_id'], p['requests'], p['subagent_requests']) for p in res['prompts']], [('t1', 1, 1)])
+        self.assertEqual(res['total_prompts'], 1)
+        self.assertEqual(sorted((p['turn_id'], p['requests']) for p in top_prompts(rows, TABLE, k=5)['prompts']), [('t1', 2), ('t2', 1)])
+
+    def test_window_uses_the_thread_first_observation_not_the_first_in_window(self):
+        rows = [ob('a', '00', turn='t1'), ob('s1', '05', kind='subagent', parent='s', agent='x', fresh=1),
+                ob('b', '10', turn='t2'), ob('s2', '15', kind='subagent', parent='s', agent='x', fresh=1)]
+        res = top_prompts(rows, TABLE, k=5, keep={ident(rows[3])})
+        self.assertEqual([(p['turn_id'], p['subagent_requests']) for p in res['prompts']], [('t1', 1)])
+
+    def test_same_id_with_different_providers_does_not_merge(self):
+        rows = [ob('a', '00', turn='t1'), ob('dup', '05', kind='subagent', parent='s', agent='x', provider='anthropic'),
+                ob('b', '10', turn='t2'), ob('dup', '15', kind='subagent', parent='s', agent='y', provider='other')]
+        self.assertEqual([a[2] for a in _assign(rows)], ['t1', 't1', 't2', 't2'])
+        self.assertNotEqual(ident(rows[1]), ident(rows[3]))
+
+
+class Currency(unittest.TestCase):
+    def test_non_usd_is_unpriced_everywhere(self):
+        from tokenatlas.pricing import price_vector
+        eur = ob('e', '00', turn='t1', provider='mistral', model='eu-model', fresh=1000000, out=1000000)
+        usd = ob('u', '01', turn='t1', fresh=1000000)
+        self.assertEqual(price_vector(eur, TABLE), (None, 0))
+        p = top_prompts([eur, usd], TABLE, k=5)['prompts'][0]
+        self.assertEqual((p['cost'], p['cost_complete']), (4.0, False))
+        only = top_prompts([eur], TABLE, k=5)['prompts'][0]
+        self.assertEqual((only['cost'], only['cost_complete']), (None, False))
 
 
 class Rank(unittest.TestCase):
@@ -179,6 +232,11 @@ class Cli(Base):
         self.assertEqual([p['turn_id'] for p in res['prompts']], ['u1'])
         self.assertEqual(json.loads(self.top('--json', '--project', '/work/app')[1])['total_prompts'], 2)
 
+    def test_window_keeps_subagent_rolled_up_to_a_parent_turn_before_it(self):
+        res = json.loads(self.top('--json', '--start', '2026-09-03T10:01:00+00:00', '--end', '2026-09-03T10:30:00+00:00')[1])
+        self.assertEqual([(p['turn_id'], p['requests'], p['subagent_requests']) for p in res['prompts']], [('u1', 1, 1)])
+        self.assertEqual(res['unattributed_observations'], 0)
+
     def test_errors(self):
         self.assertEqual(self.top('--start', '2026-09-03T10:30:00')[0], 2)
         self.assertEqual(self.top('-n', '0')[0], 2)
@@ -291,17 +349,71 @@ class CodexTurns(Base):
                 cx('turn_context', {'model': 'm'}, 4), cx_tokens(4)]
         self.assertEqual(self.turns(rows), [('user-2', 'derived'), ('user-2', 'derived'), ('ev2', 'derived')])
 
-    def test_merge_replaces_turn_fields_whichever_side_is_newer(self):
+    def stored(self):
         self.write('rollout-a.jsonl', current_rollout())
         with History(self.db) as h:
             h.refresh('codex', why.CODEX_SESSIONS)
-            stored = h.records()[0]
-        bad = dict(stored, turn_id='assistant-9', turn_confidence='derived')
-        for a, b in ((bad, stored), (stored, bad)):
-            merged = merge_observations(a, b)
-            self.assertEqual((merged['turn_id'], merged['turn_confidence']),
-                             (stored['turn_id'], 'observed') if 'observed' in (a['turn_confidence'], b['turn_confidence'])
-                             else (b['turn_id'], 'derived'))
+            return h.records()[0]
+
+    def test_import_merge_turn_fields_do_not_depend_on_order(self):
+        base = self.stored()
+        for ts_b, conf_a, conf_b in (('2026-09-03T10:08:30+00:00', 'derived', 'derived'), (base['ts'], 'derived', 'derived'),
+                                     (base['ts'], 'observed', 'derived'), ('2026-09-03T10:59:00+00:00', 'observed', 'derived'),
+                                     (base['ts'], 'absent', 'observed')):
+            a = dict(base, turn_id='ta', turn_confidence=conf_a)
+            b = dict(base, ts=ts_b, turn_id='tb', turn_confidence=conf_b)
+            ab, ba = merge_observations(a, b), merge_observations(b, a)
+            self.assertEqual((ab['turn_id'], ab['turn_confidence']), (ba['turn_id'], ba['turn_confidence']), (ts_b, conf_a, conf_b))
+
+    def test_local_reread_is_authoritative_for_turn_fields(self):
+        base = self.stored()
+        for old_conf, new_id, new_conf in (('derived', None, 'absent'), ('derived', 'T9', 'observed'), ('observed', 'd9', 'derived')):
+            old = dict(base, turn_id='old', turn_confidence=old_conf)
+            new = dict(base, turn_id=new_id, turn_confidence=new_conf)
+            merged = merge_observations(old, new, authoritative_turns=True)
+            self.assertEqual((merged['turn_id'], merged['turn_confidence']), (new_id, new_conf))
+
+    def test_reread_of_a_later_copy_keeps_the_owners_turn(self):
+        # A resumed Claude session copies earlier requests into a new file; the earliest copy owns the request, so
+        # re-reading the later copy must not move the request to a turn of the copy's session.
+        base = self.stored()
+        base = dict(base, harness='claude')
+        owner = dict(base, session='s-original', turn_id='t-original', turn_confidence='derived')
+        copy = dict(base, ts='2026-09-03T11:30:00+00:00', session='s-resumed', turn_id='t-resumed', turn_confidence='derived')
+        merged = merge_observations(owner, copy, authoritative_turns=True)
+        self.assertEqual((merged['session'], merged['turn_id']), ('s-original', 't-original'))
+        # The stored copy may also be the later one: a re-read of the earlier (owning) file wins.
+        merged = merge_observations(copy, owner, authoritative_turns=True)
+        self.assertEqual((merged['session'], merged['turn_id']), ('s-original', 't-original'))
+
+    def test_refresh_clears_or_replaces_stale_turns(self):
+        self.write('rollout-a.jsonl', current_rollout())
+        real = why.collect_codex
+
+        def rewrite(turn_id, conf):
+            def collect(*args, **kw):
+                return [dataclasses.replace(r, turn_id=turn_id, turn_confidence=conf) for r in real(*args, **kw)]
+            return collect
+        for old, new in ((('x', 'derived'), (None, 'absent')), (('x', 'derived'), ('T7', 'observed'))):
+            with History(self.db) as h:
+                with unittest.mock.patch.object(why, 'collect_codex', rewrite(*old)):
+                    h.refresh('codex', why.CODEX_SESSIONS)
+                h.connection.execute("UPDATE files SET fingerprint='stale'")
+                h.connection.commit()
+                with unittest.mock.patch.object(why, 'collect_codex', rewrite(*new)):
+                    h.refresh('codex', why.CODEX_SESSIONS)
+                self.assertEqual({(r['turn_id'], r['turn_confidence']) for r in h.records()}, {new}, (old, new))
+            self.db.unlink()
+            for extra in (self.db.with_name(self.db.name + s) for s in ('-wal', '-shm')):
+                if extra.exists():extra.unlink()
+
+    def test_legacy_turn_after_task_complete_in_a_file_with_explicit_turns(self):
+        rows = [cx_meta(), cx('turn_context', {'turn_id': 'T1', 'model': 'm'}, 1), cx_msg('user', 'explicit one', 1),
+                cx_msg('user', 'steer', 2), cx_tokens(2), cx('event_msg', {'type': 'task_complete', 'turn_id': 'T1'}, 3),
+                cx('event_msg', {'type': 'user_message', 'message': 'legacy two', 'id': 'ev2'}, 4),
+                cx('turn_context', {'model': 'm'}, 4), cx_tokens(4),
+                cx('event_msg', {'type': 'user_message', 'message': 'legacy three', 'id': 'ev3'}, 5), cx_tokens(5)]
+        self.assertEqual(self.turns(rows), [('T1', 'observed'), ('ev2', 'derived'), ('ev3', 'derived')])
 
     def test_refresh_after_revision_bump_stores_corrected_turns(self):
         self.write('rollout-a.jsonl', current_rollout())

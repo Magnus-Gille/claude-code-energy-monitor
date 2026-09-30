@@ -13,50 +13,80 @@ def _t(ts):
     return datetime.fromisoformat(ts.replace('Z', '+00:00'))
 
 
+def ident(r):
+    """Full observation identity: ids alone can repeat across providers and machines."""
+    return (r.get('provider'), r['harness'], r.get('machine'), r['id'])
+
+
+def _thread(r):
+    """A subagent thread: a Claude subagent is (session, agent) inside its parent's session, other harnesses use a child session."""
+    return (r['harness'], r['session'], r.get('agent')) if r['harness'] == 'claude' else (r['harness'], r['session'])
+
+
 def assign_prompts(records):
-    """{observation id: (harness, root_session, turn_id, 'own' | 'rolled_up')}; unattributable observations are omitted."""
+    """Parallel to records: (harness, root_session, turn_id, 'own' | 'rolled_up' | 'own_subagent') or None when unattributable.
+    Positional, so duplicate ids never collide. A subagent thread binds to the parent turn running at its first observation,
+    and all its observations follow it; only the orphan fallback (no parent turn found) is per observation."""
+    at = [_t(r['ts']) for r in records]
     starts, parents = {}, {}  # (harness, session, turn) -> min ts; (harness, session) -> parent session of a subagent thread
-    for r in records:
+    for r, ts in zip(records, at):
         if r['thread_kind'] == 'subagent':
             if r.get('parent_session'):parents.setdefault((r['harness'], r['session']), r['parent_session'])
         elif r.get('turn_id'):
             key = (r['harness'], r['session'], r['turn_id'])
-            starts[key] = min(starts.get(key, r['ts']), r['ts'], key=_t)
+            starts[key] = min(starts.get(key, ts), ts)
     turns = {}  # (harness, session) -> [(start, turn)] sorted by start
     for (harness, session, turn), start in starts.items():
-        turns.setdefault((harness, session), []).append((_t(start), turn))
+        turns.setdefault((harness, session), []).append((start, turn))
     for found in turns.values():found.sort()
-    result = {}
-    for r in records:
-        if r['thread_kind'] != 'subagent':
-            if r.get('turn_id'):result[r['id']] = (r['harness'], r['session'], r['turn_id'], 'own')
-            continue
+    first = {}  # thread -> earliest observation
+    for r, ts in zip(records, at):
+        if r['thread_kind'] == 'subagent':first[_thread(r)] = min(first.get(_thread(r), ts), ts)
+    bound = {}  # thread -> (root session, turn) or None
+    def bind(r):
         session, seen = r['session'], {r['session']}
         for _ in range(MAX_DEPTH):
             parent = parents.get((r['harness'], session))
             if parent is None or parent == session:break  # Claude subagents share their parent's session
-            if parent in seen:session = None;break
+            if parent in seen:return None  # cycle
             seen.add(parent);session = parent
-        found = turns.get((r['harness'], session)) if session else None
-        at = bisect_right(found, (_t(r['ts']), chr(0x10FFFF))) - 1 if found else -1
-        if at >= 0:result[r['id']] = (r['harness'], session, found[at][1], 'rolled_up')
-        elif r.get('turn_id'):result[r['id']] = (r['harness'], r['session'], r['turn_id'], 'own_subagent')
+        found = turns.get((r['harness'], session))
+        n = bisect_right(found, (first[_thread(r)], chr(0x10FFFF))) - 1 if found else -1
+        return (session, found[n][1]) if n >= 0 else None
+    result = []
+    for r in records:
+        if r['thread_kind'] != 'subagent':
+            result.append((r['harness'], r['session'], r['turn_id'], 'own') if r.get('turn_id') else None)
+            continue
+        t = _thread(r)
+        if t not in bound:bound[t] = bind(r)
+        if bound[t]:result.append((r['harness'], *bound[t], 'rolled_up'))
+        else:result.append((r['harness'], r['session'], r['turn_id'], 'own_subagent') if r.get('turn_id') else None)
     return result
 
 
-def top_prompts(records, table, k=5, by='cost'):
-    """Rank prompts by list-price cost (unpriced last) or total tokens; see module docstring for the roll-up."""
+def _cost(r, table):
+    """List-price cost in USD, or None: a non-USD price is never mixed into a USD sum."""
+    priced = price_observation(r, table)
+    return priced['cost'] if priced['cost'] is not None and priced.get('currency') == 'USD' else None
+
+
+def top_prompts(records, table, k=5, by='cost', keep=None):
+    """Rank prompts by list-price cost (unpriced last) or total tokens. Assignment runs over all records; `keep`, a set of
+    ident() values, then restricts which observations contribute (a filter window), so a subagent still rolls up to a parent turn outside it."""
     if by not in ('cost', 'tokens'):raise ValueError("by must be 'cost' or 'tokens'")
     assigned = assign_prompts(records)
-    groups = {}
-    for r in records:
-        if r['id'] in assigned:groups.setdefault(assigned[r['id']][:3], []).append(r)
+    groups, unattributed = {}, 0
+    for r, found in zip(records, assigned):
+        if keep is not None and ident(r) not in keep:continue
+        if found:groups.setdefault(found[:3], []).append(r)
+        else:unattributed += 1
     prompts = []
     for (harness, session, turn), rows in groups.items():
         own = [r for r in rows if r['thread_kind'] != 'subagent']
         subs = [r for r in rows if r['thread_kind'] == 'subagent']
         tokens = {c: sum((r['tokens'].get(c) or 0) for r in rows) for c in CLASSES}
-        costs = [price_observation(r, table)['cost'] for r in rows]
+        costs = [_cost(r, table) for r in rows]
         priced = [c for c in costs if c is not None]
         first, last = min((r['ts'] for r in rows), key=_t), max((r['ts'] for r in rows), key=_t)
         head = min(own or rows, key=lambda r: _t(r['ts']))
@@ -74,4 +104,4 @@ def top_prompts(records, table, k=5, by='cost'):
     else:
         prompts.sort(key=lambda p: -p['total_tokens'])
     return {'prompts': prompts[:k], 'total_prompts': len(prompts),
-            'unattributed_observations': len(records) - len(assigned), 'by': by}
+            'unattributed_observations': unattributed, 'by': by}

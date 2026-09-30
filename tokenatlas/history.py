@@ -188,8 +188,9 @@ def merge_usage(a, b):
     return why._merge_sanitized_usage(a, b)
 
 
-def merge_observations(a, b):
-    """Max counters, stable metadata preference, then revalidate normalization."""
+def merge_observations(a, b, authoritative_turns=False):
+    """Max counters, stable metadata preference, then revalidate normalization. authoritative_turns (a local re-read, b being
+    the fresh parse) replaces the turn fields with b's, clearing them when b has none; imports keep the deterministic preference."""
     # Lexical JSON tie-break makes equal-time metadata deterministic across imports.
     winner, other = sorted((a, b), key=lambda x: (x['ts'], json.dumps(x, sort_keys=True)), reverse=True)
     result = dict(winner)
@@ -199,13 +200,6 @@ def merge_observations(a, b):
             _, original = min(starts, key=lambda pair: pair[0])
             for key in ('session', 'project_id', 'project_label', 'cwd', 'harness_version', 'session_started_at'):
                 result[key] = original.get(key)
-    # Turn fields are replaced, not gap-filled: the more certain attribution wins, the incoming one (b) on a tie,
-    # so a re-read with a corrected parser overwrites what an older parse stored.
-    rank = {'observed': 2, 'derived': 1}
-    if rank.get(b.get('turn_confidence'), 0) >= rank.get(a.get('turn_confidence'), 0):
-        result['turn_id'], result['turn_confidence'] = b.get('turn_id'), b.get('turn_confidence')
-    else:
-        result['turn_id'], result['turn_confidence'] = a.get('turn_id'), a.get('turn_confidence')
     for k, v in other.items():
         if result.get(k) in (None, '', 'unknown', 'absent') and v not in (None, '', 'unknown', 'absent'):
             result[k] = v
@@ -213,6 +207,10 @@ def merge_observations(a, b):
         # The earliest copy owns a request; on equal time keep the stored one (a).
         owner = b if b['ts'] < a['ts'] else a
         result['session'], result['parent_session'] = owner['session'], owner['parent_session']
+        result['turn_id'], result['turn_confidence'] = owner.get('turn_id'), owner.get('turn_confidence')
+    if authoritative_turns and b.get('session') == result['session']:
+        # Only a re-read of the owning copy speaks for the request's turn.
+        result['turn_id'], result['turn_confidence'] = b.get('turn_id'), b.get('turn_confidence')
     result['tariff'] = {**(other.get('tariff') or {}), **(winner.get('tariff') or {})} or None
     flags = [x.get('output_final') for x in (a, b)]
     output_final = True if True in flags else False if False in flags else None
@@ -622,7 +620,7 @@ class History:
                         key = _key(item)
                         old = self._existing(c, key)
                         if old:
-                            item = merge_observations(old, item)
+                            item = merge_observations(old, item, authoritative_turns=True)
                         dirty = dirty or item != old
                         dirty |= c.execute('INSERT OR IGNORE INTO sources VALUES (?,?)',
                                            (self._insert(c, _encode(item, key)), file_id)).rowcount > 0

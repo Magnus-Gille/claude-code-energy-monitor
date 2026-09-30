@@ -68,7 +68,8 @@ class UnitPricesTests(unittest.TestCase):
     def test_unit_prices_reproduce_price_observation_cost(self):
         seen = dict(priced=0, none=0)
         for o in self.matrix():
-            cost = price_observation(o, TABLE)['cost']
+            priced = price_observation(o, TABLE)
+            cost = priced['cost'] if priced['currency'] in (None, 'USD') else None  # unit prices are USD only
             vector, hour = price_vector(o, TABLE)
             self.assertEqual(unit_prices(o, TABLE), vector)
             self.assertEqual(vector is None, cost is None, o)

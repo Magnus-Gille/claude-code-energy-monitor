@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 
 from .why import (
-    _codex_event_turn_id, _codex_user_event_identity, _explicit_turn_id,
+    _CODEX_TURN_END, _codex_event_turn_id, _codex_user_event_identity, _explicit_turn_id,
     _first_text, _is_genuine_user_row, _mapping, _meta_text,
 )
 
@@ -23,7 +23,12 @@ _SECRET_PATTERNS = [re.compile(p, flags) for p, flags in (
     (r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", 0),
     (r"\bxox[abprs]-[A-Za-z0-9-]{8,}", 0),
     (r"\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*", 0),
+    (r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{10,}", 0),
+    (r"\bwhsec_[A-Za-z0-9]{10,}", 0),
+    (r"\bAIza[0-9A-Za-z_-]{35}\b", 0),
 )]
+_BEARER = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]{12,}=*")
+_AUTHORIZATION = re.compile(r"""(?i)\b(authorization["']?\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?("[^"]*"|'[^']*'|\S+)""")
 _KEY_VALUE = re.compile(
     r"""(?i)(\w*(?:password|passwd|secret|token|api[_-]?key)\w*["']?\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)""")
 _HEX_RUN = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{32,}(?![0-9A-Za-z])")
@@ -43,6 +48,8 @@ def sanitize(text: object, limit: int = 200) -> str | None:
     text = " ".join(text.split())
     if not text:
         return None
+    text = _AUTHORIZATION.sub(lambda m: m.group(1) + REDACTED, text)
+    text = _BEARER.sub(lambda m: m.group(1) + REDACTED, text)
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(REDACTED, text)
     text = _KEY_VALUE.sub(lambda m: m.group(1) + REDACTED, text)
@@ -155,8 +162,11 @@ def _codex(path: Path, turn_id: str, limit: int) -> str | None:
         explicit = _meta_text(_codex_event_turn_id(row, payload))
         genuine = _codex_genuine(row_type, event_type, payload)
         text = _codex_prompt(_codex_text(row, payload)) if genuine else ""
+        ended = row_type == "event_msg" and event_type in _CODEX_TURN_END
+        if ended and not explicit:
+            seen_explicit = False
         if explicit:
-            seen_explicit = True
+            seen_explicit = not ended  # explicitness is per turn, as in collect_codex
             if explicit == turn_id:
                 if text:
                     return sanitize(text, limit)

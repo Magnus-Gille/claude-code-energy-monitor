@@ -125,7 +125,7 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
     assigned = prompts.assign_prompts(records)
     shown = {}  # prompt key -> ordinal, numbered by first appearance in row order
     rows = []
-    for record in records:
+    for index, record in enumerate(records):
         dt = datetime.fromisoformat(record['ts']).astimezone(zone)
         row = {key: metadata(key, record.get(key), record) for key in
                ('harness', 'provider', 'model', 'effort', 'thread_kind', 'origin', 'turn_confidence')}
@@ -138,7 +138,7 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
                 value = f"{record['harness']}:{value}"
             row[key] = alias(kind, value) if redact else value
         unit, cw1h = pricing.price_vector(record, table)
-        found = assigned.get(record.get('id'))
+        found = assigned[index]
         key = found and ':'.join(found[:3])
         if key and key not in shown:
             shown[key] = len(shown)

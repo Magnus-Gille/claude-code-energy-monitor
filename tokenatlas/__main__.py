@@ -276,6 +276,7 @@ def main(argv=None):
                     result={'html':str(path.resolve()),'skipped':True,'reason':'unchanged'}
                 else:
                     records=history.records()
+                    if texts is not None:texts=prompt_store.visible(prompt_store.store_path(args.db),records,pricing.load_prices())
                     payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared,prompt_texts=texts)
                     payload['initial_granularity']='day'
                     write_report(path,render_report(payload,state=state))
@@ -300,8 +301,11 @@ def main(argv=None):
                     prompt_store.forget(store)
                     print(json.dumps({'forgotten':str(store)}));return 0
                 table=pricing.load_prices(args.prices)
-                kept=prompt_store.update(store,history.records(),table,history.machine,args.limit,args.by) if args.keep_text else None
-                result=prompts.top_prompts(history.records(start,end,args.harness,args.project),table,args.limit,args.by)
+                everything=history.records()  # rank over the whole history; the filters only choose which rows contribute
+                kept=prompt_store.update(store,everything,table,history.machine,args.limit,args.by) if args.keep_text else None
+                filtered=any(x is not None for x in (start,end,args.harness,args.project))
+                keep={prompts.ident(r) for r in history.records(start,end,args.harness,args.project)} if filtered else None
+                result=prompts.top_prompts(everything,table,args.limit,args.by,keep)
                 texts=prompt_store.load(store)
                 if kept:result['text_store']=kept
                 if not args.json:
@@ -344,6 +348,9 @@ def main(argv=None):
                 result['source_status']=source_status
                 if args.records:result['records']=records
                 if args.html:
+                    if texts is not None:
+                        filtered=any(getattr(args,key) is not None for key in ('start','end','harness','project','session','turn','model','effort','provider','agent'))
+                        texts=prompt_store.visible(prompt_store.store_path(args.db),history.records() if filtered else records,pricing.load_prices())
                     payload=build_report(records,source_status,args.timezone,redact=not args.private,prompt_texts=texts)
                     payload['initial_granularity']=args.granularity
                     write_report(path,render_report(payload,state=state))

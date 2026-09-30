@@ -169,7 +169,7 @@ tokenatlas top --json --with-text   # include stored text in JSON
 ```
 
 A prompt is one user turn plus every request it caused, including subagent work (rolled up by time and
-parent session). Prompts are ranked by list-price cost (unpriced last) or by tokens; cost is API-equivalent,
+parent session). Prompts are ranked by list-price cost (unpriced last, and any non-USD price counts as unpriced) or by tokens; cost is API-equivalent,
 `n/a` when unpriced and `≥` when only partly priced. The HTML report has a matching "Dyraste prompterna" card
 that follows the report filters.
 
@@ -179,7 +179,14 @@ It holds, for the current global top prompts only, the harness, session, turn id
 preview (whitespace collapsed, secret-like strings masked, at most about 200 characters) read from this
 machine's own logs; prompts from other machines get no text. A prompt that falls out of the top is removed
 from the file on the next `--keep-text`. Shared (pseudonymized, default) reports never contain prompt text;
-private reports (`report --html --private`, `open` without `--shared`) show the previews when the file exists.
+private reports (`report --html --private`, `open` without `--shared`) show the previews of the prompts that are in the
+current global top (by the recorded `-n` and ranking) when the file exists. Previews whose prompt has fallen out of the top
+are kept only until the next `--keep-text`. Prompts whose text could not be read are retried on each `--keep-text`.
+
+On POSIX the store is only read when it is a regular file owned by you with mode 0600 and no other hard links; a symlink,
+a foreign owner, group/other access or extra links are refused with a warning, and `--keep-text` replaces such a file
+with a fresh 0600 one (never following a symlink). `--forget-text` unlinks the file itself and warns if other hard links still
+hold the text. On Windows these owner and mode checks are unavailable: the file relies on the user profile's ACLs.
 
 ## Fixed context overhead
 
