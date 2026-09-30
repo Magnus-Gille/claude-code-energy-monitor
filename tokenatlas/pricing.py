@@ -82,28 +82,30 @@ def _times(count, price):
     return None if price is None else count * price / 1e6
 
 
-def price_observation(obs, table):
+def _rates(obs, table):
+    """(early result, None) when the observation is decided before any token maths, else (None, rates) with the selected
+    prices, multiplier, assumptions and reasons; shared by price_observation and unit_prices."""
     provider, model = obs.get('provider') or 'unknown', obs.get('model')
     provider = (table.get('provider_aliases') or {}).get(provider, provider)
     if provider in (table.get('local_providers') or ()):
-        return _result('local', reason='local model')
+        return _result('local', reason='local model'), None
     if not isinstance(model, str) or model in ('', 'unknown'):
-        return _result('unpriced', reason=f'no model recorded for {provider}')
+        return _result('unpriced', reason=f'no model recorded for {provider}'), None
     provider, entry = _find(table, provider, model)
     if entry is None:
-        return _result('unpriced', reason=f'no list price for {provider}/{model}')
+        return _result('unpriced', reason=f'no list price for {provider}/{model}'), None
     ref = {'provider': provider, 'model': entry['model'], 'source_url': entry.get('source_url'),
            'retrieved_on': entry.get('retrieved_on')}
     currency = entry.get('currency')
     if entry.get('free'):
-        return _result('free', dict.fromkeys(('input', 'cache_write', 'cache_read', 'output'), 0.0), 0.0, currency, ref=ref)
+        return _result('free', dict.fromkeys(('input', 'cache_write', 'cache_read', 'output'), 0.0), 0.0, currency, ref=ref), None
     tokens, raw = obs.get('tokens') or {}, obs.get('raw_usage') or {}
     claude = obs.get('harness') == 'claude'
     prices = {k: entry.get(k) for k in PRICE_KEYS}
     assumptions, reasons, multiplier = [], [], 1.0
 
     def unpriced(reason):
-        return _result('unpriced', reason=reason, currency=currency, assumptions=assumptions, ref=ref)
+        return _result('unpriced', reason=reason, currency=currency, assumptions=assumptions, ref=ref), None
 
     # Long context replaces the whole price set once the request's total input exceeds the threshold.
     long = entry.get('long_context')
@@ -154,13 +156,20 @@ def price_observation(obs, table):
     if context_unknown:
         prices = dict.fromkeys(PRICE_KEYS)
 
-    write = tokens.get('cache_write')
-    if claude:
+    return None, dict(prices=prices, multiplier=multiplier, assumptions=assumptions, reasons=reasons, claude=claude,
+                      currency=currency, ref=ref, tokens=tokens, raw=raw)
+
+
+def _parts(r):
+    """(parts, hour): per-class costs from _rates, and the 1-hour cache-write tokens when the 5m/1h split is known (else 0)."""
+    prices, tokens, raw, reasons = r['prices'], r['tokens'], r['raw'], r['reasons']
+    write, hour = tokens.get('cache_write'), 0
+    if r['claude']:
         split = raw.get('cache_creation') or {}
-        five, hour = split.get('ephemeral_5m_input_tokens'), split.get('ephemeral_1h_input_tokens')
-        if five is not None and hour is not None and write is not None and five + hour == write:
-            pair = (_times(five, prices['cache_write_5m']), _times(hour, prices['cache_write_1h']))
-            write_part = None if None in pair else sum(pair)
+        five, hr = split.get('ephemeral_5m_input_tokens'), split.get('ephemeral_1h_input_tokens')
+        if five is not None and hr is not None and write is not None and five + hr == write:
+            pair = (_times(five, prices['cache_write_5m']), _times(hr, prices['cache_write_1h']))
+            write_part, hour = (None if None in pair else sum(pair)), hr
         else:
             write_part = 0.0 if write == 0 else None
             if write:
@@ -170,14 +179,44 @@ def price_observation(obs, table):
     parts = {'input': _times(tokens.get('fresh_input'), prices['input']), 'cache_write': write_part,
              'cache_read': _times(tokens.get('cache_read'), prices['cache_read']),
              'output': _times(tokens.get('output'), prices['output'])}
-    if multiplier != 1.0:
-        parts = {k: None if v is None else v * multiplier for k, v in parts.items()}
+    if r['multiplier'] != 1.0:
+        parts = {k: None if v is None else v * r['multiplier'] for k, v in parts.items()}
+    return parts, hour
+
+
+def price_observation(obs, table):
+    early, r = _rates(obs, table)
+    if early:
+        return early
+    parts, _ = _parts(r)
+    reasons, assumptions = r['reasons'], r['assumptions']
     missing = [k for k, v in parts.items() if v is None]
     if missing:
         if not reasons:
             reasons.append('unknown or unpriced token classes: ' + ', '.join(missing))
-        return _result('partial', parts, None, currency, assumptions, '; '.join(reasons), ref)
-    return _result('assumed' if assumptions else 'priced', parts, sum(parts.values()), currency, assumptions, None, ref)
+        return _result('partial', parts, None, r['currency'], assumptions, '; '.join(reasons), r['ref'])
+    return _result('assumed' if assumptions else 'priced', parts, sum(parts.values()), r['currency'], assumptions, None, r['ref'])
+
+
+def price_vector(obs, table):
+    """(unit prices, cw1h) or (None, 0) when price_observation's cost is None. Unit prices are USD per token,
+    [input, cache_write_5m, cache_write_1h, cache_read, output], multiplier applied; cost =
+    fresh*in + (write-cw1h)*cw5m + cw1h*cw1h + read*cr + out*out, where cw1h is the 1-hour write tokens when the 5m/1h split is known."""
+    early, r = _rates(obs, table)
+    if early:
+        return ([0.0] * 5, 0) if early['status'] == 'free' and early.get('currency') in (None, 'USD') else (None, 0)
+    if r['currency'] != 'USD':return None, 0  # unit prices are USD: never mix currencies
+    parts, hour = _parts(r)
+    if None in parts.values():
+        return None, 0
+    p, m = r['prices'], r['multiplier']
+    w5, w1 = (p['cache_write_5m'], p['cache_write_1h']) if r['claude'] else (p['cache_write'],) * 2
+    # A price may be None only where its token count is zero (then it contributes nothing).
+    return [(v or 0.0) * m / 1e6 for v in (p['input'], w5, w1, p['cache_read'], p['output'])], hour
+
+
+def unit_prices(obs, table):
+    return price_vector(obs, table)[0]
 
 
 def summarize_costs(observations, table, key=lambda o: (o['provider'], o['model'])):

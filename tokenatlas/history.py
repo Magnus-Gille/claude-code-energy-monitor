@@ -23,6 +23,7 @@ from tokenatlas import why
 OBSERVATION_VERSION = 1  # the 'v' field inside observation dicts
 SCHEMA_VERSION = 2  # PRAGMA user_version of the SQLite layout
 COLLECTOR_VERSION = 5
+HARNESS_REVISION = {'pi': 1, 'codex': 1}  # bump to force a re-read of one harness's files only (appended to its fingerprint)
 FIELDS = ('fresh_input', 'cache_read', 'cache_write', 'output')
 ALL_FIELDS = FIELDS + ('reasoning',)
 
@@ -187,8 +188,9 @@ def merge_usage(a, b):
     return why._merge_sanitized_usage(a, b)
 
 
-def merge_observations(a, b):
-    """Max counters, stable metadata preference, then revalidate normalization."""
+def merge_observations(a, b, authoritative_turns=False):
+    """Max counters, stable metadata preference, then revalidate normalization. authoritative_turns (a local re-read, b being
+    the fresh parse) replaces the turn fields with b's, clearing them when b has none; imports keep the deterministic preference."""
     # Lexical JSON tie-break makes equal-time metadata deterministic across imports.
     winner, other = sorted((a, b), key=lambda x: (x['ts'], json.dumps(x, sort_keys=True)), reverse=True)
     result = dict(winner)
@@ -202,9 +204,16 @@ def merge_observations(a, b):
         if result.get(k) in (None, '', 'unknown', 'absent') and v not in (None, '', 'unknown', 'absent'):
             result[k] = v
     if result['harness'] == 'claude' and a['session'] != b['session']:
-        # The earliest copy owns a request; on equal time keep the stored one (a).
-        owner = b if b['ts'] < a['ts'] else a
+        # The earliest copy owns a request. On equal time a local re-read keeps the stored one (a); an import
+        # picks the lexically smaller session, then the JSON dump, so the result never depends on import order.
+        if a['ts'] == b['ts'] and not authoritative_turns:
+            owner = min((a, b), key=lambda x: (x['session'], json.dumps(x, sort_keys=True)))
+        else:owner = b if b['ts'] < a['ts'] else a
         result['session'], result['parent_session'] = owner['session'], owner['parent_session']
+        result['turn_id'], result['turn_confidence'] = owner.get('turn_id'), owner.get('turn_confidence')
+    if authoritative_turns and b.get('session') == result['session']:
+        # Only a re-read of the owning copy speaks for the request's turn.
+        result['turn_id'], result['turn_confidence'] = b.get('turn_id'), b.get('turn_confidence')
     result['tariff'] = {**(other.get('tariff') or {}), **(winner.get('tariff') or {})} or None
     flags = [x.get('output_final') for x in (a, b)]
     output_final = True if True in flags else False if False in flags else None
@@ -504,7 +513,7 @@ class History:
             self.connection.close()
 
     @staticmethod
-    def fingerprint(path, include_sqlite_sidecars=False):
+    def fingerprint(path, include_sqlite_sidecars=False, harness=None):
         paths = [Path(path)]
         if include_sqlite_sidecars:
             # -shm is deliberately excluded: SQLite readers rewrite this derived WAL index
@@ -517,6 +526,8 @@ class History:
                 values.append([candidate.name, s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns])
             except FileNotFoundError:
                 values.append([candidate.name, None])
+        if harness in HARNESS_REVISION:
+            values.append(['revision', HARNESS_REVISION[harness]])
         return json.dumps(values)
 
     def refresh(self, harness, root):
@@ -556,7 +567,7 @@ class History:
                        'pi':why.collect_pi, 'opencode':why.collect_opencode}[harness]
             for path in paths:
                 try:
-                    before = self.fingerprint(path, harness == 'opencode')
+                    before = self.fingerprint(path, harness == 'opencode', harness)
                     previous = c.execute('SELECT fingerprint,diagnostics FROM files WHERE harness=? AND path=?',
                                          (harness, str(path))).fetchone()
                     if previous and previous['fingerprint'] == before:
@@ -598,7 +609,7 @@ class History:
                             result['errors'].append(f'{path}: {type(exc).__name__}: {exc}')
                             continue
                     result['files_parsed'] += 1
-                    changed = before != self.fingerprint(path, harness == 'opencode')
+                    changed = before != self.fingerprint(path, harness == 'opencode', harness)
                     if changed:
                         result['changed_during_read'] += 1
                         if harness != 'opencode':
@@ -612,7 +623,7 @@ class History:
                         key = _key(item)
                         old = self._existing(c, key)
                         if old:
-                            item = merge_observations(old, item)
+                            item = merge_observations(old, item, authoritative_turns=True)
                         dirty = dirty or item != old
                         dirty |= c.execute('INSERT OR IGNORE INTO sources VALUES (?,?)',
                                            (self._insert(c, _encode(item, key)), file_id)).rowcount > 0

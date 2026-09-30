@@ -15,6 +15,7 @@ from tokenatlas import why
 from tokenatlas import __version__
 from tokenatlas import sessions
 from tokenatlas.history import History, summarize
+from tokenatlas import pricing, prompt_store, prompts
 from tokenatlas.report import build_report, coverage_key, read_report_state, render_report, report_state, write_report
 
 DEFAULT_TIMEZONE='Europe/Stockholm'
@@ -94,6 +95,28 @@ def refresh_all(history):
     return {'status':worst,'harnesses':entries}
 
 
+def render_top(result,texts=None):
+    """Compact table of ranked prompts; cost is list-price, '≥' when some requests could not be priced."""
+    zone=ZoneInfo(DEFAULT_TIMEZONE)
+    rows=[('#','when','harness','project','models','req','sub','Mtok','cost','resume')]
+    for i,p in enumerate(result['prompts'],1):
+        cost='n/a' if p['cost'] is None else ('' if p['cost_complete'] else '≥')+f"${p['cost']:.2f}"
+        when=datetime.fromisoformat(p['first_ts']).astimezone(zone).strftime('%Y-%m-%d %H:%M')
+        rows.append((str(i),when,p['harness'],p['project_label'] or '-',','.join(p['models']) or '-',str(p['requests']),
+                     str(p['subagents']),f"{p['total_tokens']/1e6:.2f}",cost,p['resume'] or '-'))
+    widths=[max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    lines=['  '.join(c.ljust(w) for c,w in zip(r,widths)).rstrip() for r in rows]
+    if texts:  # stored previews go on an indented second line under their prompt
+        shown=[]
+        for line,p in zip(lines[1:],result['prompts']):
+            shown.append(line)
+            text=texts.get((p['harness'],p['session'],p['turn_id']))
+            if text:shown.append('    '+text)
+        lines=[lines[0],*shown]
+    if len(result['prompts'])<result['total_prompts']:lines.append(f"showing {len(result['prompts'])} of {result['total_prompts']} prompts")
+    return '\n'.join(lines)
+
+
 def default_db():
     """Default history path; one-time move of the pre-rename agentmon directory (never used with --db)."""
     base=Path(os.environ.get('XDG_STATE_HOME',Path.home()/'.local/state'))
@@ -105,6 +128,12 @@ def default_db():
             os.rename(old,new)
             print(f'moved history from {old} to {new}',file=sys.stderr)
     return new/'history.sqlite3'
+
+
+def _visible_texts(history,db):
+    """The stored prompt texts a private report may embed (the current global top k); the history is read only when a store exists."""
+    store=prompt_store.store_path(db)
+    return prompt_store.visible(store,history.records(),pricing.load_prices()) if os.path.lexists(store) else {}
 
 
 def main(argv=None):
@@ -161,6 +190,18 @@ def main(argv=None):
         else:
             sub.add_argument('--unit');sub.add_argument('--thread',action='append',default=[])
             sub.add_argument('--outcome',choices=sessions.OUTCOMES);sub.add_argument('--note',default='')
+    top=commands.add_parser('top',help='Rank the most expensive user prompts, subagent work rolled up into each.')
+    top.add_argument('-n','--limit',type=int,default=5)
+    top.add_argument('--by',choices=('cost','tokens'),default='cost')
+    top.add_argument('--start',help='Inclusive ISO timestamp; offset required.')
+    top.add_argument('--end',help='Exclusive ISO timestamp; offset required.')
+    top.add_argument('--harness',choices=('claude','codex','pi','opencode'))
+    top.add_argument('--project',help='Exact full project identity, not basename.')
+    top.add_argument('--prices',type=Path,help='Override the price table.')
+    top.add_argument('--json',action='store_true')
+    top.add_argument('--keep-text',action='store_true',help='Store the text of the current global top -n prompts in top-prompts.json next to the history (0600).')
+    top.add_argument('--forget-text',action='store_true',help='Delete the stored prompt text.')
+    top.add_argument('--with-text',action='store_true',help='With --json: include stored prompt text.')
     overhead=commands.add_parser('overhead',help='Fixed context overhead: floor tokens, instruction and skill sizes.')
     overhead.add_argument('--refresh',action='store_true',help='Rescan the default session roots first.')
     overhead.add_argument('--harness',choices=('claude','codex','pi','opencode'))
@@ -172,10 +213,13 @@ def main(argv=None):
     try:
         start=end=None
         if args.command=='refresh' and args.all and args.root:raise ValueError('--root cannot be used with --all')
-        if args.command=='report':
-            max_age=parse_duration(args.max_age) if args.max_age is not None else None
-            if (args.if_changed or max_age is not None) and not args.html:raise ValueError('--if-changed and --max-age need --html')
-            ZoneInfo(args.timezone)
+        if args.command=='top' and args.limit<1:raise ValueError('--limit must be at least 1')
+        if args.command=='top' and args.keep_text and args.forget_text:raise ValueError('--keep-text and --forget-text cannot be combined')
+        if args.command in ('report','top'):
+            if args.command=='report':
+                max_age=parse_duration(args.max_age) if args.max_age is not None else None
+                if (args.if_changed or max_age is not None) and not args.html:raise ValueError('--if-changed and --max-age need --html')
+                ZoneInfo(args.timezone)
             for name in ('start','end'):
                 value=getattr(args,name)
                 if value:
@@ -185,7 +229,7 @@ def main(argv=None):
                     if name=='start':start=parsed
                     else:end=parsed
             if start and end and start>=end:raise ValueError('--start must precede --end')
-            if args.html:_output_path(args.html,args.db)
+            if args.command=='report' and args.html:_output_path(args.html,args.db)
         if args.command=='open':path=_output_path(args.html or args.db.parent/'report.html',args.db)
         if args.command=='overhead':
             from tokenatlas import overhead as _overhead
@@ -232,12 +276,13 @@ def main(argv=None):
                 history.connection.execute('BEGIN')
                 source_status=history.doctor()
                 spec=_spec('redacted' if args.shared else 'local',DEFAULT_TIMEZONE,'day',{})
-                state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token)
+                texts=None if args.shared else _visible_texts(history,args.db)  # shared reports ignore the store
+                state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts))
                 if path.exists() and read_report_state(path)==state:
                     result={'html':str(path.resolve()),'skipped':True,'reason':'unchanged'}
                 else:
                     records=history.records()
-                    payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared)
+                    payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared,prompt_texts=texts)
                     payload['initial_granularity']='day'
                     write_report(path,render_report(payload,state=state))
                     result={'html':str(path.resolve()),'observations':len(records),'privacy':payload['privacy']}
@@ -254,6 +299,26 @@ def main(argv=None):
                     cowork,problems=why.cowork_scan()
                     results=[history.refresh('claude',root) for root in [roots['claude'],*cowork]]
                     result=_with_problems(results[0] if len(results)==1 else aggregate(results),problems)
+            elif args.command=='top':
+                history.connection.execute('BEGIN')
+                store=prompt_store.store_path(args.db)
+                if args.forget_text:
+                    prompt_store.forget(store)
+                    print(json.dumps({'forgotten':str(store)}));return 0
+                table=pricing.load_prices(args.prices)
+                everything=history.records()  # rank over the whole history; the filters only choose which rows contribute
+                kept=prompt_store.update(store,everything,table,history.machine,args.limit,args.by) if args.keep_text else None
+                filtered=any(x is not None for x in (start,end,args.harness,args.project))
+                keep={prompts.ident(r) for r in history.records(start,end,args.harness,args.project)} if filtered else None
+                result=prompts.top_prompts(everything,table,args.limit,args.by,keep)
+                texts=prompt_store.visible(store,everything,table)  # only the global top k: never text outside it
+                if kept:result['text_store']=kept
+                if not args.json:
+                    print(render_top(result,texts))
+                    if kept:print(f"kept text for {kept['kept']+kept['added']} prompts in {kept['path']} ({kept['added']} new, {kept['evicted']} evicted)",file=sys.stderr)
+                    return 0
+                if args.with_text:
+                    for p in result['prompts']:p['text']=texts.get((p['harness'],p['session'],p['turn_id']))
             elif args.command=='snapshot':
                 result=history.snapshot(args.out)
             elif args.command=='import':
@@ -268,7 +333,8 @@ def main(argv=None):
                 if args.html:
                     path=_output_path(args.html,args.db)
                     spec=_spec('local' if args.private else 'redacted',args.timezone,args.granularity,vars(args))
-                    state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token)
+                    texts=_visible_texts(history,args.db) if args.private else None
+                    state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts))
                     if path.exists() and (args.if_changed or max_age is not None):
                         found=read_report_state(path)
                         age=time.time()-path.stat().st_mtime
@@ -287,7 +353,10 @@ def main(argv=None):
                 result['source_status']=source_status
                 if args.records:result['records']=records
                 if args.html:
-                    payload=build_report(records,source_status,args.timezone,redact=not args.private)
+                    if texts is not None:
+                        filtered=any(getattr(args,key) is not None for key in ('start','end','harness','project','session','turn','model','effort','provider','agent'))
+                        texts=prompt_store.visible(prompt_store.store_path(args.db),history.records() if filtered else records,pricing.load_prices())
+                    payload=build_report(records,source_status,args.timezone,redact=not args.private,prompt_texts=texts)
                     payload['initial_granularity']=args.granularity
                     write_report(path,render_report(payload,state=state))
                     result={'html':str(path.resolve()),'observations':len(records),

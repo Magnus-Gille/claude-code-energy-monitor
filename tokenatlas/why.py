@@ -597,6 +597,9 @@ def _codex_user_event_identity(row: dict, payload: dict) -> str | None:
     return None
 
 
+_CODEX_TURN_END = frozenset({"task_complete", "turn_complete", "turn_aborted"})
+
+
 def collect_codex(
     root: Path,
     start: datetime,
@@ -633,6 +636,7 @@ def collect_codex(
         current_turn_id: str | None = None
         turn_confidence = "absent"
         pending_turn_id: str | None = None
+        seen_explicit = False  # once a file carries explicit turn ids, derived user events never move the turn
         last_total_signature = None
         counter_segment = 0
         harness_version = _first_text(meta_payload, "cli_version", "version")
@@ -655,21 +659,30 @@ def collect_codex(
                 effort = _meta_text(payload.get("effort"), payload.get("reasoning_effort"), default="unknown")
                 cwd = _meta_text(payload.get("cwd"), default=cwd, limit=4096)
                 explicit_turn = _meta_text(_codex_event_turn_id(row, payload))
-                current_turn_id = explicit_turn or pending_turn_id
-                turn_confidence = "observed" if explicit_turn else (
-                    "derived" if pending_turn_id else "absent"
-                )
+                if explicit_turn:
+                    current_turn_id, turn_confidence, seen_explicit = explicit_turn, "observed", True
+                elif not seen_explicit:
+                    current_turn_id = pending_turn_id
+                    turn_confidence = "derived" if pending_turn_id else "absent"
                 pending_turn_id = None
                 continue
+            explicit_turn = _meta_text(_codex_event_turn_id(row, payload))
+            if explicit_turn:  # task_started, item_completed, token_usage_record, ... name their turn
+                current_turn_id, turn_confidence, seen_explicit = explicit_turn, "observed", True
+                pending_turn_id = explicit_turn
             if row_type != "event_msg" or payload.get("type") != "token_count":
                 event_type = payload.get("type")
+                if row_type == "event_msg" and event_type in _CODEX_TURN_END:
+                    seen_explicit = False  # explicitness is per turn: a legacy-style turn may follow in the same file
+                    continue
+                if explicit_turn or seen_explicit:
+                    continue
                 if event_type == "task_started":
-                    current_turn_id = _meta_text(_codex_event_turn_id(row, payload))
-                    pending_turn_id = current_turn_id
-                    turn_confidence = "derived" if current_turn_id else "absent"
-                elif event_type in {"user_message", "user_input", "message"}:
-                    current_turn_id = _meta_text(_codex_event_turn_id(row, payload), _codex_user_event_identity(row, payload))
-                    pending_turn_id = current_turn_id
+                    current_turn_id = pending_turn_id = None
+                    turn_confidence = "absent"
+                elif (row_type == "event_msg" and event_type in {"user_message", "user_input"}) or (
+                        row_type == "response_item" and event_type == "message" and payload.get("role") == "user"):
+                    current_turn_id = pending_turn_id = _meta_text(_codex_user_event_identity(row, payload))
                     turn_confidence = "derived" if current_turn_id else "absent"
                 continue
             info = _mapping(payload.get("info"))
@@ -793,9 +806,12 @@ def collect_pi(
         version = session.get("version")
         harness_version = str(version) if isinstance(version, int) and not isinstance(version, bool) \
             else _meta_text(version, limit=64)
+        last_user_turn: str | None = None
         for _, row in rows:
             message = _mapping(row.get("message"))
             usage = message.get("usage")
+            if row.get("type") == "message" and _is_genuine_user_row(row):
+                last_user_turn = _meta_text(row.get("id"))
             if row.get("type") != "message" or message.get("role") != "assistant" or not isinstance(usage, dict):
                 continue
             timestamp = parse_iso_timestamp(row.get("timestamp") or message.get("timestamp"))
@@ -823,8 +839,8 @@ def collect_pi(
                 "timestamp": timestamp, "session_id": session_id, "call_id": call_id,
                 "model": _meta_text(message.get("model"), default="unknown"), "effort": "unknown",
                 "project": _project_name(cwd), "project_id": cwd or "unknown", "cwd": cwd,
-                "turn_id": None, "turn_confidence": "absent", "parent_session_id": None,
-                "harness_version": harness_version, "entrypoint": "unknown",
+                "turn_id": last_user_turn, "turn_confidence": "derived" if last_user_turn else "absent",
+                "parent_session_id": None, "harness_version": harness_version, "entrypoint": "unknown",
                 "thread_kind": "main", "agent": "main", "raw_usage": raw_usage,
                 "id_synthetic": id_synthetic,
                 "session_started": session_started or timestamp,

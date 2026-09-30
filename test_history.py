@@ -528,15 +528,25 @@ class HistoryReviewTests(unittest.TestCase):
     def test_copied_request_owner_is_earliest_then_stored_regardless_of_ids(self):
         early = datetime(2026, 9, 3, 10, tzinfo=timezone.utc)
         late = datetime(2026, 9, 3, 11, tzinfo=timezone.utc)
-        def obs(session, ts, parent=None):
-            return normalize(record(session_id=session, timestamp=ts, parent_session_id=parent), 'm')
+        def obs(session, ts, parent=None, turn=None):
+            return normalize(record(session_id=session, timestamp=ts, parent_session_id=parent, turn_id=turn), 'm')
         for first, second in (('aaa', 'zzz'), ('zzz', 'aaa')):
             with self.subTest(first=first):
-                self.assertEqual(merge_observations(obs(first, early), obs(second, early))['session'], first)
+                # equal time: an import picks the smaller session whatever the order; a local re-read keeps the stored one
+                self.assertEqual(merge_observations(obs(first, early), obs(second, early))['session'], 'aaa')
+                self.assertEqual(merge_observations(obs(first, early), obs(second, early), authoritative_turns=True)['session'], first)
                 self.assertEqual(merge_observations(obs(first, early), obs(second, late))['session'], first)
                 self.assertEqual(merge_observations(obs(first, late), obs(second, early))['session'], second)
         merged = merge_observations(obs('zzz', early, 'zzz'), obs('aaa', late, None))
         self.assertEqual((merged['session'], merged['parent_session']), ('zzz', 'zzz'))
+
+    def test_equal_time_import_merge_session_and_turn_fields_do_not_depend_on_order(self):
+        when = datetime(2026, 9, 3, 10, tzinfo=timezone.utc)
+        a = normalize(record(session_id='sess-b', timestamp=when, parent_session_id='pb', turn_id='tb'), 'm')
+        b = normalize(record(session_id='sess-a', timestamp=when, parent_session_id='pa', turn_id='ta'), 'm')
+        for x, y in ((a, b), (b, a)):
+            merged = merge_observations(x, y)
+            self.assertEqual((merged['session'], merged['parent_session'], merged['turn_id']), ('sess-a', 'pa', 'ta'))
 
     def test_refresh_same_request_in_two_sessions_is_deterministic(self):
         tmp = tempfile.TemporaryDirectory()

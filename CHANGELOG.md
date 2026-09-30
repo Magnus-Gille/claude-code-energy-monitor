@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-30
+
+### Added
+
+- Top prompts: `tokenatlas top` ranks the costliest prompts (subagent work rolled up); opt-in `--keep-text` / `--forget-text` / `--with-text` manage `top-prompts.json` (0600, top prompts only, never in the database or snapshots); the report gets a "Dyraste prompterna" card that follows the filters, priced client-side from the token columns and a small list of unit-price classes (the report grows about 5%), with prompt previews in private reports only. See README "Top prompts".
+- Pi observations get derived turn ids (Pi files are re-read once).
+
+### Fixed
+
+- Codex usage is attributed to the explicit turn ids of current rollouts; assistant and developer messages no longer start a new turn, which had split one prompt into many fragments. Stored turn ids are corrected on the next refresh, which re-reads Codex files once (about 2–3 minutes for 10k rollouts).
+
 ## [1.2.0] - 2026-09-30
 
 ### Added
