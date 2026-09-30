@@ -119,6 +119,8 @@ finds nothing new leaves the revision alone; a re-import of identical rows with 
 `tokenatlas open` reuses a background report built with
 `report --html $XDG_STATE_HOME/tokenatlas/report.html --private` when nothing changed, and only opens it.
 
+The report is available in Swedish and English. `--lang auto|sv|en` (on `report` and `open`, default `auto`) picks the language: `auto` follows the browser (`sv` gives Swedish, anything else English). The SV/EN toggle in the report header switches live and remembers the choice in the browser when storage is available; an explicit `--lang` wins over a remembered choice. `--lang` is part of the report identity, so changing it rebuilds a conditional report.
+
 Cron, every 30 minutes (use the full path; cron has a short `PATH`):
 
     */30 * * * * ~/.local/bin/tokenatlas refresh --all && ~/.local/bin/tokenatlas report --html ~/.local/state/tokenatlas/report.html --private --if-changed --max-age 1h

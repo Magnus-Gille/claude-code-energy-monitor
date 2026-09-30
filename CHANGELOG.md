@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+### Added
+
+- English report UI: `report --html` and `open` take `--lang auto|sv|en` (default `auto`: Swedish when the browser language starts with `sv`, otherwise English), and the report header has an SV/EN toggle that switches live and is remembered in `localStorage` (when available). Pseudonym labels in the payload are now language-neutral codes; the UI texts ship as a second compressed block (`report_i18n.json`).
+
 ## [1.3.0] - 2026-09-30
 
 ### Added

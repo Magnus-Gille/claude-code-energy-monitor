@@ -53,8 +53,8 @@ def _output_path(path,db):
     return path
 
 
-def _spec(privacy,timezone,granularity,filters):
-    return {'privacy':privacy,'timezone':timezone,'granularity':granularity,'filters':{k:filters.get(k) for k in FILTERS}}
+def _spec(privacy,timezone,granularity,filters,lang='auto'):
+    return {'privacy':privacy,'timezone':timezone,'granularity':granularity,'lang':lang,'filters':{k:filters.get(k) for k in FILTERS}}
 
 
 def _present(root):
@@ -154,6 +154,7 @@ def main(argv=None):
     opener=commands.add_parser('open',help='Refresh, build the report (private by default) and open it in the browser.')
     opener.add_argument('--html',type=Path,help='Report path; default $XDG_STATE_HOME/tokenatlas/report.html.')
     opener.add_argument('--shared',action='store_true',help='Pseudonymize the report instead of keeping project labels.')
+    opener.add_argument('--lang',choices=('auto','sv','en'),default='auto',help='Report language; auto follows the browser (Swedish for sv, otherwise English).')
     opener.add_argument('--no-refresh',action='store_true',help='Use the saved history as it is.')
     snapshot=commands.add_parser('snapshot',help='Write a consistent private copy of the history database.')
     snapshot.add_argument('out',type=Path)
@@ -177,6 +178,7 @@ def main(argv=None):
     report.add_argument('--private',action='store_true',help='Keep project labels and session IDs in HTML; default HTML uses pseudonyms.')
     report.add_argument('--if-changed',action='store_true',help='With --html: skip when the history revision matches the existing report.')
     report.add_argument('--max-age',help='With --html: skip when the existing report is younger than this (90s, 30m, 1h, 2d).')
+    report.add_argument('--lang',choices=('auto','sv','en'),default='auto',help='With --html: report language; auto follows the browser (Swedish for sv, otherwise English).')
     report.add_argument('--records',action='store_true',help='Include per-observation counters and source-file references. Reports contain private local paths.')
     for name,text in (('session','Show the session tree, per-model totals and outcomes for one root session.'),
                       ('rate','List threads of a session, or record an outcome rating for a unit.')):
@@ -275,14 +277,14 @@ def main(argv=None):
                     print('refresh: '+', '.join(f"{e['harness']} {e['status']}" for e in summary['harnesses']),file=sys.stderr)
                 history.connection.execute('BEGIN')
                 source_status=history.doctor()
-                spec=_spec('redacted' if args.shared else 'local',DEFAULT_TIMEZONE,'day',{})
+                spec=_spec('redacted' if args.shared else 'local',DEFAULT_TIMEZONE,'day',{},args.lang)
                 texts=None if args.shared else _visible_texts(history,args.db)  # shared reports ignore the store
                 state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts))
                 if path.exists() and read_report_state(path)==state:
                     result={'html':str(path.resolve()),'skipped':True,'reason':'unchanged'}
                 else:
                     records=history.records()
-                    payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared,prompt_texts=texts)
+                    payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared,prompt_texts=texts,lang=args.lang)
                     payload['initial_granularity']='day'
                     write_report(path,render_report(payload,state=state))
                     result={'html':str(path.resolve()),'observations':len(records),'privacy':payload['privacy']}
@@ -332,7 +334,7 @@ def main(argv=None):
                 source_status=history.doctor()
                 if args.html:
                     path=_output_path(args.html,args.db)
-                    spec=_spec('local' if args.private else 'redacted',args.timezone,args.granularity,vars(args))
+                    spec=_spec('local' if args.private else 'redacted',args.timezone,args.granularity,vars(args),args.lang)
                     texts=_visible_texts(history,args.db) if args.private else None
                     state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts))
                     if path.exists() and (args.if_changed or max_age is not None):
@@ -356,7 +358,7 @@ def main(argv=None):
                     if texts is not None:
                         filtered=any(getattr(args,key) is not None for key in ('start','end','harness','project','session','turn','model','effort','provider','agent'))
                         texts=prompt_store.visible(prompt_store.store_path(args.db),history.records() if filtered else records,pricing.load_prices())
-                    payload=build_report(records,source_status,args.timezone,redact=not args.private,prompt_texts=texts)
+                    payload=build_report(records,source_status,args.timezone,redact=not args.private,prompt_texts=texts,lang=args.lang)
                     payload['initial_granularity']=args.granularity
                     write_report(path,render_report(payload,state=state))
                     result={'html':str(path.resolve()),'observations':len(records),
