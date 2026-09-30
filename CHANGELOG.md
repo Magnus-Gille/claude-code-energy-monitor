@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-30
+
 ### Added
 
 - `tokenatlas refresh --all` (every harness from its default roots, missing ones `absent`, one JSON summary), a history `revision` counter and a report state marker (`tokenatlas-state`: revision, options and coverage) with `report --html --if-changed --max-age 1h` (skips without touching the file when unchanged or too recent), and `tokenatlas open` (refresh, private report, browser; reuses an unchanged report); see README "Keeping the report fresh".
@@ -12,16 +14,6 @@ All notable changes to this project are documented in this file. The project fol
 - Claude desktop Cowork transcripts (`local-agent-mode-sessions/*/*/local_*/.claude/projects`) are imported by `refresh --harness claude` with origin `local-agent`; `audit.jsonl` is never read.
 - `tokenatlas snapshot` and `import` merge history from other machines (see `docs/remote-machines.md`); `remote_sync.sh` pulls it.
 - `tokenatlas overhead`: per-harness context floor, fixed-context component sizes (instruction files, skill listing, MCP instructions, system prompt), skill uses and an estimated recurring re-read cost. Only sizes, names and counts are stored.
-
-### Changed
-
-- Renamed to TokenAtlas: command `tokenatlas` (`energy-monitor` remains a deprecated alias), package `tokenatlas`, data directory `~/.local/state/tokenatlas` (migrated automatically from `agentmon`).
-- Claude observations record their tariff (speed, service tier, inference geography); the collector version is 5, so existing files are re-read once.
-
-## [1.2.0] - Unreleased
-
-### Added
-
 - Installable `energy-monitor` CLI for durable local usage history and offline Tokenatlas reports.
 - Incremental, retained SQLite history for Claude Code, Codex, Pi, and OpenCode observations.
 - Cross-harness attribution by project, session, turn, model, effort, agent, and origin.
@@ -31,6 +23,8 @@ All notable changes to this project are documented in this file. The project fol
 
 ### Changed
 
+- Renamed to TokenAtlas: command `tokenatlas` (`energy-monitor` remains a deprecated alias), package `tokenatlas`, data directory `~/.local/state/tokenatlas` (migrated automatically from `agentmon`).
+- Claude observations record their tariff (speed, service tier, inference geography); the collector version is 5, so existing files are re-read once.
 - History database schema 2: typed columns and a string dictionary cut storage roughly sevenfold (990 MB to 140 MB for 379,401 real observations); existing databases migrate automatically on first open.
 - `why.py` defaults to all supported harnesses while retaining `--harness both` for Claude and Codex.
 - Session identities are harness-scoped in summaries and reports.
