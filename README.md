@@ -99,8 +99,9 @@ usage row of a request, so their output can be a lower bound (warning `output_no
 
 A report is a snapshot. To keep one current without manual steps, refresh on a schedule and rebuild the
 report only when the data changed and the file is old enough. The history keeps a `revision` counter
-(shown by `doctor`) that grows whenever a refresh or import stores something new; the report records the
-revision it was built from in a `<meta name="tokenatlas-revision">` tag.
+(shown by `doctor`) that grows whenever a refresh or import stores something new. The report records a
+state fingerprint in a `<meta name="tokenatlas-state">` tag; it covers the data revision, the report options
+(privacy, timezone, granularity, filters) and the coverage, so changing any of them rebuilds the report.
 
 ```bash
 # Every harness from its default roots; a harness that is not installed here is reported as "absent"
@@ -115,6 +116,8 @@ otherwise; `absent` harnesses never fail it, so a machine without Claude Code st
 report prints `{"html": ..., "skipped": true, "reason": "unchanged"|"too recent"}`, exits 0 and does not
 touch the file. Without `--if-changed` and `--max-age`, `report --html` always rebuilds. A refresh that
 finds nothing new leaves the revision alone; a re-import of identical rows with known sources does too.
+`tokenatlas open` reuses a background report built with
+`report --html $XDG_STATE_HOME/tokenatlas/report.html --private` when nothing changed, and only opens it.
 
 Cron, every 30 minutes (use the full path; cron has a short `PATH`):
 

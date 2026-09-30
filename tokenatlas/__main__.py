@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import re
+import stat
 import sys
 import time
 import webbrowser
@@ -15,7 +16,10 @@ from tokenatlas import why
 from tokenatlas import __version__
 from tokenatlas import sessions
 from tokenatlas.history import History, summarize
-from tokenatlas.report import build_report, render_report, report_revision, write_report
+from tokenatlas.report import build_report, coverage_key, read_report_state, render_report, report_state, write_report
+
+DEFAULT_TIMEZONE='Europe/Stockholm'
+FILTERS=('start','end','harness','project','session','turn','model','effort','provider','agent')
 
 
 def aggregate(results):
@@ -35,23 +39,57 @@ def parse_duration(text):
 
 
 def _open_in_browser(path):
-    webbrowser.open(Path(path).resolve().as_uri())
+    where=f'could not open a browser; the report is at {path}'
+    try:opened=webbrowser.open(Path(path).resolve().as_uri())
+    except webbrowser.Error as exc:raise ValueError(f'{where} ({exc})') from exc
+    if not opened:raise ValueError(where)
+
+
+def _output_path(path,db):
+    """Expanded HTML path; refuses the history database itself, also through a hard or symbolic link."""
+    path,db=Path(path).expanduser(),Path(db).expanduser()
+    if path.resolve()==db.resolve() or (path.exists() and db.exists() and os.path.samefile(path,db)):
+        raise ValueError('HTML output must not replace the history database')
+    return path
+
+
+def _spec(privacy,timezone,granularity,filters):
+    return {'privacy':privacy,'timezone':timezone,'granularity':granularity,'filters':{k:filters.get(k) for k in FILTERS}}
+
+
+def _present(root,want_file):
+    """False only when the root is definitely not there; an unreadable one is present and fails in refresh."""
+    try:mode=os.stat(root).st_mode
+    except (FileNotFoundError,NotADirectoryError):return False
+    except OSError:return True
+    return stat.S_ISREG(mode) if want_file else stat.S_ISDIR(mode)
 
 
 def refresh_all(history):
-    """Refresh every harness from its default roots; absent ones are reported, never an error."""
+    """Refresh every harness from its default roots; absent ones are reported, an OSError only fails its own harness."""
     roots={'claude':why.CLAUDE_PROJECTS,'codex':why.CODEX_SESSIONS,'pi':why.PI_SESSIONS,'opencode':why.OPENCODE_DB}
-    order=('ok','partial','missing')
+    order=('ok','partial','missing','error')
+    rank=lambda s:order.index(s) if s in order else len(order)
     entries,worst=[],'ok'
     for name,root in roots.items():
-        # Claude: main root, then each Cowork transcript root (macOS; absent elsewhere and simply skipped).
-        found=[r for r in ([root,*why.cowork_roots()] if name=='claude' else [root]) if (r.is_file() if name=='opencode' else r.is_dir())]
-        if not found:
-            entries.append({'harness':name,'status':'absent'});continue
-        results=[history.refresh(name,r) for r in found]
-        entry=results[0] if len(results)==1 else aggregate(results)
+        try:
+            # Claude: main root, then each Cowork transcript root (macOS; absent elsewhere and simply skipped).
+            found=[r for r in ([root,*why.cowork_roots()] if name=='claude' else [root]) if _present(r,name=='opencode')]
+            unlistable=None
+            if name=='claude':
+                try:
+                    with os.scandir(why.COWORK_SESSIONS):pass
+                except PermissionError as exc:unlistable=f'{type(exc).__name__}: {exc}'
+                except OSError:pass
+            if not found and not unlistable:
+                entries.append({'harness':name,'status':'absent'});continue
+            results=[history.refresh(name,r) for r in found]
+            entry=(results[0] if len(results)==1 else aggregate(results)) if results else {'harness':name,'status':'ok','errors':[]}
+            if unlistable:entry=dict(entry,errors=[*entry.get('errors',[]),unlistable],status=max(entry['status'],'partial',key=rank))
+        except OSError as exc:
+            entry={'harness':name,'status':'error','errors':[f'{type(exc).__name__}: {exc}']}
         entries.append(entry)
-        worst=max(worst,entry['status'],key=lambda s:order.index(s) if s in order else len(order))
+        worst=max(worst,entry['status'],key=rank)
     return {'status':worst,'harnesses':entries}
 
 
@@ -96,7 +134,7 @@ def main(argv=None):
     report.add_argument('--start',help='Inclusive ISO timestamp; offset required.')
     report.add_argument('--end',help='Exclusive ISO timestamp; offset required.')
     report.add_argument('--granularity',choices=('day','hour','minute'),default='day')
-    report.add_argument('--timezone',default='Europe/Stockholm')
+    report.add_argument('--timezone',default=DEFAULT_TIMEZONE)
     report.add_argument('--harness',choices=('claude','codex','pi','opencode'))
     report.add_argument('--project',help='Exact full project identity, not basename.')
     report.add_argument('--session')
@@ -146,8 +184,8 @@ def main(argv=None):
                     if name=='start':start=parsed
                     else:end=parsed
             if start and end and start>=end:raise ValueError('--start must precede --end')
-            if args.html and args.html.expanduser().resolve()==args.db.expanduser().resolve():
-                raise ValueError('HTML output must not replace the history database')
+            if args.html:_output_path(args.html,args.db)
+        if args.command=='open':path=_output_path(args.html or args.db.parent/'report.html',args.db)
         if args.command=='overhead':
             from tokenatlas import overhead as _overhead
             return _overhead.run(args)
@@ -189,15 +227,19 @@ def main(argv=None):
                 if not args.no_refresh:
                     summary=refresh_all(history)
                     print('refresh: '+', '.join(f"{e['harness']} {e['status']}" for e in summary['harnesses']),file=sys.stderr)
-                path=(args.html or args.db.parent/'report.html').expanduser()
-                if path.resolve()==args.db.expanduser().resolve():raise ValueError('HTML output must not replace the history database')
                 history.connection.execute('BEGIN')
-                records=history.records()
-                payload=build_report(records,history.doctor(),'Europe/Stockholm',redact=args.shared)
-                payload['initial_granularity']='day'
-                write_report(path,render_report(payload,revision=history.revision))
+                source_status=history.doctor()
+                spec=_spec('redacted' if args.shared else 'local',DEFAULT_TIMEZONE,'day',{})
+                state=report_state(history.revision,history.machine,spec,coverage_key(source_status))
+                if path.exists() and read_report_state(path)==state:
+                    result={'html':str(path.resolve()),'skipped':True,'reason':'unchanged'}
+                else:
+                    records=history.records()
+                    payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared)
+                    payload['initial_granularity']='day'
+                    write_report(path,render_report(payload,state=state))
+                    result={'html':str(path.resolve()),'observations':len(records),'privacy':payload['privacy']}
                 _open_in_browser(path)
-                result={'html':str(path.resolve()),'observations':len(records),'privacy':payload['privacy']}
             elif args.command=='refresh' and args.all:
                 result=refresh_all(history)
             elif args.command=='refresh':
@@ -220,29 +262,32 @@ def main(argv=None):
                 result=history.doctor()
             else:
                 history.connection.execute('BEGIN')
+                source_status=history.doctor()
+                if args.html:
+                    path=_output_path(args.html,args.db)
+                    spec=_spec('local' if args.private else 'redacted',args.timezone,args.granularity,vars(args))
+                    state=report_state(history.revision,history.machine,spec,coverage_key(source_status))
+                    if path.exists() and (args.if_changed or max_age is not None):
+                        age=time.time()-path.stat().st_mtime
+                        old=max_age is None or age<0 or age>=max_age
+                        changed=not args.if_changed or read_report_state(path)!=state
+                        reason='unchanged' if not changed else None if old else 'too recent'
+                        if reason:
+                            print(json.dumps({'html':str(path.resolve()),'skipped':True,'reason':reason}))
+                            return 0
                 records=history.records(start,end,args.harness,args.project,args.session,args.turn)
                 records=[row for row in records if all(getattr(args,key) is None or row[key]==getattr(args,key)
                     for key in ('model','effort','provider','agent'))]
                 # The HTML path prints only a short receipt, so skip the (costly) JSON summary there.
                 result={} if args.html else summarize(records,args.granularity,args.timezone)
                 result['window']={'start':args.start,'end':args.end}
-                result['source_status']=history.doctor()
+                result['source_status']=source_status
                 if args.records:result['records']=records
                 if args.html:
-                    path=args.html.expanduser()
-                    if path.exists() and (args.if_changed or max_age is not None):
-                        reason=None
-                        old=max_age is None or time.time()-path.stat().st_mtime>=max_age
-                        changed=not args.if_changed or report_revision(path)!=history.revision
-                        if not changed:reason='unchanged'
-                        elif not old:reason='too recent'
-                        if reason:
-                            print(json.dumps({'html':str(path.resolve()),'skipped':True,'reason':reason}))
-                            return 0
-                    payload=build_report(records,result['source_status'],args.timezone,redact=not args.private)
+                    payload=build_report(records,source_status,args.timezone,redact=not args.private)
                     payload['initial_granularity']=args.granularity
-                    write_report(args.html,render_report(payload,revision=history.revision))
-                    result={'html':str(args.html.resolve()),'observations':len(records),
+                    write_report(path,render_report(payload,state=state))
+                    result={'html':str(path.resolve()),'observations':len(records),
                             'privacy':payload['privacy'],'billing_verified':False,'coverage_complete':False}
         print(json.dumps(result,indent=2,sort_keys=True))
         return 0 if args.command!='refresh' or result['status']=='ok' else 2
