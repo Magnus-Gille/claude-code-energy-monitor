@@ -7,6 +7,7 @@ All notable changes to this project are documented in this file. The project fol
 ### Added
 
 - English report UI: `report --html` and `open` take `--lang auto|sv|en` (default `auto`: Swedish when the browser language starts with `sv`, otherwise English), and the report header has an SV/EN toggle that switches live and is remembered in `localStorage` (when available). Pseudonym labels in the payload are now language-neutral codes; the UI texts ship as a second compressed block (`report_i18n.json`).
+- Release workflow `.github/workflows/publish.yml` publishes to PyPI with trusted publishing (no stored token) when a GitHub release is published, or on demand for an existing tag.
 
 ## [1.3.0] - 2026-09-30
 
