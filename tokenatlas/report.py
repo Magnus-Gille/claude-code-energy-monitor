@@ -125,14 +125,31 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
                 columns=encode_columns(rows), coverage=coverage)
 
 
-def render_report(report, template=None):
+REVISION_META = re.compile(rb'<meta name="tokenatlas-revision" content="(\d+)">')
+
+
+def report_revision(path):
+    """Revision recorded in an existing report, read from the file head only; None when absent or unreadable."""
+    try:
+        with open(path, 'rb') as stream:
+            found = REVISION_META.search(stream.read(4096))
+    except OSError:
+        return None
+    return int(found.group(1)) if found else None
+
+
+def render_report(report, template=None, revision=None):
     if template is None:
         template = Path(__file__).with_name('report_template.html').read_text(encoding='utf-8')
     if template.count('__USAGE_DATA__') != 1:
         raise ValueError('report template must contain exactly one data placeholder')
     payload = json.dumps(report, ensure_ascii=True, separators=(',', ':'), allow_nan=False)
     packed = base64.b64encode(gzip.compress(payload.encode('ascii'), compresslevel=9, mtime=0)).decode('ascii')
-    return template.replace('__USAGE_DATA__', packed)
+    html = template.replace('__USAGE_DATA__', packed)
+    if revision is not None:  # right after the charset meta, so it sits within the first bytes of the file
+        marker = f'<meta name="tokenatlas-revision" content="{int(revision)}">'
+        html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8">' + marker, 1)
+    return html
 
 
 def write_report(path, html):
@@ -144,6 +161,8 @@ def write_report(path, html):
             stream.write(html)
             stream.flush()
             os.fsync(stream.fileno())
+        if os.name != 'nt':
+            os.chmod(temporary, 0o600)  # mkstemp already creates 0600; keep it explicit
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):

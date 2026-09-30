@@ -3,7 +3,10 @@ import argparse
 import json
 import os
 import sqlite3
+import re
 import sys
+import time
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -12,7 +15,7 @@ from tokenatlas import why
 from tokenatlas import __version__
 from tokenatlas import sessions
 from tokenatlas.history import History, summarize
-from tokenatlas.report import build_report, render_report, write_report
+from tokenatlas.report import build_report, render_report, report_revision, write_report
 
 
 def aggregate(results):
@@ -22,6 +25,34 @@ def aggregate(results):
     return dict(harness=results[0]['harness'],status=max((r['status'] for r in results),key=lambda s:order.index(s) if s in order else len(order)),
                 last_attempt=max(r['last_attempt'] for r in results),errors=[e for r in results for e in r['errors']],
                 coverage_complete=False,roots=results,**total)
+
+
+def parse_duration(text):
+    """'90s', '30m', '1h' or '2d' to seconds."""
+    found=re.fullmatch(r'(\d+)([smhd])',text)
+    if not found:raise ValueError(f'invalid duration {text!r}; use e.g. 90s, 30m, 1h or 2d')
+    return int(found[1])*{'s':1,'m':60,'h':3600,'d':86400}[found[2]]
+
+
+def _open_in_browser(path):
+    webbrowser.open(Path(path).resolve().as_uri())
+
+
+def refresh_all(history):
+    """Refresh every harness from its default roots; absent ones are reported, never an error."""
+    roots={'claude':why.CLAUDE_PROJECTS,'codex':why.CODEX_SESSIONS,'pi':why.PI_SESSIONS,'opencode':why.OPENCODE_DB}
+    order=('ok','partial','missing')
+    entries,worst=[],'ok'
+    for name,root in roots.items():
+        # Claude: main root, then each Cowork transcript root (macOS; absent elsewhere and simply skipped).
+        found=[r for r in ([root,*why.cowork_roots()] if name=='claude' else [root]) if (r.is_file() if name=='opencode' else r.is_dir())]
+        if not found:
+            entries.append({'harness':name,'status':'absent'});continue
+        results=[history.refresh(name,r) for r in found]
+        entry=results[0] if len(results)==1 else aggregate(results)
+        entries.append(entry)
+        worst=max(worst,entry['status'],key=lambda s:order.index(s) if s in order else len(order))
+    return {'status':worst,'harnesses':entries}
 
 
 def default_db():
@@ -48,8 +79,14 @@ def main(argv=None):
     parser.add_argument('--db',type=Path,help='History database; default $XDG_STATE_HOME/tokenatlas/history.sqlite3.')
     commands=parser.add_subparsers(dest='command',required=True)
     refresh=commands.add_parser('refresh',help='Import changed files; preserve retained observations.')
-    refresh.add_argument('--harness',choices=('claude','codex','pi','opencode'),required=True)
-    refresh.add_argument('--root',type=Path,help='Override the harness session directory.')
+    which=refresh.add_mutually_exclusive_group(required=True)
+    which.add_argument('--harness',choices=('claude','codex','pi','opencode'))
+    which.add_argument('--all',action='store_true',help='Refresh every harness from its default roots; missing ones are reported as absent.')
+    refresh.add_argument('--root',type=Path,help='Override the harness session directory (with --harness).')
+    opener=commands.add_parser('open',help='Refresh, build the report (private by default) and open it in the browser.')
+    opener.add_argument('--html',type=Path,help='Report path; default $XDG_STATE_HOME/tokenatlas/report.html.')
+    opener.add_argument('--shared',action='store_true',help='Pseudonymize the report instead of keeping project labels.')
+    opener.add_argument('--no-refresh',action='store_true',help='Use the saved history as it is.')
     snapshot=commands.add_parser('snapshot',help='Write a consistent private copy of the history database.')
     snapshot.add_argument('out',type=Path)
     importer=commands.add_parser('import',help="Merge another machine's snapshot into this database.")
@@ -70,6 +107,8 @@ def main(argv=None):
     report.add_argument('--agent')
     report.add_argument('--html',type=Path,help='Write a standalone interactive offline HTML report.')
     report.add_argument('--private',action='store_true',help='Keep project labels and session IDs in HTML; default HTML uses pseudonyms.')
+    report.add_argument('--if-changed',action='store_true',help='With --html: skip when the history revision matches the existing report.')
+    report.add_argument('--max-age',help='With --html: skip when the existing report is younger than this (90s, 30m, 1h, 2d).')
     report.add_argument('--records',action='store_true',help='Include per-observation counters and source-file references. Reports contain private local paths.')
     for name,text in (('session','Show the session tree, per-model totals and outcomes for one root session.'),
                       ('rate','List threads of a session, or record an outcome rating for a unit.')):
@@ -93,7 +132,10 @@ def main(argv=None):
     if args.db is None:args.db=default_db()
     try:
         start=end=None
+        if args.command=='refresh' and args.all and args.root:raise ValueError('--root cannot be used with --all')
         if args.command=='report':
+            max_age=parse_duration(args.max_age) if args.max_age is not None else None
+            if (args.if_changed or max_age is not None) and not args.html:raise ValueError('--if-changed and --max-age need --html')
             ZoneInfo(args.timezone)
             for name in ('start','end'):
                 value=getattr(args,name)
@@ -109,7 +151,7 @@ def main(argv=None):
         if args.command=='overhead':
             from tokenatlas import overhead as _overhead
             return _overhead.run(args)
-        if args.command not in ('refresh','import') and not args.db.expanduser().is_file():
+        if args.command not in ('refresh','import','open') and not args.db.expanduser().is_file():
             raise ValueError('history database does not exist; run refresh first')
         if args.command=='rate' and (args.unit or args.thread or args.outcome) and not (args.unit and args.thread and args.outcome):
             raise ValueError('rating needs --unit, --thread and --outcome')
@@ -143,7 +185,22 @@ def main(argv=None):
                     sessions.append_outcome(path,line)
                     print(json.dumps(line,sort_keys=True))
                 return 0
-            if args.command=='refresh':
+            if args.command=='open':
+                if not args.no_refresh:
+                    summary=refresh_all(history)
+                    print('refresh: '+', '.join(f"{e['harness']} {e['status']}" for e in summary['harnesses']),file=sys.stderr)
+                path=(args.html or args.db.parent/'report.html').expanduser()
+                if path.resolve()==args.db.expanduser().resolve():raise ValueError('HTML output must not replace the history database')
+                history.connection.execute('BEGIN')
+                records=history.records()
+                payload=build_report(records,history.doctor(),'Europe/Stockholm',redact=args.shared)
+                payload['initial_granularity']='day'
+                write_report(path,render_report(payload,revision=history.revision))
+                _open_in_browser(path)
+                result={'html':str(path.resolve()),'observations':len(records),'privacy':payload['privacy']}
+            elif args.command=='refresh' and args.all:
+                result=refresh_all(history)
+            elif args.command=='refresh':
                 roots={'claude':why.CLAUDE_PROJECTS,'codex':why.CODEX_SESSIONS,
                        'pi':why.PI_SESSIONS,'opencode':why.OPENCODE_DB}
                 if args.root or args.harness!='claude':
@@ -172,9 +229,19 @@ def main(argv=None):
                 result['source_status']=history.doctor()
                 if args.records:result['records']=records
                 if args.html:
+                    path=args.html.expanduser()
+                    if path.exists() and (args.if_changed or max_age is not None):
+                        reason=None
+                        old=max_age is None or time.time()-path.stat().st_mtime>=max_age
+                        changed=not args.if_changed or report_revision(path)!=history.revision
+                        if not changed:reason='unchanged'
+                        elif not old:reason='too recent'
+                        if reason:
+                            print(json.dumps({'html':str(path.resolve()),'skipped':True,'reason':reason}))
+                            return 0
                     payload=build_report(records,result['source_status'],args.timezone,redact=not args.private)
                     payload['initial_granularity']=args.granularity
-                    write_report(args.html,render_report(payload))
+                    write_report(args.html,render_report(payload,revision=history.revision))
                     result={'html':str(args.html.resolve()),'observations':len(records),
                             'privacy':payload['privacy'],'billing_verified':False,'coverage_complete':False}
         print(json.dumps(result,indent=2,sort_keys=True))

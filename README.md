@@ -66,6 +66,7 @@ tokenatlas refresh --harness claude
 tokenatlas refresh --harness codex
 tokenatlas refresh --harness pi
 tokenatlas refresh --harness opencode
+tokenatlas refresh --all   # every harness from its default roots (Claude incl. Cowork)
 tokenatlas doctor
 
 # Stored history, local time buckets; timestamps must include an offset
@@ -93,6 +94,53 @@ A complete normalized observation does not mean complete account coverage or
 verified billing. Nontrivial Claude `iterations` are retained and flagged rather
 than silently ignored or added twice. Claude subagent transcripts often lack the final
 usage row of a request, so their output can be a lower bound (warning `output_not_final`). See [accounting and storage decisions](docs/history-accounting.md).
+
+## Keeping the report fresh
+
+A report is a snapshot. To keep one current without manual steps, refresh on a schedule and rebuild the
+report only when the data changed and the file is old enough. The history keeps a `revision` counter
+(shown by `doctor`) that grows whenever a refresh or import stores something new; the report records the
+revision it was built from in a `<meta name="tokenatlas-revision">` tag.
+
+```bash
+# Every harness from its default roots; a harness that is not installed here is reported as "absent"
+tokenatlas refresh --all
+# Rebuild only if data changed (--if-changed) and the report is older than 1h (--max-age: 90s, 30m, 1h, 2d)
+tokenatlas report --html ~/.local/state/tokenatlas/report.html --private --if-changed --max-age 1h
+```
+
+`refresh --all` prints one JSON document with a `status` (`ok`, `partial` or `missing`, the worst of the
+present harnesses) and one entry per harness. It exits 0 when every present harness is `ok` and 2
+otherwise; `absent` harnesses never fail it, so a machine without Claude Code still exits 0. A skipped
+report prints `{"html": ..., "skipped": true, "reason": "unchanged"|"too recent"}`, exits 0 and does not
+touch the file. Without `--if-changed` and `--max-age`, `report --html` always rebuilds. A refresh that
+finds nothing new leaves the revision alone; a re-import of identical rows with known sources does too.
+
+Cron, every 30 minutes (use the full path; cron has a short `PATH`):
+
+    */30 * * * * ~/.local/bin/tokenatlas refresh --all && ~/.local/bin/tokenatlas report --html ~/.local/state/tokenatlas/report.html --private --if-changed --max-age 1h
+
+On macOS prefer launchd: it runs a missed job after sleep, cron does not. Save as
+`~/Library/LaunchAgents/com.tokenatlas.report.plist` and run `launchctl load` on it:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.tokenatlas.report</string>
+  <key>StartInterval</key><integer>1800</integer>
+  <key>ProgramArguments</key><array>
+    <string>/bin/sh</string><string>-c</string>
+    <string>$HOME/.local/bin/tokenatlas refresh --all &amp;&amp; $HOME/.local/bin/tokenatlas report --html $HOME/.local/state/tokenatlas/report.html --private --if-changed --max-age 1h</string>
+  </array>
+</dict></plist>
+```
+
+On a laptop that sleeps, the background report can be hours old after a wake. Run `tokenatlas open` when
+you want an exact view: it runs `refresh --all` (continuing if a harness is partial), writes a **private**
+report to `$XDG_STATE_HOME/tokenatlas/report.html` (or `--html PATH`; `--shared` pseudonymizes it) and
+opens it in your default browser. `--no-refresh` skips the refresh. `report` itself keeps the shared,
+pseudonymized default unless you pass `--private`.
 
 ## Session trees and outcomes
 
