@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+### Added
+
+- Release workflow `.github/workflows/publish.yml` publishes to PyPI with trusted publishing (no stored token) when a GitHub release is published, or on demand for an existing tag.
+
 ## [1.3.0] - 2026-09-30
 
 ### Added
