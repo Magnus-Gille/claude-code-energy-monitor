@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+### Added
+
+- Top prompts: `tokenatlas top` ranks the costliest prompts (subagent work rolled up); opt-in `--keep-text` / `--forget-text` / `--with-text` manage `top-prompts.json` (0600, top prompts only, never in the database or snapshots); the report gets a "Dyraste prompterna" card and a per-observation cost column, with prompt previews in private reports only. See README "Top prompts".
+
 ## [1.2.0] - 2026-09-30
 
 ### Added
