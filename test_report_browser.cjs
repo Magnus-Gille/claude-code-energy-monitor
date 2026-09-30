@@ -4,21 +4,49 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const playwright = require(process.env.PLAYWRIGHT_MODULE || '/usr/local/lib/node_modules/@playwright/test');
+const zlib = require('node:zlib');
+const L = {
+  sv: {lang:'sv', locale:'sv-SE', h1:'Tokenanvändning', prompts:'Dyraste prompterna', total:'Totalt', totalRe:/^Totalt( \(minst\))?$/, atLeast:/ \(minst\)$/,
+    note:/^[\d\s\u00a0\u202f]+ anrop · [\d\s\u00a0\u202f]+ sessioner$/, cache:/^(—|\d+,\d % av all input)$/, selection:/ anrop · /, reasoning:/^varav reasoning |^inkl\. reasoning$/,
+    unknown:'Okänt', short:['43,8 mdr','136,5 milj.',(12345).toLocaleString('sv-SE')], money:['$9,00','≥$3,00','$0,60','n/a'], toggleLabel:'Språk'},
+  en: {lang:'en', locale:'en-US', h1:'Token usage', prompts:'Costliest prompts', total:'Total', totalRe:/^Total( \(at least\))?$/, atLeast:/ \(at least\)$/,
+    note:/^[\d,]+ requests · [\d,]+ sessions$/, cache:/^(—|\d+\.\d% of all input)$/, selection:/ requests · /, reasoning:/^of which reasoning |^incl\. reasoning$/,
+    unknown:'Unknown', short:['43.8B','136.5M','12.3K'], money:['$9.00','≥$3.00','$0.60','n/a'], toggleLabel:'Language'},
+};
+// Re-encode a report with an explicit payload language (the page only reads it after decoding).
+function withLang(html, lang) {
+  return html.replace(/(<script id="report-data" type="application\/octet-stream\+base64">)([A-Za-z0-9+\/=]+)(<\/script>)/, (_, a, b64, c) => {
+    const data = JSON.parse(zlib.gunzipSync(Buffer.from(b64, 'base64')).toString('utf8'));
+    data.lang = lang;
+    return a + zlib.gzipSync(Buffer.from(JSON.stringify(data), 'utf8')).toString('base64') + c;
+  });
+}
+async function ready(page, errors, what = 'report') {
+  // The page forbids eval (CSP), which waitForFunction's polling needs in WebKit; poll via evaluate instead.
+  for (const deadline = Date.now() + 60000; !(await page.evaluate(() => window.reportReady === true));) {
+    if (Date.now() > deadline) throw new Error(what + ' did not become ready: ' + errors.join('; '));
+    await page.waitForTimeout(50);
+  }
+}
 (async()=>{
   const browserName=process.env.BROWSER || 'chromium';
   const screenshotDir=process.env.SCREENSHOT_DIR || os.tmpdir();
+  const smoke=fs.readFileSync(process.argv[2],'utf8'),fixture=process.argv[3]?fs.readFileSync(process.argv[3],'utf8'):null;
   const browser=await playwright[browserName].launch({headless:true});
-  try {
-    const context=await browser.newContext({viewport:{width:1440,height:1080},offline:true,acceptDownloads:true});
+  const summary={};
+  const newPage=async(opts,html,init)=>{
+    const context=await browser.newContext({viewport:{width:1440,height:1080},offline:true,acceptDownloads:true,...opts});
+    if(init)await context.addInitScript(init);
     const page=await context.newPage(),errors=[],requests=[];
     page.on('pageerror',e=>errors.push(e.message));
     page.on('request',r=>{if(/^https?:/.test(r.url()))requests.push(r.url())});
-    await page.setContent(fs.readFileSync(process.argv[2],'utf8'),{waitUntil:'load'});
-    // The page forbids eval (CSP), which waitForFunction's polling needs in WebKit; poll via evaluate instead.
-    for(const deadline=Date.now()+60000;!(await page.evaluate(()=>window.reportReady===true));){
-      if(Date.now()>deadline)throw new Error('report did not become ready: '+errors.join('; '));
-      await page.waitForTimeout(50);
-    }
+    await page.setContent(html,{waitUntil:'load'});await ready(page,errors);
+    return {context,page,errors,requests};
+  };
+  // The full report regression, once per language (the browser locale picks it: lang "auto").
+  async function suite(T) {
+    const {context,page,errors,requests}=await newPage({locale:T.locale},smoke);
+    assert.equal(await page.evaluate(()=>document.documentElement.lang),T.lang);
     const check=await page.evaluate(()=>{
       const d={records:window.UsageReport.all};
       const total=d.records.filter(r=>!r.id_synthetic).reduce((n,r)=>n+['fresh_input','cache_read','cache_write','output'].reduce((s,k)=>s+(r.tokens[k]??0),0),0);
@@ -45,45 +73,106 @@ const playwright = require(process.env.PLAYWRIGHT_MODULE || '/usr/local/lib/node
        assert.deepEqual(result.worst,{name:dimension+'-low',cache_ratio:.2,observations:1,input_tokens:100});
      }
     assert.equal(await page.locator('#cache-comparisons [data-cache-dimension]').count(),4);
-     await page.screenshot({path:path.join(screenshotDir,'energy-report-desktop.png'),fullPage:true});
+    assert.equal(await page.locator('h1').innerText(),T.h1);
+    assert.equal(await page.locator('#prompts h2').innerText(),T.prompts);
+    assert.equal(await page.evaluate(()=>document.title.startsWith('TokenAtlas')),true);
+     await page.screenshot({path:path.join(screenshotDir,'energy-report-desktop-'+T.lang+'.png'),fullPage:true});
      const harnessOptions=await page.locator('#harness option').count(),harness=await page.locator('#harness option').nth(1).getAttribute('value'),cacheBefore=await page.locator('#cache-comparisons').innerText();
      if(harness){await page.selectOption('#harness',harness);assert.equal(await page.evaluate(()=>new Set(UsageReport.getSelected().map(r=>r.harness)).size),1);if(harnessOptions>2)assert.notEqual(await page.locator('#cache-comparisons').innerText(),cacheBefore)}
     await page.locator('.advanced summary').click();await page.fill('#search','this-match-does-not-exist-19042026');
     assert.equal(await page.evaluate(()=>UsageReport.getSelected().length),0);
     await page.locator('#chart-empty').isVisible().then(v=>assert.ok(v));
-     await page.screenshot({path:path.join(screenshotDir,'energy-report-empty.png'),fullPage:true});
+     await page.screenshot({path:path.join(screenshotDir,'energy-report-empty-'+T.lang+'.png'),fullPage:true});
     await page.click('#reset');
     for(const gran of ['hour','minute','day']){await page.click('[data-gran="'+gran+'"]');assert.equal(await page.evaluate(()=>UsageReport.getSelected().length),check.records)}
     if(check.records){await page.locator('#chart .bar').first().click();assert.ok(await page.evaluate(()=>UsageReport.getSelected().length)>0);await page.click('#reset');await page.locator('.session summary').first().click();await page.locator('.turn summary').first().click();await page.locator('.turn table').first().waitFor();assert.ok(await page.locator('.turn table').count()>0)}
     const download=page.waitForEvent('download');await page.click('#export-json');const saved=await download;const file=await saved.path();const exportData=JSON.parse(fs.readFileSync(file,'utf8'));assert.equal(exportData.totals.known_tokens,check.expected);
     await page.setViewportSize({width:390,height:844});
-     await page.screenshot({path:path.join(screenshotDir,'energy-report-mobile.png'),fullPage:false});
+     await page.screenshot({path:path.join(screenshotDir,'energy-report-mobile-'+T.lang+'.png'),fullPage:false});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'mobile overflow');
     const texts=await page.evaluate(()=>['total-label','total','total-note','cache','cache-note','output','reasoning','selection','quality'].map(id=>[id,document.getElementById(id).textContent]));
-    const T=Object.fromEntries(texts);assert.match(T['total-label'],/^Totalt( \(minst\))?$/);assert.match(T['total-note'],/^[\d\s\u00a0\u202f]+ anrop · [\d\s\u00a0\u202f]+ sessioner$/);assert.match(T['cache-note'],/^(—|\d+,\d % av all input)$/);assert.match(T.output,/./);assert.match(T.selection,/ anrop · /);assert.ok(/^varav reasoning |^inkl\. reasoning$/.test(T.reasoning));
+    const Tx=Object.fromEntries(texts);assert.match(Tx['total-label'],T.totalRe);assert.match(Tx['total-note'],T.note);assert.match(Tx['cache-note'],T.cache);assert.match(Tx.output,/./);assert.match(Tx.selection,T.selection);assert.ok(T.reasoning.test(Tx.reasoning),Tx.reasoning);
     const cards=await page.evaluate(()=>[...document.querySelectorAll('.kpis .kpi')].map(k=>({label:k.querySelector('.label').textContent,title:k.querySelector('.value').title,text:k.querySelector('.value').textContent})));
-    assert.deepEqual(cards.map(c=>c.label.replace(/ \(minst\)$/,'')),['Totalt','Input','Cache write','Cache read','Output']);
-    const exact=t=>{const m=/^([\d\s\u00a0\u202f]+) tokens/.exec(t);assert.ok(m,'title '+t);return Number(m[1].replace(/\D/g,''))};
-    const parts=cards.slice(1).map(c=>c.text==='Okänt'?0:exact(c.title));
+    assert.deepEqual(cards.map(c=>c.label.replace(T.atLeast,'')),[T.total,'Input','Cache write','Cache read','Output']);
+    const exact=t=>{const m=/^([\d\s,.  ]+) tokens/.exec(t);assert.ok(m,'title '+t);return Number(m[1].replace(/\D/g,''))};
+    const parts=cards.slice(1).map(c=>c.text===T.unknown?0:exact(c.title));
     assert.equal(parts.reduce((x,y)=>x+y,0),exact(cards[0].title),'four categories sum to total');
     assert.equal(exact(cards[0].title),await page.evaluate(()=>UsageReport.aggregate(UsageReport.getSelected()).known_tokens));
-    assert.deepEqual(await page.evaluate(()=>[...document.querySelectorAll('.legend span')].map(s=>s.textContent)),['Input','Cache write','Cache read','Output']);
-    assert.equal(await page.evaluate(()=>[UsageReport.short(43812345678),UsageReport.short(136500000),UsageReport.short(12345)].join('|')),'43,8 mdr|136,5 milj.|'+(12345).toLocaleString('sv-SE'));
-    // "Dyraste prompterna": the card renders the top prompts of the current selection (at most 5), previews only in private fixtures.
+    assert.deepEqual(await page.evaluate(()=>[...document.querySelectorAll('.legend > span')].map(s=>s.textContent)),['Input','Cache write','Cache read','Output']);
+    assert.equal(await page.evaluate(()=>[UsageReport.short(43812345678),UsageReport.short(136500000),UsageReport.short(12345)].join('|')),T.short.join('|'));
+    // The toggle marks the active language; the export buttons and filter labels are localized too.
+    assert.equal(await page.locator('.langtoggle').getAttribute('aria-label'),T.toggleLabel);
+    assert.equal(await page.locator('[data-lang="'+T.lang+'"]').getAttribute('aria-pressed'),'true');
+    // "Dyraste prompterna" / "Costliest prompts": the card renders the top prompts of the current selection (at most 5), previews only in private fixtures.
     const promptRows=await page.evaluate(()=>({card:!!document.getElementById('top-prompts'),rows:document.querySelectorAll('#top-prompts tr.prompt-row').length,expected:Math.min(5,UsageReport.topPrompts(UsageReport.getSelected()).length)}));
     assert.ok(promptRows.card);assert.equal(promptRows.rows,promptRows.expected);
-    if(process.argv[3]){
-      const page2=await context.newPage(),errors2=[];page2.on('pageerror',e=>errors2.push(e.message));
-      await page2.setContent(fs.readFileSync(process.argv[3],'utf8'),{waitUntil:'load'});
-      for(const deadline=Date.now()+60000;!(await page2.evaluate(()=>window.reportReady===true));){if(Date.now()>deadline)throw new Error('prompts fixture not ready: '+errors2.join('; '));await page2.waitForTimeout(50)}
-      const card=await page2.evaluate(()=>({rows:[...document.querySelectorAll('#top-prompts tr.prompt-row')].map(r=>[...r.children].map(c=>c.textContent)),texts:[...document.querySelectorAll('#top-prompts tr.prompt-text')].map(r=>r.textContent),markup:document.querySelectorAll('#top-prompts tr.prompt-text b').length}));
-      assert.equal(card.rows.length,4);assert.equal(card.rows[0][0],'1');
-      assert.deepEqual(card.rows.map(r=>r[8].replace(/\u00a0/g,' ')),['$9,00','≥$3,00','$0,60','n/a']);assert.equal(card.rows[1][6],'1');assert.equal(card.rows[1][5],'2');
-      assert.deepEqual(card.texts,['Refactor the importer','Fix the <b>failing</b> build']);assert.equal(card.markup,0,'preview must be text, not markup');
-      await page2.screenshot({path:path.join(screenshotDir,'energy-report-prompts.png'),fullPage:true});
-      assert.deepEqual(errors2,[]);
-    }
     assert.deepEqual(errors,[]);assert.deepEqual(requests,[]);
-    console.log(JSON.stringify({pass:true,browser:browserName,records:check.records,known_tokens:check.actual,network_requests:requests.length,console_errors:errors.length,checks:'summary cards, legend, totals, cache comparisons, bucket conservation, filters, empty state, zoom, drilldown, export, mobile overflow'}));
+    summary[T.lang]={records:check.records,known_tokens:check.actual,network_requests:requests.length,console_errors:errors.length};
+    await context.close();
+    if(fixture){
+      const {context:c2,page:p2,errors:errors2}=await newPage({locale:T.locale},fixture);
+      const card=await p2.evaluate(()=>({rows:[...document.querySelectorAll('#top-prompts tr.prompt-row')].map(r=>[...r.children].map(c=>c.textContent)),texts:[...document.querySelectorAll('#top-prompts tr.prompt-text')].map(r=>r.textContent),markup:document.querySelectorAll('#top-prompts tr.prompt-text b').length}));
+      assert.equal(card.rows.length,4);assert.equal(card.rows[0][0],'1');
+      assert.deepEqual(card.rows.map(r=>r[8].replace(/ /g,' ')),T.money);assert.equal(card.rows[1][6],'1');assert.equal(card.rows[1][5],'2');
+      assert.equal(await p2.locator('#top-prompts th').nth(8).innerText(),T.lang==='sv'?'Kostnad':'Cost');
+      assert.deepEqual(card.texts,['Refactor the importer','Fix the <b>failing</b> build']);assert.equal(card.markup,0,'preview must be text, not markup');
+      await p2.screenshot({path:path.join(screenshotDir,'energy-report-prompts-'+T.lang+'.png'),fullPage:true});
+      assert.deepEqual(errors2,[]);await c2.close();
+    }
+  }
+  try {
+    await suite(L.sv);
+    await suite(L.en);
+    // Toggle: click EN then SV live, without a reload; <html lang>, labels and number formats follow.
+    {
+      const {context,page,errors}=await newPage({locale:'sv-SE'},smoke);
+      assert.equal(await page.locator('h1').innerText(),L.sv.h1);
+      await page.selectOption('#harness',{index:1});
+      const before=await page.evaluate(()=>UsageReport.getSelected().length);
+      await page.click('[data-lang="en"]');
+      assert.equal(await page.locator('h1').innerText(),L.en.h1);
+      assert.equal(await page.evaluate(()=>document.documentElement.lang),'en');
+      assert.equal(await page.locator('#prompts h2').innerText(),L.en.prompts);
+      assert.equal(await page.locator('[data-lang="en"]').getAttribute('aria-pressed'),'true');
+      assert.equal(await page.locator('[data-lang="sv"]').getAttribute('aria-pressed'),'false');
+      assert.equal(await page.evaluate(()=>UsageReport.short(136500000)),'136.5M');
+      assert.equal(await page.locator('#harness option').first().innerText(),'All');
+      assert.equal(await page.evaluate(()=>UsageReport.getSelected().length),before,'the filter selection survives a language switch');
+      await page.click('[data-lang="sv"]');
+      assert.equal(await page.locator('h1').innerText(),L.sv.h1);assert.equal(await page.evaluate(()=>document.documentElement.lang),'sv');
+      assert.equal(await page.locator('#harness option').first().innerText(),'Alla');
+      assert.deepEqual(errors,[]);await context.close();
+    }
+    // Explicit payload language beats the browser locale; the toggle still works on top of it.
+    {
+      const {context,page,errors}=await newPage({locale:'sv-SE'},withLang(smoke,'en'));
+      assert.equal(await page.locator('h1').innerText(),L.en.h1);
+      await page.click('[data-lang="sv"]');assert.equal(await page.locator('h1').innerText(),L.sv.h1);
+      assert.deepEqual(errors,[]);await context.close();
+      const other=await newPage({locale:'en-US'},withLang(smoke,'sv'));
+      assert.equal(await other.page.locator('h1').innerText(),L.sv.h1);assert.deepEqual(other.errors,[]);await other.context.close();
+    }
+    // The choice is remembered (file:// origin; storage may legitimately be unavailable, e.g. in WebKit).
+    {
+      const file=path.join(fs.mkdtempSync(path.join(os.tmpdir(),'tokenatlas-lang-')),'report.html');fs.writeFileSync(file,smoke);
+      const context=await browser.newContext({locale:'sv-SE'});const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+      await page.goto('file://'+file);await ready(page,errors);
+      await page.click('[data-lang="en"]');
+      const stored=await page.evaluate(()=>{try{return localStorage.getItem('tokenatlas-lang')}catch(e){return 'unavailable'}});
+      if(stored==='en'){await page.goto('file://'+file);await ready(page,errors);assert.equal(await page.locator('h1').innerText(),L.en.h1,'remembered choice')}
+      summary.remembered=stored;assert.deepEqual(errors,[]);await context.close();
+    }
+    // Storage that throws (blocked cookies, privacy modes) must not break the report or the toggle.
+    for(const init of [
+      ()=>{Storage.prototype.getItem=function(){throw new Error('blocked')};Storage.prototype.setItem=function(){throw new Error('blocked')}},
+      ()=>{Object.defineProperty(window,'localStorage',{configurable:true,get(){throw new DOMException('denied','SecurityError')}})},
+    ]){
+      const {context,page,errors}=await newPage({locale:'sv-SE'},smoke,init);
+      assert.equal(await page.locator('h1').innerText(),L.sv.h1);
+      await page.click('[data-lang="en"]');assert.equal(await page.locator('h1').innerText(),L.en.h1);
+      assert.equal(await page.evaluate(()=>document.documentElement.lang),'en');
+      assert.deepEqual(errors,[]);await context.close();
+    }
+    console.log(JSON.stringify({pass:true,browser:browserName,...summary,checks:'both languages (summary cards, legend, totals, K/M/B vs mdr/milj., money, cache comparisons, bucket conservation, filters, empty state, zoom, drilldown, export, mobile overflow, prompts card), live toggle, explicit payload language, remembered choice, throwing storage'}));
   } finally {await browser.close()}
 })().catch(e=>{console.error(e);process.exitCode=1});

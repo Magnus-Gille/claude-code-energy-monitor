@@ -365,6 +365,20 @@ class ConditionalReport(Base):
                 result = self.report('--if-changed', *extra)
                 self.assertNotIn('skipped', result)
 
+    def test_lang_changes_identity_and_is_stored(self):
+        self.report()
+        self.assertEqual(payload(self.html.read_text(encoding='utf-8'))['lang'], 'auto')
+        self.assertIn('skipped', self.report('--if-changed'))
+        result = self.report('--if-changed', '--lang', 'en')
+        self.assertNotIn('skipped', result)
+        self.assertEqual(payload(self.html.read_text(encoding='utf-8'))['lang'], 'en')
+        self.assertIn('skipped', self.report('--if-changed', '--lang', 'en'))
+        self.assertNotIn('skipped', self.report('--if-changed', '--lang', 'sv'))
+
+    def test_lang_rejects_unknown_values(self):
+        self.assertEqual(self.run_cli('report', '--html', str(self.html), '--lang', 'de')[0], 2)
+        self.assertEqual(self.run_cli('open', '--lang', 'de')[0], 2)
+
     def test_coverage_change_without_revision_bump_rebuilds(self):
         self.report('--if-changed')
         rev = self.revision()
@@ -522,9 +536,19 @@ class OpenCommand(Base):
         self.assertEqual(code, 0)
         data = payload(target.read_text(encoding='utf-8'))
         self.assertEqual(data['privacy'], 'redacted')
-        self.assertEqual(data['columns']['dict']['project_label'], ['Projekt 001'])
+        self.assertEqual(data['columns']['dict']['project_label'], ['\x01p001'])
+        self.assertEqual(data['lang'], 'auto')
         self.assertFalse(self.default.exists())
         self.opener.assert_called_once()
+
+    def test_open_lang_is_stored_and_rebuilds(self):
+        self.assertEqual(self.run_cli('open', '--lang', 'en')[0], 0)
+        self.assertEqual(payload(self.default.read_text(encoding='utf-8'))['lang'], 'en')
+        code, out, _ = self.run_cli('open', '--no-refresh', '--lang', 'en')
+        self.assertTrue(json.loads(out).get('skipped'))
+        code, out, _ = self.run_cli('open', '--no-refresh', '--lang', 'sv')
+        self.assertNotIn('skipped', json.loads(out))
+        self.assertEqual(payload(self.default.read_text(encoding='utf-8'))['lang'], 'sv')
 
     def test_no_refresh_does_not_refresh(self):
         self.assertEqual(self.run_cli('refresh', '--all')[0], 0)

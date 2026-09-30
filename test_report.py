@@ -23,7 +23,7 @@ def decode_html(html):
 
 def page_text(html):
     """The page without its base64 payload, whose random-looking text can contain any short string."""
-    return re.sub(r'(<script id="report-data"[^>]*>)[A-Za-z0-9+/=]*(</script>)', r'\1\2', html)
+    return re.sub(r'(<script id="report-(?:data|i18n)"[^>]*>)[A-Za-z0-9+/=]*(</script>)', r'\1\2', html)
 
 
 def expand(report):
@@ -96,12 +96,15 @@ class ReportTests(unittest.TestCase):
 
     def test_template_uses_neutral_copy_and_cache_comparison_mounts(self):
         html = render_report(build_report([], {}))
-        self.assertIn('<h1>Tokenanvändning</h1>', html)
-        self.assertIn('<title>TokenAtlas · ', html)
+        self.assertIn('<h1 data-t="hero_title"></h1>', html)
+        self.assertIn('<title>TokenAtlas', html)
         self.assertIn('<span>↗</span>TokenAtlas</div>', html)
         self.assertNotIn('Tokenatlas', html)
-        for label in ('Totalt', 'Input', 'Cache write', 'Cache read', 'Output'):
-            self.assertIn(label, html)
+        texts = json.loads((Path(__file__).parent / 'tokenatlas/report_i18n.json').read_text(encoding='utf-8'))
+        for lang in ('sv', 'en'):
+            for key, label in (('tok_input', 'Input'), ('tok_cw', 'Cache write'), ('tok_cr', 'Cache read'), ('tok_out', 'Output')):
+                self.assertEqual(texts[lang][key], label)
+        self.assertEqual(texts['sv']['total'], 'Totalt')
         self.assertIn('id="cache-comparisons"', html)
         for dimension in ('session', 'harness', 'model', 'project_id'):
             self.assertIn(f'data-cache-dimension="{dimension}"', html)
@@ -109,6 +112,61 @@ class ReportTests(unittest.TestCase):
                          'Se mönstret. Hitta toppen.', 'Vad driver användningen?',
                          'Synlig täckning. Ärliga gränser.'):
             self.assertNotIn(old_copy, html)
+
+    def test_page_ships_both_languages_in_one_dictionary(self):
+        html = render_report(build_report([], {}))
+        match = re.search(r'<script id="report-i18n" type="application/octet-stream\+base64">([A-Za-z0-9+/=]+)</script>', html)
+        i18n = json.loads(gzip.decompress(base64.b64decode(match.group(1))).decode('utf-8'))
+        self.assertEqual(set(i18n), {'sv', 'en'})
+        self.assertEqual(set(i18n['sv']), set(i18n['en']))
+        self.assertEqual(i18n['sv']['p4_title'], 'Dyraste prompterna')
+        self.assertEqual(i18n['en']['p4_title'], 'Costliest prompts')
+        used = set(re.findall(r'data-t(?:-[a-z-]+)?="([a-z_0-9]+)"', html))
+        self.assertTrue(used)
+        self.assertLessEqual(used, set(i18n['sv']))
+        # the usage data block stays free of UI copy
+        self.assertNotIn('Dyraste', json.dumps(decode_html(html)))
+
+    def test_lang_is_recorded_in_the_payload(self):
+        self.assertEqual(build_report([], {})['lang'], 'auto')
+        for lang in ('auto', 'sv', 'en'):
+            self.assertEqual(decode_html(render_report(build_report([], {}, lang=lang)))['lang'], lang)
+        with self.assertRaises(ValueError):
+            build_report([], {}, lang='de')
+
+    def test_shared_payload_has_only_neutral_codes(self):
+        rows = [observation(), observation('two', project_id='/other/client/app', turn_id='t2', warnings=['/private/x: bad!']),
+                observation('zthree', project_id=None, warnings=['/private/x: bad!', '/private/y: worse!'])]
+        for redact in (True,):
+            report = build_report(rows, {}, redact=redact)
+            text = json.dumps(report, ensure_ascii=False)
+            for swedish in ('Projekt', 'Okänt', 'Varning', 'Tur ', 'Okänd'):
+                self.assertNotIn(swedish, text, (redact, swedish))
+        shared = expand(build_report(rows, {}))
+        self.assertEqual([r['project_label'] for r in shared], ['\x01p001', '\x01p002', None])
+        self.assertEqual([r['project_id'] for r in shared][:2], ['\x01p001', '\x01p002'])
+        self.assertIsNone(shared[2]['project_id'])
+        self.assertEqual(shared[0]['turn_id'], '\x01t001')
+        self.assertEqual(shared[1]['warnings'], ['\x01w001'])
+        self.assertEqual(shared[2]['warnings'], ['\x01w001', '\x01w002'])
+        self.assertNotIn('/private/', json.dumps(build_report(rows, {})))
+
+    def test_private_unknown_project_and_empty_name_are_sentinels(self):
+        rows = [observation(), observation('two', project_id='/'), observation('zthree', project_id=None)]
+        labels = [r['project_label'] for r in expand(build_report(rows, {}, redact=False))]
+        self.assertEqual(labels, ['app', '\x01p', '\x01u'])
+
+    def test_pseudonyms_do_not_leak_and_stay_stable(self):
+        rows = [observation(project_id='/private/client/app', project_label='app'),
+                observation('two', project_id='/private/client/app'),
+                observation('zthree', project_id='/private/other/web')]
+        ids = [r['project_id'] for r in expand(build_report(rows, {}))]
+        self.assertEqual(ids[0], ids[1])
+        self.assertNotEqual(ids[0], ids[2])
+        for key in ('project_id', 'project_label'):
+            for value in build_report(rows, {})['columns']['dict'][key]:
+                self.assertRegex(value, r'^\x01p\d{3}$')
+        self.assertNotIn('client', json.dumps(build_report(rows, {})))
 
     def test_dst_repeated_hour_remains_distinct(self):
         rows = [observation(), observation('two', ts='2026-10-25T01:30:00+00:00')]
