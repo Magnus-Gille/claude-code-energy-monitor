@@ -15,8 +15,12 @@ or tag:
 
 `pipx install "git+https://github.com/Magnus-Gille/tokenatlas@<commit>"` works as well.
 
-Refresh on a schedule, one line per harness in use (cron, `crontab -e`). Cron has a short `PATH`, so
-use the full path:
+Refresh on a schedule (cron, `crontab -e`). Cron has a short `PATH`, so use the full path.
+`refresh --all` covers every harness installed here and reports the others as `absent` (exit 0):
+
+    */30 * * * * ~/.local/bin/tokenatlas refresh --all
+
+Or one line per harness in use:
 
     */30 * * * * ~/.local/bin/tokenatlas refresh --harness claude
     */30 * * * * ~/.local/bin/tokenatlas refresh --harness pi

@@ -427,6 +427,23 @@ class History:
         self.machine = c.execute("SELECT value FROM meta WHERE key='machine'").fetchone()[0]
         return self
 
+    @property
+    def revision(self):
+        """Persistent data-change counter: bumped in the same transaction as any stored change."""
+        row = self.connection.execute("SELECT value FROM meta WHERE key='revision'").fetchone()
+        return int(row[0]) if row else 0
+
+    @property
+    def revision_token(self):
+        """Random value replaced on every bump, so copies of one database diverge; None before the first change."""
+        row = self.connection.execute("SELECT value FROM meta WHERE key='revision_token'").fetchone()
+        return row[0] if row else None
+
+    @staticmethod
+    def _bump(c):
+        c.execute("INSERT INTO meta VALUES ('revision','1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1")
+        c.execute("INSERT INTO meta VALUES ('revision_token',lower(hex(randomblob(16)))) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+
     def _migrate_v1(self, c):
         """Move JSON observations and text-keyed sources into schema v2, then drop the v1 tables."""
         c.execute('INSERT INTO files(harness,path,root,fingerprint,diagnostics)'
@@ -518,6 +535,7 @@ class History:
                           malformed_lines=0, partial_lines=0, unparsed_usage_lines=0, read_errors=0, changed_during_read=0,
                           coverage_complete=False, errors=[])
             expects_file = harness == 'opencode'
+            dirty = False
             if not (root.is_file() if expects_file else root.is_dir()):
                 result['status'] = 'missing'
                 result['errors'].append('source database is not a readable file' if expects_file else
@@ -585,7 +603,9 @@ class History:
                         result['changed_during_read'] += 1
                         if harness != 'opencode':
                             continue
+                    known = c.execute('SELECT 1 FROM files WHERE harness=? AND path=?', (harness, str(path))).fetchone()
                     file_id = self._file_id(c, harness, str(path))
+                    dirty = dirty or not known
                     for record in records:
                         item = normalize(record, self.machine)
                         # Synthetic IDs are machine scoped; provider IDs can merge copies.
@@ -593,15 +613,17 @@ class History:
                         old = self._existing(c, key)
                         if old:
                             item = merge_observations(old, item)
-                        c.execute('INSERT OR IGNORE INTO sources VALUES (?,?)',
-                                  (self._insert(c, _encode(item, key)), file_id))
+                        dirty = dirty or item != old
+                        dirty |= c.execute('INSERT OR IGNORE INTO sources VALUES (?,?)',
+                                           (self._insert(c, _encode(item, key)), file_id)).rowcount > 0
                         result['observations_seen'] += 1
                     for k in diagnostics:
                         result[k] += diagnostics.get(k, 0)
                     # Never checkpoint an incomplete tail; try it again next refresh.
                     checkpoint = before if not diagnostics['partial_lines'] and not changed else None
-                    c.execute('UPDATE files SET root=?,fingerprint=?,diagnostics=? WHERE id=?',
-                              (str(root),checkpoint,json.dumps(diagnostics),file_id))
+                    stored = (str(root),checkpoint,json.dumps(diagnostics))
+                    c.execute('UPDATE files SET root=?,fingerprint=?,diagnostics=? WHERE id=?', (*stored,file_id))
+                    dirty = dirty or not previous or (previous['fingerprint'],previous['diagnostics']) != stored[1:]
                 except (OSError, UnicodeError) as exc:
                     result['read_errors'] += 1
                     result['errors'].append(f'{path}: {type(exc).__name__}: {exc}')
@@ -611,6 +633,7 @@ class History:
                 else:
                     result['last_success'] = utcnow()
             c.execute('INSERT OR REPLACE INTO imports VALUES (?,?,?)', (harness,str(root),json.dumps(result)))
+            if dirty:self._bump(c)
             c.commit()
             return result
         except Exception:
@@ -680,6 +703,7 @@ class History:
         c.execute('BEGIN IMMEDIATE')
         self._strings, self._values = {}, {}
         try:
+            dirty = False
             for item in items:
                 sources = [p if _REMOTE_PATH.match(p) else f'{machine}:{p}' for p in item.pop('sources')]
                 key = _key(item)
@@ -687,15 +711,17 @@ class History:
                 result['merged' if old else 'new'] += 1
                 if old:
                     item = merge_observations(old, item)
+                dirty = dirty or item != old
                 observation = self._insert(c, _encode(item, key))
                 for path in sources:
-                    c.execute('INSERT OR IGNORE INTO sources VALUES (?,?)',
-                              (observation, self._file_id(c, item['harness'], path)))
+                    dirty |= c.execute('INSERT OR IGNORE INTO sources VALUES (?,?)',
+                                       (observation, self._file_id(c, item['harness'], path))).rowcount > 0
             labels = c.execute("SELECT value FROM meta WHERE key='machine_labels'").fetchone()
             labels = {**(json.loads(labels[0]) if labels else {}), machine: label}
             c.execute('INSERT OR REPLACE INTO meta VALUES (?,?)', ('machine_labels', json.dumps(labels, sort_keys=True)))
             result['last_success'] = utcnow()
             c.execute('INSERT OR REPLACE INTO imports VALUES (?,?,?)', ('import', label, json.dumps(result)))
+            if dirty:self._bump(c)  # a re-import of identical rows with known sources is a no-op
             c.commit()
             return result
         except Exception:
@@ -746,7 +772,7 @@ class History:
         imports = [json.loads(r[0]) for r in self.connection.execute('SELECT data FROM imports ORDER BY harness,root')]
         missing = sum(not _REMOTE_PATH.match(r[0]) and not Path(r[0]).exists()
                       for r in self.connection.execute('SELECT path FROM files'))
-        return dict(schema_version=SCHEMA_VERSION, machine=self.machine, observations=count,
+        return dict(schema_version=SCHEMA_VERSION, machine=self.machine, revision=self.revision, observations=count,
                     first_event=None if first is None else _ts_text(first),
                     last_event=None if last is None else _ts_text(last),
                     missing_source_files=missing, imports=imports, coverage_complete=False,

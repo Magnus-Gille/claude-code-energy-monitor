@@ -2,14 +2,17 @@
 from __future__ import annotations
 import base64
 import gzip
+import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from tokenatlas import __version__
 from tokenatlas.history import ALL_FIELDS
 
 PUBLIC_NAMES = dict(
@@ -54,6 +57,29 @@ def encode_columns(rows):
                 id=ids, id_prefix='Observation ' if ids and all(isinstance(i, (int, type(None))) for i in ids) else None,
                 tokens={k: [r['tokens'][k] for r in rows] for k in ALL_FIELDS},
                 complete=[int(r['complete']) for r in rows], id_synthetic=[int(r['id_synthetic']) for r in rows])
+
+
+COVERAGE_FIELDS = ('observations', 'first_event', 'last_event', 'missing_source_files',
+                   'incomplete_observations', 'unlinked_turns')
+IMPORT_FIELDS = ('harness', 'status', 'files_seen', 'files_parsed', 'malformed_lines', 'partial_lines',
+                 'read_errors', 'unparsed_usage_lines', 'last_success')
+
+
+def coverage_key(source_status):
+    """Coverage subset embedded in a report, minus the volatile last_success timestamps."""
+    key = {k: source_status.get(k) for k in COVERAGE_FIELDS}
+    key['imports'] = [{k: imp.get(k) for k in IMPORT_FIELDS if k != 'last_success'}
+                      for imp in source_status.get('imports', [])]
+    return key
+
+
+def report_state(revision, machine, spec, coverage, token=None):
+    """(identity, data) 32-hex pair. Identity: version, options, database and template; data: revision token, counter and coverage."""
+    dump = lambda body: json.dumps(body, sort_keys=True, separators=(',', ':'))
+    template = hashlib.sha256(Path(__file__).with_name('report_template.html').read_bytes()).hexdigest()
+    identity = dump({'format': 2, 'version': __version__, 'spec': spec, 'machine': machine})
+    data = dump({'token': token, 'revision': int(revision), 'coverage': coverage})
+    return tuple(hashlib.sha256(text.encode()).hexdigest()[:32] for text in (identity + template, data))
 
 
 def build_report(records, source_status, timezone_name='Europe/Stockholm', redact=True):
@@ -107,14 +133,9 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
                    complete=bool(record['complete']), id_synthetic=bool(record['id_synthetic']),
                    warnings=[metadata('Varning', x) for x in record.get('warnings', [])])
         rows.append(row)
-    coverage = {key: source_status.get(key) for key in
-                ('observations', 'first_event', 'last_event', 'missing_source_files',
-                 'incomplete_observations', 'unlinked_turns')}
+    coverage = {key: source_status.get(key) for key in COVERAGE_FIELDS}
     coverage.update(coverage_complete=False, billing_verified=False)
-    coverage['imports'] = [{key: imp.get(key) for key in
-                           ('harness', 'status', 'files_seen', 'files_parsed', 'malformed_lines',
-                            'partial_lines', 'read_errors', 'unparsed_usage_lines', 'last_success')}
-                          for imp in source_status.get('imports', [])]
+    coverage['imports'] = [{key: imp.get(key) for key in IMPORT_FIELDS} for imp in source_status.get('imports', [])]
     coverage['ranges'] = []
     for harness in sorted({r['harness'] for r in rows}):
         group = [r for r in rows if r['harness'] == harness]
@@ -125,14 +146,41 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
                 columns=encode_columns(rows), coverage=coverage)
 
 
-def render_report(report, template=None):
+STATE_META = re.compile(rb'<meta name="tokenatlas-state" content="([0-9a-f]{32})\.([0-9a-f]{32})">')
+
+
+def read_report_state(path):
+    """(identity, data) recorded in an existing regular report file (head only); None when absent, special or unreadable."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0))
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, 'rb') as stream:
+            fd = None
+            found = STATE_META.search(stream.read(4096))
+    except OSError:
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+    return tuple(g.decode() for g in found.groups()) if found else None
+
+
+def render_report(report, template=None, state=None):
     if template is None:
         template = Path(__file__).with_name('report_template.html').read_text(encoding='utf-8')
     if template.count('__USAGE_DATA__') != 1:
         raise ValueError('report template must contain exactly one data placeholder')
     payload = json.dumps(report, ensure_ascii=True, separators=(',', ':'), allow_nan=False)
     packed = base64.b64encode(gzip.compress(payload.encode('ascii'), compresslevel=9, mtime=0)).decode('ascii')
-    return template.replace('__USAGE_DATA__', packed)
+    html = template.replace('__USAGE_DATA__', packed)
+    if state is not None:  # right after the charset meta, so it sits within the first bytes of the file
+        marker = f'<meta name="tokenatlas-state" content="{state[0]}.{state[1]}">'
+        html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8">' + marker, 1)
+    return html
 
 
 def write_report(path, html):
@@ -144,6 +192,8 @@ def write_report(path, html):
             stream.write(html)
             stream.flush()
             os.fsync(stream.fileno())
+        if os.name != 'nt':
+            os.chmod(temporary, 0o600)  # mkstemp already creates 0600; keep it explicit
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
