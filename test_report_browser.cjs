@@ -7,10 +7,10 @@ const playwright = require(process.env.PLAYWRIGHT_MODULE || '/usr/local/lib/node
 const zlib = require('node:zlib');
 const L = {
   sv: {lang:'sv', locale:'sv-SE', h1:'Tokenanvändning', prompts:'Dyraste prompterna', total:'Totalt', totalRe:/^Totalt( \(minst\))?$/, atLeast:/ \(minst\)$/,
-    note:/^[\d\s\u00a0\u202f]+ anrop · [\d\s\u00a0\u202f]+ sessioner$/, cache:/^(—|\d+,\d % av all input)$/, selection:/ anrop · /, reasoning:/^varav reasoning |^inkl\. reasoning$/,
+    note:/^[\d\s\u00a0\u202f]+ anrop · [\d\s\u00a0\u202f]+ (?:sessioner|session)$/, cache:/^(—|\d+,\d % av all input)$/, selection:/ anrop · /, reasoning:/^varav reasoning |^inkl\. reasoning$/,
     unknown:'Okänt', short:['43,8 mdr','136,5 milj.',(12345).toLocaleString('sv-SE')], money:['$9,00','≥$3,00','$0,60','n/a'], toggleLabel:'Språk'},
   en: {lang:'en', locale:'en-US', h1:'Token usage', prompts:'Costliest prompts', total:'Total', totalRe:/^Total( \(at least\))?$/, atLeast:/ \(at least\)$/,
-    note:/^[\d,]+ requests · [\d,]+ sessions$/, cache:/^(—|\d+\.\d% of all input)$/, selection:/ requests · /, reasoning:/^of which reasoning |^incl\. reasoning$/,
+    note:/^[\d,]+ requests? · [\d,]+ sessions?$/, cache:/^(—|\d+\.\d% of all input)$/, selection:/ requests · /, reasoning:/^of which reasoning |^incl\. reasoning$/,
     unknown:'Unknown', short:['43.8B','136.5M','12.3K'], money:['$9.00','≥$3.00','$0.60','n/a'], toggleLabel:'Language'},
 };
 // Re-encode a report with an explicit payload language (the page only reads it after decoding).
