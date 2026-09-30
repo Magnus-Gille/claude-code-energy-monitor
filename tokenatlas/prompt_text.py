@@ -117,7 +117,18 @@ def _codex_text(row: dict, payload: dict) -> str:
     return ""
 
 
-_CONTEXT_ELEMENT = re.compile(r"<([A-Za-z_][\w-]*)\b[^>]*>.*?</\1[^>]*>", re.S)
+# Harness-injected context only; any other element (e.g. Codex goal mode's <objective>) is the user's prompt.
+_CONTEXT_ELEMENT = re.compile(
+    r"<(environment_context|user_instructions|permissions instructions|turn_aborted|user_shell_command|codex_internal_context)\b[^>]*>.*?</\1[^>]*>", re.S)
+_OBJECTIVE = re.compile(r"<objective\b[^>]*>(.*?)</objective>", re.S)
+
+
+def _codex_prompt(text: str) -> str:
+    """The typed prompt: a goal-mode <objective> (even inside injected context), else the text minus injected context."""
+    found = _OBJECTIVE.search(text)
+    if found:
+        return found.group(1).strip()
+    return "" if _is_context_only(text) else _CONTEXT_ELEMENT.sub(" ", text).strip()
 
 
 def _is_context_only(text: str) -> bool:
@@ -143,9 +154,7 @@ def _codex(path: Path, turn_id: str, limit: int) -> str | None:
             continue
         explicit = _meta_text(_codex_event_turn_id(row, payload))
         genuine = _codex_genuine(row_type, event_type, payload)
-        text = _codex_text(row, payload) if genuine else ""
-        if text and _is_context_only(text):
-            text = ""
+        text = _codex_prompt(_codex_text(row, payload)) if genuine else ""
         if explicit:
             seen_explicit = True
             if explicit == turn_id:

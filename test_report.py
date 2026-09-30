@@ -43,7 +43,10 @@ def expand(report):
                    id=None if c['id'][i] is None else (c['id_prefix'] + f"{c['id'][i]:03d}" if c['id_prefix'] else c['id'][i]),
                    tokens={k: c['tokens'][k][i] for k in ALL_FIELDS},
                    complete=bool(c['complete'][i]), id_synthetic=bool(c['id_synthetic'][i]),
-                   warnings=warnings.split(WARNING_SEPARATOR) if warnings else [])
+                   warnings=warnings.split(WARNING_SEPARATOR) if warnings else [], prompt=c['prompt'][i])
+        v, t, h = None if c['price'][i] is None else c['price_classes'][c['price'][i]], row['tokens'], c['cw1h'][i]
+        row['cost'] = v and ((t['fresh_input'] or 0) * v[0] + ((t['cache_write'] or 0) - h) * v[1] + h * v[2]
+                             + (t['cache_read'] or 0) * v[3] + (t['output'] or 0) * v[4])
         out.append(row)
     return out
 
@@ -247,11 +250,18 @@ class PayloadV2Tests(unittest.TestCase):
                             session=f's{i // 40}', turn_id=f't{i // 4}', model=f'claude-m{i % 5}',
                             tokens=dict(fresh_input=i % 977, cache_read=(i * 37) % 150000, cache_write=i % 311,
                                         output=(i * 13) % 4000, reasoning=i % 50)) for i in range(20000)]
-        size = len(render_report(build_report(rows, {})).encode())
+        report = build_report(rows, {})
+        size = len(render_report(report).encode())
         print(f'20k-row report: {size} bytes')
         self.assertLess(size, SIZE_LIMIT_20K)
+        # The prompt card's columns must stay cheap: the same payload with them removed is the baseline.
+        bare = dict(report, columns={k: v for k, v in report['columns'].items() if k not in PROMPT_CARD_COLUMNS})
+        base = len(render_report(bare).encode())
+        print(f'20k-row report without prompt-card columns: {base} bytes (+{100 * (size - base) / base:.1f}%)')
+        self.assertLess(size, base * 1.08)
 
 
+PROMPT_CARD_COLUMNS = ('prompt', 'price', 'price_classes', 'cw1h')
 SIZE_LIMIT_20K = 700_000  # measured ~311 KB (was ~9 MB as v1 JSON); margin for dictionary growth
 
 if __name__ == '__main__':

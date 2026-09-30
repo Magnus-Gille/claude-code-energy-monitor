@@ -6,17 +6,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tokenatlas.report import build_report, render_report, write_report  # noqa: E402
 
 
-def obs(i, minute, turn, kind='main', agent='main', model='claude-sonnet-4-5', fresh=1000000, session='s1'):
-    return dict(id=f'o{i}', harness='claude', session=session, agent=agent, thread_kind=kind, parent_session=session if kind == 'subagent' else None,
-                turn_id=turn, turn_confidence='derived', ts=f'2026-09-03T10:{minute:02d}:00+00:00', model=model, provider='anthropic',
-                machine='m', project_id='/w/app', project_label='app', effort=None, origin='cli', raw_usage={}, tariff=None,
-                tokens=dict(fresh_input=fresh, cache_write=0, cache_read=0, output=0, reasoning=0), complete=True,
+def obs(i, minute, turn, kind='main', agent='main', model='claude-sonnet-4-5', fresh=1000000, session='s1',
+        harness='claude', provider='anthropic', write=0, split=None, out=0):
+    return dict(id=f'o{i}', harness=harness, session=session, agent=agent, thread_kind=kind, parent_session=session if kind == 'subagent' else None,
+                turn_id=turn, turn_confidence='derived', ts=f'2026-09-03T10:{minute:02d}:00+00:00', model=model, provider=provider,
+                machine='m', project_id='/w/app', project_label='app', effort=None, origin='cli', raw_usage={'cache_creation': split} if split else {}, tariff=None,
+                tokens=dict(fresh_input=fresh, cache_write=write, cache_read=0, output=out, reasoning=0), complete=True,
                 id_synthetic=False, warnings=[], sources=[])
 
 
 def main(out):
-    records = [obs(1, 0, 't1'), obs(2, 5, None, 'subagent', 'a1', model='mystery-model'), obs(3, 10, 't2', fresh=3000000),
-               obs(4, 20, 't3', model='mystery-model'), obs(5, 30, 't4', fresh=200000)]
+    records = [obs(1, 0, 't1'), obs(2, 5, None, 'subagent', 'a1', model='mystery-model'), obs(3, 10, 't2', write=1300000, split=dict(ephemeral_5m_input_tokens=800000, ephemeral_1h_input_tokens=500000)),
+               obs(4, 20, 't3', model='mystery-model'), obs(5, 30, 't4', fresh=0, out=500000, harness='codex', provider='openai', model='gpt-5.6-luna')]
+    # t2: Claude with a 5m/1h cache-write split ($9.00); t4: a non-Claude harness priced from output tokens ($0.60)
     texts = {('claude', 's1', 't1'): 'Fix the <b>failing</b> build', ('claude', 's1', 't2'): 'Refactor the importer'}
     write_report(out, render_report(build_report(records, {}, redact=False, prompt_texts=texts)))
 

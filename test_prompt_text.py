@@ -177,6 +177,19 @@ class CodexTests(TmpCase):
                      "<permissions instructions>p</permissions instructions>", "# AGENTS.md instructions for /w"):
             self.assertTrue(_is_context_only(text), text)
         self.assertFalse(_is_context_only("fix <b>this</b> please"))
+        # Codex goal mode wraps the typed goal in <objective>: that is the prompt, not injected context.
+        self.assertFalse(_is_context_only("<objective>Ship the release</objective>"))
+
+    def test_objective_wrapper_is_the_prompt(self):
+        def msg(role, text):
+            return {"timestamp": TS, "type": "response_item", "payload": {
+                "type": "message", "role": role, "content": [{"type": "input_text", "text": text}]}}
+        self.check_against_parser([
+            codex_meta(), {"timestamp": TS, "type": "event_msg", "payload": {"type": "task_started", "turn_id": "T9"}},
+            codex_ctx(turn_id="T9"), msg("user", "<environment_context><cwd>/w</cwd></environment_context>"),
+            msg("user", "<codex_internal_context source=\"goal\">rules <objective>\n  Ship the release\n</objective> more rules</codex_internal_context>"),
+            codex_tokens(1),
+        ], {"T9": "Ship the release"})
 
     def test_missing_and_unknown(self):
         path = write_jsonl(self.tmp / "rollout-x.jsonl", [codex_meta(), codex_user("hi", id="e")])

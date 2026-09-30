@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tokenatlas.pricing import load_prices, price_observation, summarize_costs
+from tokenatlas.pricing import load_prices, price_observation, price_vector, summarize_costs, unit_prices
 
 REF = {'source_url': 'https://example.test/prices', 'retrieved_on': '2026-09-01', 'notes': ''}
 CLAUDE = dict(provider='anthropic', model='claude-x', aliases=['claude-x-alias'], currency='USD', input=4.0,
@@ -35,6 +35,60 @@ def obs(harness='claude', provider='anthropic', model='claude-x', fresh=0, read=
 
 def split(five, hour):
     return {'cache_creation': {'ephemeral_5m_input_tokens': five, 'ephemeral_1h_input_tokens': hour}}
+
+
+def formula(vector, hour, o):
+    t = {k: v or 0 for k, v in o['tokens'].items()}  # null counts are 0 client-side (only free models get here with one)
+    p_in, p_w5, p_w1, p_cr, p_out = vector
+    return (t['fresh_input'] * p_in + (t['cache_write'] - hour) * p_w5 + hour * p_w1
+            + t['cache_read'] * p_cr + t['output'] * p_out)
+
+
+class UnitPricesTests(unittest.TestCase):
+    def matrix(self):
+        splits = (None, split(M, 500_000), split(1_500_000, 0), split(0, 1_500_000), split(1, 1))  # last: sum != write
+        for harness, provider, model in (('claude', 'anthropic', 'claude-x'), ('claude', 'anthropic', 'claude-x-alias'),
+                                         ('claude', 'anthropic', 'claude-long'), ('claude', 'anthropic', 'claude-nofast'),
+                                         ('codex', 'openai', 'gpt-x'), ('codex', 'openai-codex', 'gpt-write'),
+                                         ('opencode', 'openai', 'gpt-x'), ('opencode', 'mistral', 'eu-model'),
+                                         ('opencode', 'openai', 'free-model'), ('claude', 'anthropic', 'free-model'),
+                                         ('claude', 'anthropic', 'nope'), ('claude', 'anthropic', None), ('pi', 'm5', 'local')):
+            for tariff in (None, {'speed': 'standard'}, {'speed': 'fast'}, {'speed': 'weird'}, {'inference_geo': 'us'},
+                           {'inference_geo': 'eu'}, {'service_tier': 'standard'}, {'service_tier': 'priority'},
+                           {'speed': 'fast', 'inference_geo': 'us'}):
+                for raw in splits:
+                    for fresh, read, write, out in ((M, 2 * M, 1_500_000, 100_000), (300_000, 0, 0, 5), (0, 0, 0, 0),
+                                                    (100, 50, 1_500_000, 7), (None, 5, 5, 5)):
+                        o = obs(harness, provider, model, fresh=fresh, read=read, write=write, out=out, raw=raw, tariff=tariff)
+                        yield o
+                        if raw is None:  # unknown context: no cache_read/write/fresh classes, only the raw inclusive count
+                            yield dict(o, tokens=dict(o['tokens'], cache_read=None), raw_usage={'input_tokens': 300_000})
+                            yield dict(o, tokens=dict(o['tokens'], cache_read=None))
+
+    def test_unit_prices_reproduce_price_observation_cost(self):
+        seen = dict(priced=0, none=0)
+        for o in self.matrix():
+            cost = price_observation(o, TABLE)['cost']
+            vector, hour = price_vector(o, TABLE)
+            self.assertEqual(unit_prices(o, TABLE), vector)
+            self.assertEqual(vector is None, cost is None, o)
+            if cost is None:
+                seen['none'] += 1
+                continue
+            seen['priced'] += 1
+            self.assertEqual(len(vector), 5)
+            self.assertLessEqual(abs(formula(vector, hour, o) - cost), 1e-9 * max(1, cost), o)
+        self.assertGreater(seen['priced'], 500)
+        self.assertGreater(seen['none'], 500)
+
+    def test_vector_examples(self):
+        v, hour = price_vector(obs(fresh=M, write=1_500_000, raw=split(M, 500_000), tariff={'inference_geo': 'us'}), TABLE)
+        self.assertEqual(hour, 500_000)
+        for got, want in zip(v, (4.0, 5.0, 8.0, 0.2, 20.0)):
+            self.assertAlmostEqual(got * 1e6, want * 1.1)
+        self.assertEqual(price_vector(obs('codex', 'openai', 'gpt-write', write=M, tariff={'service_tier': None}), TABLE)[0][1:3], [3e-6, 3e-6])
+        self.assertEqual(price_vector(obs('codex', 'openai', 'free-model', fresh=M), TABLE), ([0.0] * 5, 0))
+        self.assertEqual(price_vector(obs(write=M), TABLE), (None, 0))  # cache write TTL unknown
 
 
 class PriceObservationTests(unittest.TestCase):

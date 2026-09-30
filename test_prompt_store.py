@@ -230,34 +230,44 @@ class ReportBuild(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_report(rows((1, 1)), {}, redact=True, prompt_texts={})
 
-    def test_prompt_column_and_cost(self):
+    def test_prompt_ordinals_price_classes_and_no_cost_column(self):
         recs = rows((1, 1000000), (10, 3000000))
         recs.append(dict(ob('sub', '05', kind='subagent', parent='s', agent='x', fresh=1000000), **EXTRA))
         for redact in (True, False):
             report = build_report(recs, {}, redact=redact, table=TABLE)
-            got = {r['id']: r for r in expand(report)}
-            ids = [got[i]['prompt'] for i in ('o1', 'sub', 'o10')] if not redact else None
-            if redact:
-                ids = [r['prompt'] for r in sorted(expand(report), key=lambda r: r['ms'])]
-                self.assertNotIn('t1', json.dumps(report['columns']['dict']['prompt']))
-                self.assertTrue(all(i.startswith('Prompt ') for i in ids))
-            self.assertEqual(len(set(ids)), 2)
-            self.assertEqual(ids[0], ids[1])
-            self.assertEqual(report['columns']['cost'], [4.0, 4.0, 12.0])
+            cols = report['columns']
+            self.assertNotIn('cost', cols)
+            self.assertNotIn('prompt', cols['dict'])
+            self.assertNotIn('prompt', cols['idx'])
+            self.assertEqual(cols['prompt'], [0, 0, 1])  # by first appearance in row order; no prompt-id strings
+            self.assertTrue(all(isinstance(x, int) for x in cols['prompt']))
+            self.assertNotIn('s:t1', json.dumps(cols))
+            self.assertEqual((cols['price'], cols['cw1h']), ([0, 0, 0], [0, 0, 0]))
+            self.assertEqual(len(cols['price_classes']), 1)
+            self.assertEqual(len(cols['price_classes'][0]), 5)
+            self.assertEqual([r['cost'] for r in expand(report)], [4.0, 4.0, 12.0])
             self.assertNotIn('prompt_texts', report)
 
-    def test_private_texts_keyed_by_display_id(self):
+    def test_unpriced_observation_has_null_price_class(self):
+        recs = rows((1, 1000000))
+        recs.append(dict(ob('u', '07', fresh=1000000, model='mystery-model'), **EXTRA))
+        cols = build_report(recs, {}, redact=False, table=TABLE)['columns']
+        self.assertEqual(cols['price'], [0, None])
+
+    def test_private_texts_keyed_by_ordinal(self):
         recs = rows((1, 1000000), (2, 3000000))
         report = build_report(recs, {}, redact=False, prompt_texts={('claude', 's', 't2'): 'hello', ('claude', 's', 't1'): None,
                                                                     ('claude', 's', 'gone'): 'x'}, table=TABLE)
         got = {r['id']: r['prompt'] for r in expand(report)}
-        self.assertEqual(report['prompt_texts'], {got['o2']: 'hello'})
+        self.assertEqual(got, {'o1': 0, 'o2': 1})
+        self.assertEqual(report['prompt_texts'], {1: 'hello'})
 
     def test_unassigned_observation_has_no_prompt(self):
         recs = rows((1, 1))
         recs.append(dict(ob('n', '09', fresh=1), **EXTRA))
         report = build_report(recs, {}, redact=False, table=TABLE)
         self.assertEqual({r['id']: r['prompt'] for r in expand(report)}['n'], None)
+        self.assertEqual(report['columns']['prompt'], [0, None])
 
     def test_state_includes_store_hash_only_when_given(self):
         a = report_state(1, 'm', {}, {}, 'tok')

@@ -34,12 +34,13 @@ PUBLIC_MODEL = re.compile(
 
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 DICT_FIELDS = ('harness', 'provider', 'model', 'effort', 'thread_kind', 'origin', 'turn_confidence', 'session',
-               'parent_session', 'turn_id', 'agent', 'project_id', 'project_label', 'warnings', 'prompt')
+               'parent_session', 'turn_id', 'agent', 'project_id', 'project_label', 'warnings')
 WARNING_SEPARATOR = '\x1f'
 
 
 def encode_columns(rows):
-    """Columnar payload: dictionaries plus integer index columns; ts is delta-coded epoch ms and `off`
+    """Columnar payload: dictionaries plus integer index columns (`prompt` = prompt ordinal or null; `price` = index into
+    `price_classes`, null when unpriced; the page computes each cost from the tokens, `cw1h` and the class's unit prices); ts is delta-coded epoch ms and `off`
     (minutes east of UTC, dictionary-coded) lets the page derive local date/hour/minute exactly as Python did."""
     def dictionary(values):
         table, index = {}, []
@@ -54,10 +55,13 @@ def encode_columns(rows):
     dicts['off'], idx['off'] = dictionary(r['off'] for r in rows)
     ms = [r['ms'] for r in rows]
     ids = [r['id'] for r in rows]
+    classes = {}  # unit-price vector -> class number, in order of first appearance
+    price = [None if r['unit_prices'] is None else classes.setdefault(tuple(r['unit_prices']), len(classes)) for r in rows]
     return dict(n=len(rows), dict=dicts, idx=idx, ts=[b - a for a, b in zip([0] + ms, ms)],
                 id=ids, id_prefix='Observation ' if ids and all(isinstance(i, (int, type(None))) for i in ids) else None,
                 tokens={k: [r['tokens'][k] for r in rows] for k in ALL_FIELDS},
-                cost=[r['cost'] for r in rows], complete=[int(r['complete']) for r in rows], id_synthetic=[int(r['id_synthetic']) for r in rows])
+                prompt=[r['prompt'] for r in rows], price=price, price_classes=[list(v) for v in classes],
+                cw1h=[r['cw1h'] for r in rows], complete=[int(r['complete']) for r in rows], id_synthetic=[int(r['id_synthetic']) for r in rows])
 
 
 COVERAGE_FIELDS = ('observations', 'first_event', 'last_event', 'missing_source_files',
@@ -86,7 +90,7 @@ def report_state(revision, machine, spec, coverage, token=None, texts_hash=None)
 
 def build_report(records, source_status, timezone_name='Europe/Stockholm', redact=True, prompt_texts=None, table=None):
     """prompt_texts ({(harness, session, turn_id): text or None} from prompt_store) is for private reports only;
-    table is the price table behind the per-observation list-price `cost` column (None = packaged prices)."""
+    table is the price table behind the `price_classes` unit prices (None = packaged prices)."""
     if redact and prompt_texts is not None:
         raise ValueError('prompt text cannot be included in a redacted report')
     table = table or pricing.load_prices()
@@ -119,7 +123,7 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
             public = isinstance(value, str) and value in PUBLIC_NAMES[kind]
         return value if public else alias(kind, str(value))
     assigned = prompts.assign_prompts(records)
-    shown = {}  # prompt key -> display id
+    shown = {}  # prompt key -> ordinal, numbered by first appearance in row order
     rows = []
     for record in records:
         dt = datetime.fromisoformat(record['ts']).astimezone(zone)
@@ -133,12 +137,12 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
             if key in ('session', 'parent_session') and value not in (None, '', 'unknown'):
                 value = f"{record['harness']}:{value}"
             row[key] = alias(kind, value) if redact else value
-        cost = pricing.price_observation(record, table)['cost']
+        unit, cw1h = pricing.price_vector(record, table)
         found = assigned.get(record.get('id'))
         key = found and ':'.join(found[:3])
         if key and key not in shown:
-            shown[key] = alias('Prompt', key) if redact else key
-        row.update(prompt=key and shown[key], cost=cost and round(cost, 6), ts=record['ts'], ms=(dt - EPOCH) // timedelta(milliseconds=1),
+            shown[key] = len(shown)
+        row.update(prompt=key and shown[key], unit_prices=unit, cw1h=cw1h, ts=record['ts'], ms=(dt - EPOCH) // timedelta(milliseconds=1),
                    off=int(dt.utcoffset().total_seconds() // 60),
                    project_id=alias('Projekt', record.get('project_id')),
                    project_label=(alias('Projekt', record.get('project_id')) if redact else
