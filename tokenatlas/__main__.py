@@ -4,7 +4,6 @@ import json
 import os
 import sqlite3
 import re
-import stat
 import sys
 import time
 import webbrowser
@@ -57,12 +56,12 @@ def _spec(privacy,timezone,granularity,filters):
     return {'privacy':privacy,'timezone':timezone,'granularity':granularity,'filters':{k:filters.get(k) for k in FILTERS}}
 
 
-def _present(root,want_file):
-    """False only when the root is definitely not there; an unreadable one is present and fails in refresh."""
-    try:mode=os.stat(root).st_mode
+def _present(root):
+    """False only when the root is definitely not there; an unreadable or wrong-type one is present and fails in refresh."""
+    try:os.stat(root)
     except (FileNotFoundError,NotADirectoryError):return False
     except OSError:return True
-    return stat.S_ISREG(mode) if want_file else stat.S_ISDIR(mode)
+    return True
 
 
 def refresh_all(history):
@@ -74,18 +73,13 @@ def refresh_all(history):
     for name,root in roots.items():
         try:
             # Claude: main root, then each Cowork transcript root (macOS; absent elsewhere and simply skipped).
-            found=[r for r in ([root,*why.cowork_roots()] if name=='claude' else [root]) if _present(r,name=='opencode')]
-            unlistable=None
-            if name=='claude':
-                try:
-                    with os.scandir(why.COWORK_SESSIONS):pass
-                except PermissionError as exc:unlistable=f'{type(exc).__name__}: {exc}'
-                except OSError:pass
-            if not found and not unlistable:
+            cowork,problems=why.cowork_scan() if name=='claude' else ([],[])
+            found=[r for r in [root,*cowork] if _present(r)]
+            if not found and not problems:
                 entries.append({'harness':name,'status':'absent'});continue
             results=[history.refresh(name,r) for r in found]
             entry=(results[0] if len(results)==1 else aggregate(results)) if results else {'harness':name,'status':'ok','errors':[]}
-            if unlistable:entry=dict(entry,errors=[*entry.get('errors',[]),unlistable],status=max(entry['status'],'partial',key=rank))
+            if problems:entry=dict(entry,errors=[*entry.get('errors',[]),*problems],status=max(entry['status'],'partial',key=rank))
         except OSError as exc:
             entry={'harness':name,'status':'error','errors':[f'{type(exc).__name__}: {exc}']}
         entries.append(entry)
@@ -224,13 +218,14 @@ def main(argv=None):
                     print(json.dumps(line,sort_keys=True))
                 return 0
             if args.command=='open':
+                path=_output_path(path,args.db)  # the database may have just been created under a case alias
                 if not args.no_refresh:
                     summary=refresh_all(history)
                     print('refresh: '+', '.join(f"{e['harness']} {e['status']}" for e in summary['harnesses']),file=sys.stderr)
                 history.connection.execute('BEGIN')
                 source_status=history.doctor()
                 spec=_spec('redacted' if args.shared else 'local',DEFAULT_TIMEZONE,'day',{})
-                state=report_state(history.revision,history.machine,spec,coverage_key(source_status))
+                state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token)
                 if path.exists() and read_report_state(path)==state:
                     result={'html':str(path.resolve()),'skipped':True,'reason':'unchanged'}
                 else:
@@ -266,12 +261,13 @@ def main(argv=None):
                 if args.html:
                     path=_output_path(args.html,args.db)
                     spec=_spec('local' if args.private else 'redacted',args.timezone,args.granularity,vars(args))
-                    state=report_state(history.revision,history.machine,spec,coverage_key(source_status))
+                    state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token)
                     if path.exists() and (args.if_changed or max_age is not None):
+                        found=read_report_state(path)
                         age=time.time()-path.stat().st_mtime
-                        old=max_age is None or age<0 or age>=max_age
-                        changed=not args.if_changed or read_report_state(path)!=state
-                        reason='unchanged' if not changed else None if old else 'too recent'
+                        # Options (identity) are never throttled: only a data change on an otherwise identical report waits.
+                        reason=('unchanged' if args.if_changed and found==state else
+                                'too recent' if max_age is not None and found is not None and found[0]==state[0] and 0<=age<max_age else None)
                         if reason:
                             print(json.dumps({'html':str(path.resolve()),'skipped':True,'reason':reason}))
                             return 0

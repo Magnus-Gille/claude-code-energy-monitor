@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import sqlite3
 import sys
 from collections import defaultdict
@@ -31,12 +32,32 @@ OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 COWORK_SESSIONS = Path.home() / "Library" / "Application Support" / "Claude" / "local-agent-mode-sessions"
 
 
+def cowork_scan() -> tuple[list[Path], list[str]]:
+    """Every <org>/<acct>/local_*/.claude/projects directory plus the errors met while walking; a missing base is empty."""
+    roots, errors = [], []
+    def entries(path, keep):
+        try:
+            with os.scandir(path) as it:
+                return sorted((e.path for e in it if keep(e)), key=str)
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            errors.append(f"{path}: {type(exc).__name__}: {exc}")
+            return []
+    isdir = lambda e: e.is_dir()
+    level = [COWORK_SESSIONS]
+    for keep in (isdir, isdir, lambda e: e.name.startswith("local_") and e.is_dir()):
+        level = [child for parent in level for child in entries(parent, keep)]
+    for session in level:
+        projects = Path(session) / ".claude" / "projects"
+        if projects.is_dir():
+            roots.append(projects)
+    return sorted(roots), errors
+
+
 def cowork_roots() -> list[Path]:
     """Every <org>/<acct>/local_*/.claude/projects directory; a missing base is simply empty."""
-    try:
-        return sorted(p for p in COWORK_SESSIONS.glob("*/*/local_*/.claude/projects") if p.is_dir())
-    except OSError:
-        return []
+    return cowork_scan()[0]
 
 
 @dataclass(frozen=True)

@@ -433,9 +433,16 @@ class History:
         row = self.connection.execute("SELECT value FROM meta WHERE key='revision'").fetchone()
         return int(row[0]) if row else 0
 
+    @property
+    def revision_token(self):
+        """Random value replaced on every bump, so copies of one database diverge; None before the first change."""
+        row = self.connection.execute("SELECT value FROM meta WHERE key='revision_token'").fetchone()
+        return row[0] if row else None
+
     @staticmethod
     def _bump(c):
         c.execute("INSERT INTO meta VALUES ('revision','1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1")
+        c.execute("INSERT INTO meta VALUES ('revision_token',lower(hex(randomblob(16)))) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
 
     def _migrate_v1(self, c):
         """Move JSON observations and text-keyed sources into schema v2, then drop the v1 tables."""

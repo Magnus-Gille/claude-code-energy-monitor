@@ -73,12 +73,13 @@ def coverage_key(source_status):
     return key
 
 
-def report_state(revision, machine, spec, coverage):
-    """32-hex fingerprint of data revision, database identity, report options, coverage and template."""
-    body = json.dumps({'format': 1, 'version': __version__, 'machine': machine, 'revision': int(revision),
-                       'spec': spec, 'coverage': coverage}, sort_keys=True, separators=(',', ':'))
+def report_state(revision, machine, spec, coverage, token=None):
+    """(identity, data) 32-hex pair. Identity: version, options, database and template; data: revision token, counter and coverage."""
+    dump = lambda body: json.dumps(body, sort_keys=True, separators=(',', ':'))
     template = hashlib.sha256(Path(__file__).with_name('report_template.html').read_bytes()).hexdigest()
-    return hashlib.sha256((body + template).encode()).hexdigest()[:32]
+    identity = dump({'format': 2, 'version': __version__, 'spec': spec, 'machine': machine})
+    data = dump({'token': token, 'revision': int(revision), 'coverage': coverage})
+    return tuple(hashlib.sha256(text.encode()).hexdigest()[:32] for text in (identity + template, data))
 
 
 def build_report(records, source_status, timezone_name='Europe/Stockholm', redact=True):
@@ -145,19 +146,27 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
                 columns=encode_columns(rows), coverage=coverage)
 
 
-STATE_META = re.compile(rb'<meta name="tokenatlas-state" content="([0-9a-f]{32})">')
+STATE_META = re.compile(rb'<meta name="tokenatlas-state" content="([0-9a-f]{32})\.([0-9a-f]{32})">')
 
 
 def read_report_state(path):
-    """State recorded in an existing regular report file (head only); None when absent, special or unreadable."""
+    """(identity, data) recorded in an existing regular report file (head only); None when absent, special or unreadable."""
     try:
-        if not stat.S_ISREG(os.stat(path).st_mode):
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0))
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
-        with open(path, 'rb') as stream:
+        with os.fdopen(fd, 'rb') as stream:
+            fd = None
             found = STATE_META.search(stream.read(4096))
     except OSError:
         return None
-    return found.group(1).decode() if found else None
+    finally:
+        if fd is not None:
+            os.close(fd)
+    return tuple(g.decode() for g in found.groups()) if found else None
 
 
 def render_report(report, template=None, state=None):
@@ -169,7 +178,7 @@ def render_report(report, template=None, state=None):
     packed = base64.b64encode(gzip.compress(payload.encode('ascii'), compresslevel=9, mtime=0)).decode('ascii')
     html = template.replace('__USAGE_DATA__', packed)
     if state is not None:  # right after the charset meta, so it sits within the first bytes of the file
-        marker = f'<meta name="tokenatlas-state" content="{state}">'
+        marker = f'<meta name="tokenatlas-state" content="{state[0]}.{state[1]}">'
         html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8">' + marker, 1)
     return html
 

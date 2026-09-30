@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import shutil
 import stat
 import sys
 import tempfile
@@ -133,6 +134,29 @@ class RefreshErrors(Base):
         self.assertNotEqual(by['codex']['status'], 'absent')
         self.assertEqual(code, 2, out)
 
+    def test_wrong_type_root_is_not_absent(self):
+        self.claude()
+        why.CODEX_SESSIONS.parent.mkdir(parents=True)
+        why.CODEX_SESSIONS.write_text('not a directory')
+        code, out, _ = self.run_cli('refresh', '--all')
+        by = {x['harness']: x for x in json.loads(out)['harnesses']}
+        self.assertNotEqual(by['codex']['status'], 'absent')
+        self.assertEqual(code, 2, out)
+
+    @unittest.skipIf(os.name == 'nt' or (hasattr(os, 'geteuid') and os.geteuid() == 0), 'needs POSIX non-root')
+    def test_nested_cowork_error_marks_claude_partial(self):
+        write_claude(why.COWORK_SESSIONS / 'o1/a/local_1/.claude/projects/p/a.jsonl')
+        blocked = why.COWORK_SESSIONS / 'o2/b'
+        (blocked / 'local_2').mkdir(parents=True)
+        blocked.chmod(0)
+        self.addCleanup(blocked.chmod, 0o700)
+        code, out, _ = self.run_cli('refresh', '--all')
+        claude = {x['harness']: x for x in json.loads(out)['harnesses']}['claude']
+        self.assertIn(claude['status'], ('partial', 'missing', 'error'))
+        self.assertTrue(any('PermissionError' in e for e in claude['errors']), claude)
+        self.assertEqual(code, 2)
+        self.assertEqual(why.cowork_roots(), [why.COWORK_SESSIONS / 'o1/a/local_1/.claude/projects'])
+
     def test_oserror_in_one_harness_does_not_stop_others(self):
         demo.build_home(self.home, 1)
         real = History.refresh
@@ -250,8 +274,9 @@ class ConditionalReport(Base):
     def test_state_marker_in_html(self):
         self.report()
         head = self.html.read_text(encoding='utf-8')[:4096]
-        self.assertRegex(head, r'<meta name="tokenatlas-state" content="[0-9a-f]{32}">')
-        self.assertEqual(report_mod.read_report_state(self.html), re.search(r'tokenatlas-state" content="([0-9a-f]{32})', head).group(1))
+        self.assertRegex(head, r'<meta name="tokenatlas-state" content="[0-9a-f]{32}\.[0-9a-f]{32}">')
+        found = re.search(r'tokenatlas-state" content="([0-9a-f]{32})\.([0-9a-f]{32})', head)
+        self.assertEqual(report_mod.read_report_state(self.html), found.groups())
 
     def test_privacy_change_rebuilds(self):
         self.report('--if-changed')
@@ -259,6 +284,41 @@ class ConditionalReport(Base):
         self.assertEqual(code, 0, err)
         self.assertNotIn('skipped', json.loads(out))
         self.assertEqual(payload(self.html.read_text(encoding='utf-8'))['privacy'], 'redacted')
+
+    def test_options_change_is_never_throttled_by_max_age(self):
+        self.report('--if-changed')
+        code, out, err = self.run_cli('report', '--html', str(self.html), '--if-changed', '--max-age', '1h')
+        self.assertEqual(code, 0, err)
+        self.assertNotIn('skipped', json.loads(out))
+        self.assertEqual(payload(self.html.read_text(encoding='utf-8'))['privacy'], 'redacted')
+        self.report()
+        self.assertNotIn('skipped', self.report('--max-age', '1h', '--timezone', 'UTC'))
+        self.assertEqual(payload(self.html.read_text(encoding='utf-8'))['timezone'], 'UTC')
+
+    def test_data_only_change_with_both_flags_stays_throttled(self):
+        self.report()
+        self.change()
+        self.assertSkipped(self.report('--if-changed', '--max-age', '1h'), 'too recent')
+
+    def test_report_without_marker_rebuilds_despite_max_age(self):
+        self.html.parent.mkdir(parents=True)
+        self.html.write_text('<html><meta charset="utf-8"></html>', encoding='utf-8')
+        self.assertNotIn('skipped', self.report('--max-age', '1h'))
+        self.assertIsNotNone(report_mod.read_report_state(self.html))
+
+    def test_copied_databases_get_distinct_states(self):
+        other = Path(self.tmp.name) / 'copy.sqlite3'
+        shutil.copy(self.db, other)
+        with History(self.db) as a, History(other) as b:
+            self.assertEqual(a.machine, b.machine)
+            self.assertEqual(a.revision_token, b.revision_token)
+            a._bump(a.connection)
+            b._bump(b.connection)
+            self.assertEqual(a.revision, b.revision)
+            self.assertNotEqual(a.revision_token, b.revision_token)
+            sp, cov = cli._spec('local', 'UTC', 'day', {}), {'observations': 1}
+            self.assertNotEqual(report_mod.report_state(a.revision, a.machine, sp, cov, a.revision_token),
+                                report_mod.report_state(b.revision, b.machine, sp, cov, b.revision_token))
 
     def test_timezone_and_filter_change_rebuild(self):
         self.report('--if-changed')
@@ -306,6 +366,16 @@ class ConditionalReport(Base):
         os.mkfifo(fifo)
         self.assertIsNone(report_mod.read_report_state(fifo))
         self.assertIsNone(report_mod.read_report_state(Path(self.tmp.name)))
+
+    def test_case_alias_of_existing_database_is_rejected(self):
+        d = self.tmp.name
+        Path(d, 'probe').touch()
+        if not Path(d, 'PROBE').exists():
+            self.skipTest('case-sensitive filesystem')
+        before = self.db.read_bytes()
+        alias = self.db.parent / self.db.name.upper()
+        self.assertEqual(self.run_cli('report', '--html', str(alias))[0], 2)
+        self.assertEqual(self.db.read_bytes(), before)
 
     def test_future_mtime_counts_as_stale(self):
         self.report()
@@ -437,6 +507,19 @@ class OpenCommand(Base):
         self.assertEqual(code, 0)
         self.assertIn('partial', err)
         self.opener.assert_called_once()
+
+
+class OpenCaseAlias(Base):
+    def test_open_creating_database_rejects_case_alias(self):
+        Path(self.tmp.name, 'probe').touch()
+        if not Path(self.tmp.name, 'PROBE').exists():
+            self.skipTest('case-sensitive filesystem')
+        alias = self.db.parent / self.db.name.upper()
+        with patch.object(cli, '_open_in_browser'):
+            code, _, _ = self.run_cli('open', '--html', str(alias), '--no-refresh', db='explicit')
+        self.assertEqual(code, 2)
+        if self.db.exists():
+            self.assertEqual(self.db.read_bytes()[:15], b'SQLite format 3')
 
 
 class BrowserFailure(Base):
