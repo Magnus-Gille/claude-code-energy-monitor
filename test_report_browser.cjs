@@ -69,6 +69,20 @@ const playwright = require(process.env.PLAYWRIGHT_MODULE || '/usr/local/lib/node
     assert.equal(exact(cards[0].title),await page.evaluate(()=>UsageReport.aggregate(UsageReport.getSelected()).known_tokens));
     assert.deepEqual(await page.evaluate(()=>[...document.querySelectorAll('.legend span')].map(s=>s.textContent)),['Input','Cache write','Cache read','Output']);
     assert.equal(await page.evaluate(()=>[UsageReport.short(43812345678),UsageReport.short(136500000),UsageReport.short(12345)].join('|')),'43,8 mdr|136,5 milj.|'+(12345).toLocaleString('sv-SE'));
+    // "Dyraste prompterna": the card renders the top prompts of the current selection (at most 5), previews only in private fixtures.
+    const promptRows=await page.evaluate(()=>({card:!!document.getElementById('top-prompts'),rows:document.querySelectorAll('#top-prompts tr.prompt-row').length,expected:Math.min(5,UsageReport.topPrompts(UsageReport.getSelected()).length)}));
+    assert.ok(promptRows.card);assert.equal(promptRows.rows,promptRows.expected);
+    if(process.argv[3]){
+      const page2=await context.newPage(),errors2=[];page2.on('pageerror',e=>errors2.push(e.message));
+      await page2.setContent(fs.readFileSync(process.argv[3],'utf8'),{waitUntil:'load'});
+      for(const deadline=Date.now()+60000;!(await page2.evaluate(()=>window.reportReady===true));){if(Date.now()>deadline)throw new Error('prompts fixture not ready: '+errors2.join('; '));await page2.waitForTimeout(50)}
+      const card=await page2.evaluate(()=>({rows:[...document.querySelectorAll('#top-prompts tr.prompt-row')].map(r=>[...r.children].map(c=>c.textContent)),texts:[...document.querySelectorAll('#top-prompts tr.prompt-text')].map(r=>r.textContent),markup:document.querySelectorAll('#top-prompts tr.prompt-text b').length}));
+      assert.equal(card.rows.length,4);assert.equal(card.rows[0][0],'1');
+      assert.deepEqual(card.rows.map(r=>r[8].replace(/\u00a0/g,' ')),['$9,00','≥$3,00','$0,60','n/a']);assert.equal(card.rows[1][6],'1');assert.equal(card.rows[1][5],'2');
+      assert.deepEqual(card.texts,['Refactor the importer','Fix the <b>failing</b> build']);assert.equal(card.markup,0,'preview must be text, not markup');
+      await page2.screenshot({path:path.join(screenshotDir,'energy-report-prompts.png'),fullPage:true});
+      assert.deepEqual(errors2,[]);
+    }
     assert.deepEqual(errors,[]);assert.deepEqual(requests,[]);
     console.log(JSON.stringify({pass:true,browser:browserName,records:check.records,known_tokens:check.actual,network_requests:requests.length,console_errors:errors.length,checks:'summary cards, legend, totals, cache comparisons, bucket conservation, filters, empty state, zoom, drilldown, export, mobile overflow'}));
   } finally {await browser.close()}

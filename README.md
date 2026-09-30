@@ -159,6 +159,28 @@ tokenatlas rate <session-id> --unit review --thread claude:agent:<id> --outcome 
 Costs are API-equivalent list prices, not what was paid; unknown cost prints `n/a`. Once outcomes exist,
 `session` also shows cost per passed result per model. Details and limits: [docs/sessions.md](docs/sessions.md).
 
+## Top prompts
+
+```bash
+tokenatlas top [-n 5] [--by cost|tokens] [--harness H] [--project P] [--start ISO] [--end ISO] [--json]
+tokenatlas top --keep-text -n 5     # opt in: remember the text of the current top 5 prompts
+tokenatlas top --forget-text        # delete the stored text
+tokenatlas top --json --with-text   # include stored text in JSON
+```
+
+A prompt is one user turn plus every request it caused, including subagent work (rolled up by time and
+parent session). Prompts are ranked by list-price cost (unpriced last) or by tokens; cost is API-equivalent,
+`n/a` when unpriced and `≥` when only partly priced. The HTML report has a matching "Dyraste prompterna" card
+that follows the report filters.
+
+Prompt text is never stored in the history database and never in snapshots or imports. Only if you run
+`top --keep-text` does TokenAtlas write `top-prompts.json` next to the history (mode 0600, written atomically).
+It holds, for the current global top prompts only, the harness, session, turn id, capture time and a sanitized
+preview (whitespace collapsed, secret-like strings masked, at most about 200 characters) read from this
+machine's own logs; prompts from other machines get no text. A prompt that falls out of the top is removed
+from the file on the next `--keep-text`. Shared (pseudonymized, default) reports never contain prompt text;
+private reports (`report --html --private`, `open` without `--shared`) show the previews when the file exists.
+
 ## Fixed context overhead
 
 `tokenatlas overhead --refresh` reports the floor tokens of a session's first request, the sizes of
