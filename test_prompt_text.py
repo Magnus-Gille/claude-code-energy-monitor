@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tokenatlas import why
-from tokenatlas.prompt_text import extract_prompt, sanitize
+from tokenatlas.prompt_text import _is_context_only, extract_prompt, sanitize
 
 START = datetime(2026, 9, 1, tzinfo=timezone.utc)
 END = datetime(2026, 9, 10, tzinfo=timezone.utc)
@@ -140,6 +140,43 @@ class CodexTests(TmpCase):
                 codex_user("epsilon"), codex_ctx(), codex_tokens(1)]
         path = write_jsonl(self.tmp / "rollout-x.jsonl", rows)
         self.assertEqual(extract_prompt("codex", str(path), "cs1", "K1"), "epsilon")
+
+    def test_current_format_skips_context_and_mid_turn_steering(self):
+        def msg(role, text):
+            return {"timestamp": TS, "type": "response_item", "payload": {
+                "type": "message", "role": role, "content": [{"type": "input_text", "text": text}]}}
+        ctx = lambda t: codex_ctx(turn_id=t)
+        done = lambda t: {"timestamp": TS, "type": "event_msg", "payload": {"type": "item_completed", "turn_id": t}}
+        usage = {"timestamp": TS, "type": "token_usage_record", "payload": {"turn_id": "T1"}}
+        self.check_against_parser([
+            codex_meta(), msg("developer", "rules"), msg("user", "<environment_context><cwd>/w</cwd></environment_context>"),
+            {"timestamp": TS, "type": "world_state", "payload": {}}, ctx("T1"), msg("user", "real prompt"), done("T1"),
+            msg("assistant", "thinking"), usage, codex_tokens(1), msg("user", "steer now"), done("T1"),
+            msg("assistant", "done"), codex_tokens(2),
+            msg("user", "# AGENTS.md instructions for /w\nbody"), msg("user", "second prompt"), ctx("T2"), msg("assistant", "ok"),
+            codex_tokens(3),
+        ], {"T1": "real prompt", "T2": "second prompt"})
+
+    def test_current_format_prompt_after_turn_start_or_absent(self):
+        rows = [codex_meta(), codex_ctx(turn_id="T1"),
+                {"timestamp": TS, "type": "response_item", "payload": {"type": "message", "role": "user", "content": "late prompt"}},
+                codex_tokens(1)]
+        self.check_against_parser(rows, {"T1": "late prompt"})
+        path = write_jsonl(self.tmp / "rollout-y.jsonl", [codex_meta(), codex_ctx(turn_id="T9"), codex_tokens(1)])
+        self.assertIsNone(extract_prompt("codex", str(path), "cs1", "T9"))
+
+    def test_legacy_assistant_messages_do_not_start_turns(self):
+        def msg(role, text):
+            return {"timestamp": TS, "type": "response_item", "payload": {"type": "message", "role": role, "id": role + text, "content": text}}
+        self.check_against_parser([
+            codex_meta(), msg("user", "q1"), codex_ctx(), codex_tokens(1), msg("assistant", "a1"), codex_tokens(2),
+        ], {"userq1": "q1"})
+
+    def test_context_only(self):
+        for text in ("<environment_context>x</environment_context>", "<user_instructions>y</user_instructions>\n<environment_context/>z</environment_context>",
+                     "<permissions instructions>p</permissions instructions>", "# AGENTS.md instructions for /w"):
+            self.assertTrue(_is_context_only(text), text)
+        self.assertFalse(_is_context_only("fix <b>this</b> please"))
 
     def test_missing_and_unknown(self):
         path = write_jsonl(self.tmp / "rollout-x.jsonl", [codex_meta(), codex_user("hi", id="e")])

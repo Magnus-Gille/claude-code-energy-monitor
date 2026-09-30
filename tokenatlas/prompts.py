@@ -38,9 +38,9 @@ def assign_prompts(records):
             if parent in seen:session = None;break
             seen.add(parent);session = parent
         found = turns.get((r['harness'], session)) if session else None
-        if not found:continue
-        at = bisect_right(found, (_t(r['ts']), chr(0x10FFFF))) - 1
+        at = bisect_right(found, (_t(r['ts']), chr(0x10FFFF))) - 1 if found else -1
         if at >= 0:result[r['id']] = (r['harness'], session, found[at][1], 'rolled_up')
+        elif r.get('turn_id'):result[r['id']] = (r['harness'], r['session'], r['turn_id'], 'own_subagent')
     return result
 
 
@@ -59,9 +59,9 @@ def top_prompts(records, table, k=5, by='cost'):
         costs = [price_observation(r, table)['cost'] for r in rows]
         priced = [c for c in costs if c is not None]
         first, last = min((r['ts'] for r in rows), key=_t), max((r['ts'] for r in rows), key=_t)
-        head = min(own, key=lambda r: _t(r['ts']))
+        head = min(own or rows, key=lambda r: _t(r['ts']))
         prompts.append({
-            'harness': harness, 'session': session, 'turn_id': turn, 'machine': head.get('machine'),
+            'harness': harness, 'session': session, 'turn_id': turn, 'thread_kind': head['thread_kind'], 'machine': head.get('machine'),
             'project_id': head.get('project_id'), 'project_label': head.get('project_label'),
             'first_ts': first, 'last_ts': last, 'duration_s': (_t(last) - _t(first)).total_seconds(),
             'models': sorted({r['model'] for r in rows if r.get('model')}), 'requests': len(rows),

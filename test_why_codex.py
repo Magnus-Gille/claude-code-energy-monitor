@@ -254,7 +254,7 @@ class CodexAttributionTests(unittest.TestCase):
             records = why.collect_codex(root, self.start, self.end, paths=[path])
 
         self.assertEqual(records[0].turn_id, "task-1")
-        self.assertEqual(records[0].turn_confidence, "derived")
+        self.assertEqual(records[0].turn_confidence, "observed")  # task_started names its turn explicitly
         self.assertEqual(records[0].model, "gpt-a")
         self.assertEqual(records[1].model, "unknown")
         self.assertEqual(records[1].effort, "unknown")

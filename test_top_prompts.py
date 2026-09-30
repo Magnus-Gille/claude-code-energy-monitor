@@ -1,9 +1,12 @@
+import dataclasses
 import json
 import unittest
+import unittest.mock
+from datetime import datetime, timezone
 from pathlib import Path
 
 from tokenatlas import why
-from tokenatlas.history import COLLECTOR_VERSION, History
+from tokenatlas.history import COLLECTOR_VERSION, History, merge_observations
 from tokenatlas.prompts import assign_prompts, top_prompts
 from test_fresh_report import Base
 from test_pricing import TABLE, CLAUDE
@@ -215,10 +218,10 @@ class PiAndFingerprint(Base):
         path.write_text('x')
         s = path.stat()
         old = json.dumps([COLLECTOR_VERSION, ['f.jsonl', s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns]])
-        for harness in (None, 'claude', 'codex', 'opencode'):
+        for harness in (None, 'claude', 'opencode'):
             self.assertEqual(History.fingerprint(path, harness=harness), old)
-        self.assertNotEqual(History.fingerprint(path, harness='pi'), old)
-        self.assertEqual(json.loads(History.fingerprint(path, harness='pi')), json.loads(old) + [['revision', 1]])
+        for harness in ('pi', 'codex'):
+            self.assertEqual(json.loads(History.fingerprint(path, harness=harness)), json.loads(old) + [['revision', 1]])
 
     def test_old_pi_fingerprint_forces_one_reread(self):
         jl(why.PI_SESSIONS / 'proj/s.jsonl', pi_rows())
@@ -230,6 +233,104 @@ class PiAndFingerprint(Base):
             h.connection.execute('UPDATE files SET fingerprint=?', (old,))
             h.connection.commit()
             self.assertEqual(h.refresh('pi', why.PI_SESSIONS)['files_parsed'], 1)
+
+
+TS = '2026-09-03T10:00:00Z'
+
+
+def cx(row_type, payload, n=0):
+    return {'timestamp': f'2026-09-03T10:{n:02d}:00Z', 'type': row_type, 'payload': payload}
+
+
+def cx_msg(role, text, n=0, row_type='response_item'):
+    return cx(row_type, {'type': 'message', 'role': role, 'id': f'{role}-{n}',
+                         'content': [{'type': 'input_text' if role != 'assistant' else 'output_text', 'text': text}]}, n)
+
+
+def cx_tokens(n):
+    return {'timestamp': f'2026-09-03T10:{n:02d}:30Z', 'ordinal': n, 'type': 'event_msg', 'payload': {'type': 'token_count', 'info': {
+        'last_token_usage': {'input_tokens': 10 * n, 'output_tokens': n},
+        'total_token_usage': {'input_tokens': 10 * n, 'output_tokens': n, 'total_tokens': 11 * n}}}}
+
+
+def cx_meta():
+    return cx('session_meta', {'id': 'cs1', 'model_provider': 'openai', 'cwd': '/w'})
+
+
+def current_rollout(second_user_id=None):
+    ctx = lambda t, n: cx('turn_context', {'turn_id': t, 'model': 'gpt-x', 'cwd': '/w'}, n)
+    done = lambda t, n: cx('event_msg', {'type': 'item_completed', 'turn_id': t}, n)
+    return [cx_meta(),
+            cx_msg('developer', 'rules', 1), cx_msg('user', '<environment_context><cwd>/w</cwd></environment_context>', 1),
+            cx('world_state', {}, 1), ctx('T1', 2), cx_msg('user', 'real prompt one', 2), done('T1', 2),
+            cx_msg('assistant', 'thinking', 3), cx('response_item', {'type': 'custom_tool_call'}, 3),
+            cx('token_usage_record', {'turn_id': 'T1'}, 3), cx_tokens(3),
+            cx_msg('user', 'steer please', 4), done('T1', 4), cx_msg('assistant', 'done', 5), cx_tokens(5),
+            cx_msg('user', 'real prompt two', 6), ctx('T2', 7), cx_msg('assistant', 'ok', 8), cx_tokens(8)]
+
+
+class CodexTurns(Base):
+    def write(self, name, rows):
+        jl(why.CODEX_SESSIONS / name, rows)
+        return why.CODEX_SESSIONS / name
+
+    def turns(self, rows):
+        path = self.write('rollout-a.jsonl', rows)
+        start, end = datetime(2026, 9, 1, tzinfo=timezone.utc), datetime(2026, 9, 10, tzinfo=timezone.utc)
+        return [(r.turn_id, r.turn_confidence) for r in why.collect_codex(why.CODEX_SESSIONS, start, end, paths=[path])]
+
+    def test_current_format_attributes_to_explicit_turns(self):
+        self.assertEqual(self.turns(current_rollout()),
+                         [('T1', 'observed'), ('T1', 'observed'), ('T2', 'observed')])
+
+    def test_legacy_only_genuine_user_events_start_turns(self):
+        rows = [cx_meta(), cx_msg('developer', 'rules', 1), cx_msg('assistant', 'hello', 1),
+                cx_msg('user', 'first', 2), cx('turn_context', {'model': 'm'}, 2), cx_tokens(2),
+                cx_msg('assistant', 'reply', 3), cx_tokens(3),
+                cx('event_msg', {'type': 'user_message', 'message': 'second', 'id': 'ev2'}, 4),
+                cx('turn_context', {'model': 'm'}, 4), cx_tokens(4)]
+        self.assertEqual(self.turns(rows), [('user-2', 'derived'), ('user-2', 'derived'), ('ev2', 'derived')])
+
+    def test_merge_replaces_turn_fields_whichever_side_is_newer(self):
+        self.write('rollout-a.jsonl', current_rollout())
+        with History(self.db) as h:
+            h.refresh('codex', why.CODEX_SESSIONS)
+            stored = h.records()[0]
+        bad = dict(stored, turn_id='assistant-9', turn_confidence='derived')
+        for a, b in ((bad, stored), (stored, bad)):
+            merged = merge_observations(a, b)
+            self.assertEqual((merged['turn_id'], merged['turn_confidence']),
+                             (stored['turn_id'], 'observed') if 'observed' in (a['turn_confidence'], b['turn_confidence'])
+                             else (b['turn_id'], 'derived'))
+
+    def test_refresh_after_revision_bump_stores_corrected_turns(self):
+        self.write('rollout-a.jsonl', current_rollout())
+        real = why.collect_codex
+
+        def stale(*args, **kw):  # what the pre-fix parser produced: assistant message ids as derived turns
+            return [dataclasses.replace(r, turn_id='assistant-old', turn_confidence='derived') for r in real(*args, **kw)]
+        with History(self.db) as h, unittest.mock.patch.object(why, 'collect_codex', stale):
+            h.refresh('codex', why.CODEX_SESSIONS)
+            self.assertEqual({(r['turn_id'], r['turn_confidence']) for r in h.records()}, {('assistant-old', 'derived')})
+        with History(self.db) as h:
+            h.connection.execute("UPDATE files SET fingerprint='stale'")
+            h.connection.commit()
+            self.assertEqual(h.refresh('codex', why.CODEX_SESSIONS)['files_parsed'], 1)
+            self.assertEqual(sorted((r['turn_id'], r['turn_confidence']) for r in h.records()),
+                             [('T1', 'observed'), ('T1', 'observed'), ('T2', 'observed')])
+
+
+class OrphanSubagents(unittest.TestCase):
+    def test_orphan_subagent_with_own_turn_gets_own_prompt(self):
+        rows = [ob('a', '00', session='p', turn='t1', harness='codex'),
+                ob('o', '05', session='z', turn='zt', kind='subagent', parent='gone', harness='codex'),
+                ob('o2', '06', session='z', turn='zt', kind='subagent', parent='gone', harness='codex', fresh=5)]
+        got = assign_prompts(rows)
+        self.assertEqual(got['o'], ('codex', 'z', 'zt', 'own_subagent'))
+        res = top_prompts(rows, TABLE, k=5)
+        sub = [p for p in res['prompts'] if p['turn_id'] == 'zt'][0]  # a group of only subagent rows must not crash
+        self.assertEqual((sub['thread_kind'], sub['requests'], sub['session']), ('subagent', 2, 'z'))
+        self.assertEqual([p['thread_kind'] for p in res['prompts'] if p['turn_id'] == 't1'], ['main'])
 
 
 if __name__ == '__main__':

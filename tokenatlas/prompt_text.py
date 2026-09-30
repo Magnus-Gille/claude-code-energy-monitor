@@ -117,29 +117,59 @@ def _codex_text(row: dict, payload: dict) -> str:
     return ""
 
 
+_CONTEXT_ELEMENT = re.compile(r"<([A-Za-z_][\w-]*)\b[^>]*>.*?</\1[^>]*>", re.S)
+
+
+def _is_context_only(text: str) -> bool:
+    """True for injected context (<environment_context>, <user_instructions>, AGENTS.md dumps), not a typed prompt."""
+    text = text.strip()
+    return text.startswith("# AGENTS.md instructions for") or not _CONTEXT_ELEMENT.sub("", text).strip()
+
+
+def _codex_genuine(row_type: object, event_type: object, payload: dict) -> bool:
+    return (row_type == "event_msg" and event_type in {"user_message", "user_input"}) or (
+        row_type == "response_item" and event_type == "message" and payload.get("role") == "user")
+
+
 def _codex(path: Path, turn_id: str, limit: int) -> str | None:
     """Replay collect_codex's turn assignment, tracking the user text behind each id."""
-    latest: str | None = None   # latest user_message text seen so far
-    awaiting = False            # task_started carried turn_id; text comes from the next user_message
+    last: str | None = None  # last genuine user text before the first row carrying the turn id
+    after = False            # the turn id was seen without a preceding prompt: take the next genuine text
+    seen_explicit = False
     for row in _json_rows(path):
         payload = _mapping(row.get("payload"))
         row_type, event_type = row.get("type"), payload.get("type")
-        if row_type == "turn_context":
-            if _meta_text(_codex_event_turn_id(row, payload)) == turn_id and latest:
-                return sanitize(latest, limit)
+        if row_type == "session_meta":
             continue
-        if row_type == "session_meta" or event_type == "token_count":
+        explicit = _meta_text(_codex_event_turn_id(row, payload))
+        genuine = _codex_genuine(row_type, event_type, payload)
+        text = _codex_text(row, payload) if genuine else ""
+        if text and _is_context_only(text):
+            text = ""
+        if explicit:
+            seen_explicit = True
+            if explicit == turn_id:
+                if text:
+                    return sanitize(text, limit)
+                if last:
+                    return sanitize(last, limit)
+                after = True
+            else:
+                last = None
+                if after:
+                    return None
             continue
-        if event_type == "task_started":
-            if _meta_text(_codex_event_turn_id(row, payload)) == turn_id:
-                if latest:
-                    return sanitize(latest, limit)
-                awaiting = True
-        elif event_type in {"user_message", "user_input", "message"}:
-            latest = _codex_text(row, payload)
-            assigned = _meta_text(_codex_event_turn_id(row, payload), _codex_user_event_identity(row, payload))
-            if awaiting or assigned == turn_id:
-                return sanitize(latest, limit)
+        if row_type == "token_usage_record" or (row_type == "event_msg" and event_type == "token_count"):
+            if after:
+                return None
+            continue
+        if not text:
+            continue
+        if after:
+            return sanitize(text, limit)
+        last = text
+        if not seen_explicit and _meta_text(_codex_user_event_identity(row, payload)) == turn_id:
+            return sanitize(text, limit)
     return None
 
 

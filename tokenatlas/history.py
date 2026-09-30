@@ -23,7 +23,7 @@ from tokenatlas import why
 OBSERVATION_VERSION = 1  # the 'v' field inside observation dicts
 SCHEMA_VERSION = 2  # PRAGMA user_version of the SQLite layout
 COLLECTOR_VERSION = 5
-HARNESS_REVISION = {'pi': 1}  # bump to force a re-read of one harness's files only (appended to its fingerprint)
+HARNESS_REVISION = {'pi': 1, 'codex': 1}  # bump to force a re-read of one harness's files only (appended to its fingerprint)
 FIELDS = ('fresh_input', 'cache_read', 'cache_write', 'output')
 ALL_FIELDS = FIELDS + ('reasoning',)
 
@@ -199,6 +199,13 @@ def merge_observations(a, b):
             _, original = min(starts, key=lambda pair: pair[0])
             for key in ('session', 'project_id', 'project_label', 'cwd', 'harness_version', 'session_started_at'):
                 result[key] = original.get(key)
+    # Turn fields are replaced, not gap-filled: the more certain attribution wins, the incoming one (b) on a tie,
+    # so a re-read with a corrected parser overwrites what an older parse stored.
+    rank = {'observed': 2, 'derived': 1}
+    if rank.get(b.get('turn_confidence'), 0) >= rank.get(a.get('turn_confidence'), 0):
+        result['turn_id'], result['turn_confidence'] = b.get('turn_id'), b.get('turn_confidence')
+    else:
+        result['turn_id'], result['turn_confidence'] = a.get('turn_id'), a.get('turn_confidence')
     for k, v in other.items():
         if result.get(k) in (None, '', 'unknown', 'absent') and v not in (None, '', 'unknown', 'absent'):
             result[k] = v
