@@ -121,9 +121,29 @@ finds nothing new leaves the revision alone; a re-import of identical rows with 
 
 The report is available in Swedish and English. `--lang auto|sv|en` (on `report` and `open`, default `auto`) picks the language: `auto` follows the browser (`sv` gives Swedish, anything else English). The SV/EN toggle in the report header switches live and remembers the choice in the browser when storage is available; an explicit `--lang` wins over a remembered choice. `--lang` is part of the report identity, so changing it rebuilds a conditional report.
 
+The reference collector `scripts/collect.sh` does all of this safely. Install it by copying it next to
+`remote_sync.sh` (it finds the sync script beside itself):
+
+    mkdir -p ~/.local/share/tokenatlas && cp scripts/collect.sh remote_sync.sh ~/.local/share/tokenatlas/
+    chmod +x ~/.local/share/tokenatlas/*.sh
+
+It works in this order, so local results never wait for a remote machine:
+
+1. `tokenatlas refresh --all`
+2. `tokenatlas top --keep-text`, only if you opted in (`top-prompts.json` exists in the state directory)
+3. the conditional private report (`--if-changed --max-age 1h`)
+4. then, only if configured (`REMOTE_HOSTS_OVERRIDE`, or a `remote-hosts` file of space-separated `tag:host`
+   pairs in the state directory), `remote_sync.sh` with bounded ssh/scp/rsync calls and a per-host time limit
+   (see [Other machines](docs/remote-machines.md))
+5. after a successful sync, the conditional report again, so imported data shows up promptly
+
+One run at a time: a `collect.lock` directory with a PID file in the state directory. A second run logs
+`already running` and exits; a lock whose process is gone, or older than 2 hours, is taken over. The log is
+one line per step with its exit code.
+
 Cron, every 30 minutes (use the full path; cron has a short `PATH`):
 
-    */30 * * * * ~/.local/bin/tokenatlas refresh --all && ~/.local/bin/tokenatlas report --html ~/.local/state/tokenatlas/report.html --private --if-changed --max-age 1h
+    */30 * * * * ~/.local/share/tokenatlas/collect.sh >> ~/.local/state/tokenatlas/collect.log 2>&1
 
 On macOS prefer launchd: it runs a missed job after sleep, cron does not. Save as
 `~/Library/LaunchAgents/com.tokenatlas.report.plist` and run `launchctl load` on it:
@@ -135,8 +155,8 @@ On macOS prefer launchd: it runs a missed job after sleep, cron does not. Save a
   <key>Label</key><string>com.tokenatlas.report</string>
   <key>StartInterval</key><integer>1800</integer>
   <key>ProgramArguments</key><array>
-    <string>/bin/sh</string><string>-c</string>
-    <string>$HOME/.local/bin/tokenatlas refresh --all &amp;&amp; $HOME/.local/bin/tokenatlas report --html $HOME/.local/state/tokenatlas/report.html --private --if-changed --max-age 1h</string>
+    <string>/bin/bash</string><string>-c</string>
+    <string>$HOME/.local/share/tokenatlas/collect.sh &gt;&gt; $HOME/.local/state/tokenatlas/collect.log 2&gt;&amp;1</string>
   </array>
 </dict></plist>
 ```

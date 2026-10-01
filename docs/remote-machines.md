@@ -39,6 +39,22 @@ remotely (with `~/.local/bin` prepended to `PATH`): `tokenatlas snapshot` on the
 (directory mode 0700), then `tokenatlas import ... --label <tag>` locally. A host without it prints
 `history: not installed on <tag>` and the loop continues.
 
+### Timeouts and the collector
+
+A stalled host must not block anything else, so every remote call is bounded:
+
+- `ssh` and `scp` get `-o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o BatchMode=yes`;
+  `rsync` gets the same options through `-e "ssh ..."` plus `--timeout=60`. Override the ssh options with
+  `TOKENATLAS_SSH_OPTS`.
+- Each host also has an overall limit, `TOKENATLAS_HOST_TIMEOUT` seconds (default 300). A host over the limit
+  is killed with its child processes, reported as `<host>: ERROR (timeout after Ns)`, and the script moves
+  on to the next host. It then exits 1, but returns promptly.
+
+Schedule `scripts/collect.sh` (copy it next to `remote_sync.sh`) instead of calling `remote_sync.sh` from
+cron. It takes a lock so runs never overlap, refreshes and rebuilds the local report first, runs the sync
+afterwards (hosts from `REMOTE_HOSTS_OVERRIDE` or the `remote-hosts` file in the state directory) and
+rebuilds the report once more after a successful sync. See "Keeping the report fresh" in the README.
+
 By hand:
 
     ssh pi tokenatlas snapshot '~/.local/state/tokenatlas/snapshot.sqlite3'

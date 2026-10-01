@@ -28,12 +28,26 @@
 # the local import goes into that database (`tokenatlas --db "$TOKENATLAS_DB" import ...`) instead of the default one, e.g. to try
 # the sync without touching your real history.
 
+# Bounded remote calls (a stalled host must never hang the run):
+#   TOKENATLAS_SSH_OPTS     options for every ssh/scp/rsync-ssh call (default below)
+#   TOKENATLAS_HOST_TIMEOUT overall seconds per host (default 300); a host over the limit is killed (with its
+#                           children) and reported as "<host>: ERROR (timeout after Ns)", then the next host runs.
+#                           The script then exits 1 once it has finished the remaining hosts.
+
 set -euo pipefail
 
 # Cron has a minimal PATH, and pipx/venv installs link tokenatlas into ~/.local/bin.
 export PATH="$HOME/.local/bin:$PATH"
 
 DEST="$HOME/.claude"
+
+SSH_OPTS_STR="${TOKENATLAS_SSH_OPTS:--o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o BatchMode=yes}"
+read -ra SSH_OPTS <<< "$SSH_OPTS_STR"
+HOST_TIMEOUT="${TOKENATLAS_HOST_TIMEOUT:-300}"
+if ! [[ "$HOST_TIMEOUT" =~ ^[0-9]+$ ]] || [[ "$HOST_TIMEOUT" -eq 0 ]]; then
+    echo "TOKENATLAS_HOST_TIMEOUT must be a positive integer (seconds), got '$HOST_TIMEOUT'" >&2
+    exit 2
+fi
 
 # tag:host pairs. Override a host via env var, e.g. PI_HOST=otherpi.local
 DEFAULT_REMOTE_HOSTS=(
@@ -56,7 +70,7 @@ valid_pair() {
 pull() {
     local tag="$1" host="$2" remote_name="$3" local_name="$4" label="$5"
     local rsync_err
-    rsync_err=$(rsync -az -- "$host:~/.claude/$remote_name" "$DEST/$local_name" 2>&1) && {
+    rsync_err=$(rsync -az --timeout=60 -e "ssh $SSH_OPTS_STR" -- "$host:~/.claude/$remote_name" "$DEST/$local_name" 2>&1) && {
         echo "  $label: OK"
         return
     }
@@ -84,7 +98,7 @@ sync_history() {
     remote_dir="$state/remote"
     # Non-interactive ssh has a minimal PATH too, so each remote call prepends ~/.local/bin.
     # Single quotes: the remote shell expands $HOME and ~, not this one.
-    if ! ssh -- "$host" 'PATH="$HOME/.local/bin:$PATH"; command -v tokenatlas || command -v energy-monitor' >/dev/null 2>&1; then
+    if ! ssh "${SSH_OPTS[@]}" -- "$host" 'PATH="$HOME/.local/bin:$PATH"; command -v tokenatlas || command -v energy-monitor' >/dev/null 2>&1; then
         echo "  history: not installed on $tag"
         return 0
     fi
@@ -94,11 +108,11 @@ sync_history() {
     fi
     { mkdir -p "$remote_dir" && chmod 700 "$remote_dir"; } || { echo "  history: ERROR cannot create $remote_dir" >&2; return 0; }
     local err
-    if ! err=$(ssh -- "$host" 'PATH="$HOME/.local/bin:$PATH"; c=$(command -v tokenatlas || command -v energy-monitor) && "$c" snapshot ~/.local/state/tokenatlas/snapshot.sqlite3' 2>&1 >/dev/null); then
+    if ! err=$(ssh "${SSH_OPTS[@]}" -- "$host" 'PATH="$HOME/.local/bin:$PATH"; c=$(command -v tokenatlas || command -v energy-monitor) && "$c" snapshot ~/.local/state/tokenatlas/snapshot.sqlite3' 2>&1 >/dev/null); then
         echo "  history: ERROR snapshot failed on $tag: $err" >&2
         return 0
     fi
-    if ! err=$(scp -q -- "$host:.local/state/tokenatlas/snapshot.sqlite3" "$remote_dir/$tag.sqlite3.part" 2>&1); then
+    if ! err=$(scp -q "${SSH_OPTS[@]}" -- "$host:.local/state/tokenatlas/snapshot.sqlite3" "$remote_dir/$tag.sqlite3.part" 2>&1); then
         rm -f -- "$remote_dir/$tag.sqlite3.part" 2>/dev/null || true
         echo "  history: ERROR scp failed for $tag: $err" >&2
         return 0
@@ -120,6 +134,53 @@ sync_history() {
     fi
 }
 
+# Kill a process and everything below it. Under `set -m` a background job is its own process-group leader
+# (pgid == pid) on both macOS bash 3.2 and Linux bash 5, so one group kill reaches the whole tree; the
+# pgrep -P walk covers children that moved to another group or a shell where job control is unavailable.
+kill_tree() {
+    local pid="$1" sig="$2" child
+    for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+        kill_tree "$child" "$sig"
+    done
+    kill "-$sig" -- "-$pid" 2>/dev/null || true
+    kill "-$sig" "$pid" 2>/dev/null || true
+}
+
+sync_host() {
+    local tag="$1" host="$2"
+    echo "Syncing energy data from $tag ($host)..."
+    pull "$tag" "$host" "pi_journal.jsonl" "${tag}_journal.jsonl" "journal"
+    pull "$tag" "$host" "pi_daily_rollup.jsonl" "${tag}_daily_rollup.jsonl" "rollup"
+    pull "$tag" "$host" "interactive_journal_raw.jsonl" "${tag}_interactive_journal.jsonl" "interactive journal"
+    pull "$tag" "$host" "interactive_rollup_raw.jsonl" "${tag}_interactive_daily_rollup.jsonl" "interactive rollup"
+    sync_history "$tag" "$host"
+}
+
+# Run sync_host in a background subshell with a deadline. Returns 124 on timeout.
+run_with_deadline() {
+    local pid deadline waited=0
+    set -m
+    ( sync_host "$1" "$2" ) &
+    pid=$!
+    set +m
+    deadline=$HOST_TIMEOUT
+    while kill -0 "$pid" 2>/dev/null; do
+        if [[ $waited -ge $deadline ]]; then
+            kill_tree "$pid" TERM
+            sleep 1
+            kill_tree "$pid" KILL
+            { wait "$pid"; } 2>/dev/null || true
+            return 124
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    local rc=0
+    wait "$pid" || rc=$?
+    return "$rc"
+}
+
+overall_rc=0
 for entry in "${REMOTE_HOSTS[@]}"; do
     tag="${entry%%:*}"
     host="${entry#*:}"
@@ -128,13 +189,16 @@ for entry in "${REMOTE_HOSTS[@]}"; do
         continue
     fi
 
-    echo "Syncing energy data from $tag ($host)..."
-
-    pull "$tag" "$host" "pi_journal.jsonl" "${tag}_journal.jsonl" "journal"
-    pull "$tag" "$host" "pi_daily_rollup.jsonl" "${tag}_daily_rollup.jsonl" "rollup"
-    pull "$tag" "$host" "interactive_journal_raw.jsonl" "${tag}_interactive_journal.jsonl" "interactive journal"
-    pull "$tag" "$host" "interactive_rollup_raw.jsonl" "${tag}_interactive_daily_rollup.jsonl" "interactive rollup"
-    sync_history "$tag" "$host"
+    rc=0
+    run_with_deadline "$tag" "$host" || rc=$?
+    if [[ $rc -eq 124 ]]; then
+        echo "$host: ERROR (timeout after ${HOST_TIMEOUT}s)" >&2
+        overall_rc=1
+    elif [[ $rc -ne 0 ]]; then
+        echo "$host: ERROR (host sync exit $rc)" >&2
+        overall_rc=1
+    fi
 done
 
 echo "Done."
+exit "$overall_rc"

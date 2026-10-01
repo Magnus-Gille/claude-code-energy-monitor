@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+### Fixed
+
+- Remote sync can no longer hang on a stalled host (#39): `remote_sync.sh` bounds every ssh/scp/rsync call (connect timeout, keep-alive, `BatchMode`, rsync `--timeout`, `TOKENATLAS_SSH_OPTS`) and each host as a whole (`TOKENATLAS_HOST_TIMEOUT`, default 300 s; reported as `ERROR (timeout after Ns)`). The new reference collector `scripts/collect.sh` takes a lock so runs never overlap and builds the local report before the remote sync, so a stuck remote never delays local results. README and `docs/remote-machines.md` use it.
+
 ## [1.4.0] - 2026-10-01
 
 ### Added
