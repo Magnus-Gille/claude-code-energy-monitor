@@ -276,6 +276,15 @@ class SetupTests(unittest.TestCase):
         else:
             self.assertIn('\\"/opt/my bin/tokenatlas\\"', text)  # double quotes, escaped inside the JSON snippet
 
+    def test_windows_warns_about_unsafe_characters(self):
+        plain = statusline.setup_text(None, r'C:\Program Files\tokenatlas.exe', windows=True)
+        self.assertNotIn('Warning', plain)
+        self.assertIn(json.dumps('"C:\\Program Files\\tokenatlas.exe" statusline')[1:-1], plain)
+        for path in (r'C:\a&b\tokenatlas.exe', r'C:\100%\tokenatlas.exe'):
+            self.assertIn('Warning', statusline.setup_text(None, path, windows=True))
+        self.assertIn('Warning', statusline.setup_text(r'C:\data&x\h.sqlite3', r'C:\bin\tokenatlas.exe', windows=True))
+        self.assertNotIn('Warning', statusline.setup_text(None, '/opt/a&b/tokenatlas', windows=False))  # POSIX quoting is safe
+
     def test_setup_through_the_cli(self):
         done = subprocess.run([sys.executable, '-m', 'tokenatlas', 'statusline', '--setup'], capture_output=True, text=True, cwd=ROOT,
                               env=dict(os.environ, PYTHONPATH=str(ROOT), CLAUDE_CONFIG_DIR='/nonexistent/claude'))

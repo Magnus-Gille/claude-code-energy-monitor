@@ -8,6 +8,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -156,22 +157,30 @@ def executable():
     return str(Path(found).resolve()) if found else f'{sys.executable} -m tokenatlas'
 
 
-def _quote(arg):
+WINDOWS_UNSAFE = re.compile(r'[^\w\-.:\\/ ]')  # cmd.exe has no quoting that is safe for &, |, ^, %, ! and the like
+
+
+def _quote(arg, windows=None):
     """One argument quoted for the shell that runs the statusLine command: POSIX quoting, or double quotes on Windows (valid in cmd.exe and bash)."""
-    if os.name != 'nt':
+    if not (os.name == 'nt' if windows is None else windows):
         return shlex.quote(arg)
     return subprocess.list2cmdline([arg])
 
 
-def setup_text(db=None, command=None):
+def setup_text(db=None, command=None, windows=None):
     """The statusLine snippet for Claude Code's settings.json and where that file is; the file itself is never touched."""
     config = os.environ.get('CLAUDE_CONFIG_DIR')
     settings = (Path(config).expanduser() if config else Path.home() / '.claude') / 'settings.json'
     command = command or executable()
-    if ' -m ' not in command:command = _quote(command)
-    if db is not None:command += f' --db {_quote(str(Path(db).expanduser().absolute()))}'
+    windows = os.name == 'nt' if windows is None else windows
+    args = ([] if ' -m ' in command else [command]) + ([str(Path(db).expanduser().absolute())] if db is not None else [])
+    unsafe = windows and any(WINDOWS_UNSAFE.search(a) for a in args)
+    if ' -m ' not in command:command = _quote(command, windows)
+    if db is not None:command += f' --db {_quote(str(Path(db).expanduser().absolute()), windows)}'
     snippet = json.dumps({'statusLine': {'type': 'command', 'command': f'{command} statusline'}}, indent=2)
-    return (f'Add this to {settings} (merge it into the existing JSON; this command never edits the file):\n\n{snippet}\n\n'
+    warning = ('Warning: a path in this command contains a character that cmd.exe treats specially (&, |, ^, %, ! ...) and that no quoting makes '
+               'safe; install TokenAtlas (and the database) under a plain path, or check that the command works before relying on it.\n\n') if unsafe else ''
+    return (f'{warning}Add this to {settings} (merge it into the existing JSON; this command never edits the file):\n\n{snippet}\n\n'
             'Totals refresh whenever tokenatlas refresh, open or collect runs; context and quota are live.')
 
 
