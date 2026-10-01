@@ -220,20 +220,35 @@ def _context(rows):
     return [_fact('context_size', dict(harnesses=harnesses, excluded_requests=excluded), 'ins_context_size_c', ('ins_a_known', 'ins_a_logs'), 'measured', used=used)]
 
 
+def _complete(rows):
+    """A difference between two tiers' costs over lower-bound token counts has no safe bound (a rate can be unknown, or lower, at one tier
+    for the unseen tokens), so the difference facts use only requests with complete token counters and state how many were left out."""
+    keep = [x for x in rows if x[0].get('complete', True)]
+    return keep, len(rows) - len(keep)
+
+
+def _complete_note(out):
+    return ('ins_a_complete_only',) if out else ()
+
+
 def _long(priced, table, k):
-    longs = [x for x in priced if x[3].get('long')]
+    # with incomplete counters the tier itself is uncertain too (the true input may cross the threshold): every incomplete request of a model
+    # that has a long-context tier is left out
+    complete, out = _complete([x for x in priced if x[3].get('has_long')])
+    longs = [x for x in complete if x[3].get('long')]
     if not longs:
         return []
     std = [_usd(pricing.price_observation(x[0], table, long_context=False)) for x in longs]
     if None in std:
         return []  # the standard-tier cost is not computable: no premium is stated
     actual, standard = sum(x[2] for x in longs), sum(std)
-    return [_fact('long_context_premium', dict(requests=len(longs), actual=actual, standard=standard, premium=actual - standard, priced_requests=k),
-                  'ins_long_context_premium_c', (*COMMON, 'ins_a_othertiers'), used=longs)]
+    return [_fact('long_context_premium', dict(requests=len(longs), actual=actual, standard=standard, premium=actual - standard, priced_requests=k,
+                                               incomplete_left_out=out),
+                  'ins_long_context_premium_c', (*COMMON, 'ins_a_othertiers', *_complete_note(out)), used=longs, incomplete_out=out)]
 
 
 def _tiers(priced, table, k):
-    prem = [x for x in priced if x[3].get('modifier') in PREMIUM]
+    prem, out = _complete([x for x in priced if x[3].get('modifier') in PREMIUM])  # the tier is recorded; only the tokens are uncertain
     if not prem:
         return []
     std = [_usd(pricing.price_observation(x[0], table, modifiers=False)) for x in prem]
@@ -243,8 +258,9 @@ def _tiers(priced, table, k):
     tiers = {}
     for x in prem:
         tiers[x[3]['modifier']] = tiers.get(x[3]['modifier'], 0) + 1
-    return [_fact('premium_tiers', dict(requests=len(prem), actual=actual, standard=standard, extra=actual - standard, tiers=dict(sorted(tiers.items())), priced_requests=k),
-                  'ins_premium_tiers_c', (*COMMON, 'ins_a_tier_recorded', 'ins_a_flex'), used=prem)]
+    return [_fact('premium_tiers', dict(requests=len(prem), actual=actual, standard=standard, extra=actual - standard, tiers=dict(sorted(tiers.items())), priced_requests=k,
+                                        incomplete_left_out=out),
+                  'ins_premium_tiers_c', (*COMMON, 'ins_a_tier_recorded', 'ins_a_flex', *_complete_note(out)), used=prem, incomplete_out=out)]
 
 
 def _subagents(priced, total, k):

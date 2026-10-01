@@ -163,7 +163,7 @@ def _rates(obs, table, long_context=True, modifiers=True):
         prices = dict.fromkeys(PRICE_KEYS)
 
     return None, dict(prices=prices, multiplier=multiplier, assumptions=assumptions, reasons=reasons, claude=claude,
-                      currency=currency, ref=ref, tokens=tokens, raw=raw, long=long_applies, modifier=modifier)
+                      currency=currency, ref=ref, tokens=tokens, raw=raw, long=long_applies, has_long=bool(long), modifier=modifier)
 
 
 def _parts(r):
@@ -191,12 +191,13 @@ def _parts(r):
 
 
 def price_observation(obs, table, long_context=True, modifiers=True, tier=None):
-    """tier, when a dict, receives {'long': bool, 'modifier': label or None}: the long-context / speed / service-tier price set used."""
+    """tier, when a dict, receives {'long': bool, 'has_long': bool, 'modifier': label or None}: the long-context / speed / service-tier price
+    set used, and whether the model has a long-context tier at all."""
     early, r = _rates(obs, table, long_context, modifiers)
     if early:
         return early
     if tier is not None:
-        tier.update(long=r['long'], modifier=r['modifier'])
+        tier.update(long=r['long'], has_long=r['has_long'], modifier=r['modifier'])
     parts, _ = _parts(r)
     reasons, assumptions = r['reasons'], r['assumptions']
     missing = [k for k, v in parts.items() if v is None]

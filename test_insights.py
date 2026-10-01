@@ -280,7 +280,7 @@ class F5LongContext(unittest.TestCase):
         self.assertEqual(price_observation(o, TABLE)['cost'], 12.0)
         tier = {}
         price_observation(o, TABLE, tier=tier)
-        self.assertEqual(tier, {'long': True, 'modifier': None})
+        self.assertEqual(tier, {'long': True, 'has_long': True, 'modifier': None})
 
 
 class F6BigTurns(unittest.TestCase):
@@ -407,15 +407,40 @@ class Reliability(unittest.TestCase):
         self.assertTrue(f['cost_parts']['values']['lower_bound'])
         self.assertTrue(f['context_size']['values']['lower_bound'])
 
-    def test_cli_marks_premium_and_extra_as_lower_bounds_like_the_page(self):
-        big, fast = ob('big', model='gpt-l', fresh=M, out=500000), ob('f', model='gpt-t', fresh=M, tariff={'service_tier': 'fast'})
-        big['complete'] = fast['complete'] = False
-        text = insights.render_text(cost_facts([big, fast], TABLE))
-        self.assertRegex(text, r'premium: ≥\$')
-        self.assertRegex(text, r'extra cost: ≥\$')
-        whole = insights.render_text(cost_facts([ob('big', model='gpt-l', fresh=M, out=500000), ob('f', model='gpt-t', fresh=M, tariff={'service_tier': 'fast'})], TABLE))
-        self.assertRegex(whole, r'premium: \$')
-        self.assertRegex(whole, r'extra cost: \$')
+    def test_difference_facts_use_complete_requests_only(self):
+        def big(i, complete=True):
+            o = ob(i, model='gpt-l', fresh=M, out=500000)
+            o['complete'] = complete
+            return o
+        def fast(i, complete=True):
+            o = ob(i, model='gpt-t', fresh=M, tariff={'service_tier': 'fast'})
+            o['complete'] = complete
+            return o
+        exact = by_id(cost_facts([big('b1'), fast('f1')], TABLE))
+        mixed_res = cost_facts([big('b1'), big('b2', False), fast('f1'), fast('f2', False)], TABLE)
+        mixed = by_id(mixed_res)
+        for fid, key in (('long_context_premium', 'premium'), ('premium_tiers', 'extra')):
+            v = mixed[fid]['values']
+            self.assertEqual(v['requests'], 1)
+            self.assertAlmostEqual(v[key], exact[fid]['values'][key])  # the incomplete twin changes nothing: exact for the requests counted
+            self.assertEqual((v['lower_bound'], v['incomplete_left_out']), (False, 1))
+            self.assertIn('Requests with incomplete token counters left out of this fact: 1.', ' '.join(mixed[fid]['assumptions']))
+            self.assertNotIn('ins_a_lower', mixed[fid]['assumption_keys'])
+            self.assertNotIn('ins_a_complete_only', exact[fid]['assumption_keys'])
+        text = insights.render_text(mixed_res)
+        self.assertRegex(text, r'premium: \$')
+        self.assertRegex(text, r'extra cost: \$')
+        self.assertNotRegex(text, r'(premium|extra cost): ≥')
+        self.assertTrue(mixed['model_share']['values']['lower_bound'])  # the other facts still keep incomplete requests as lower bounds
+        only = by_id(cost_facts([big('b2', False), fast('f2', False)], TABLE))
+        self.assertNotIn('long_context_premium', only)
+        self.assertNotIn('premium_tiers', only)
+
+    def test_an_incomplete_request_below_the_threshold_is_left_out_of_the_long_context_count(self):
+        small = ob('s', model='gpt-l', fresh=10)
+        small['complete'] = False  # its true input may cross the threshold
+        v = by_id(cost_facts([ob('b', model='gpt-l', fresh=M, out=500000), small], TABLE))['long_context_premium']['values']
+        self.assertEqual((v['requests'], v['incomplete_left_out']), (1, 1))
 
     def test_complete_data_is_not_marked(self):
         f = by_id(cost_facts([ob('ok', model='m1', out=M)], TABLE))
@@ -473,6 +498,12 @@ class PricingAssumptions(unittest.TestCase):
         self.assertIn('$50', fact['computation'])
         self.assertNotIn('50.0', fact['computation'])
         self.assertEqual([insights._num(x) for x in (323100, 1080.0, 1080.5, 0, '2026-09-01')], ['323,100', '1,080', '1,080.5', '0', '2026-09-01'])
+
+    def test_fact_texts_have_the_same_placeholders_in_both_languages(self):
+        import re
+        texts = json.loads(insights.I18N.read_text(encoding='utf-8'))
+        for key in (k for k in texts['en'] if k.startswith('ins_')):
+            self.assertEqual(set(re.findall(r'\{(\w+)\}', texts['sv'][key])), set(re.findall(r'\{(\w+)\}', texts['en'][key])), key)
 
 class PriceTableWording(unittest.TestCase):
     def test_selected_table_with_its_date(self):
