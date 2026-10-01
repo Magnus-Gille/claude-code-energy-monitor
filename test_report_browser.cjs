@@ -31,7 +31,7 @@ async function ready(page, errors, what = 'report') {
 (async()=>{
   const browserName=process.env.BROWSER || 'chromium';
   const screenshotDir=process.env.SCREENSHOT_DIR || os.tmpdir();
-  const smoke=fs.readFileSync(process.argv[2],'utf8'),fixture=process.argv[3]?fs.readFileSync(process.argv[3],'utf8'):null,sharedFixture=process.argv[4]?fs.readFileSync(process.argv[4],'utf8'):null;
+  const smoke=fs.readFileSync(process.argv[2],'utf8'),fixture=process.argv[3]?fs.readFileSync(process.argv[3],'utf8'):null,sharedFixture=process.argv[4]?fs.readFileSync(process.argv[4],'utf8'):null;if(process.env.REQUIRE_FIXTURES==='1'&&!(fixture&&sharedFixture))throw new Error('REQUIRE_FIXTURES: the prompts and shared fixtures must both be given');
   const browser=await playwright[browserName].launch({headless:true});
   const summary={};
   const newPage=async(opts,html,init)=>{
