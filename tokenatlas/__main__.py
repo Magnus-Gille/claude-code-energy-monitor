@@ -223,7 +223,7 @@ def main(argv=None):
             sub.add_argument('--unit');sub.add_argument('--thread',action='append',default=[])
             sub.add_argument('--outcome',choices=sessions.OUTCOMES);sub.add_argument('--note',default='')
     top=commands.add_parser('top',help='Rank the most expensive turns: an initiating input plus everything it caused, including follow-up inputs and subagent work.')
-    top.add_argument('-n','--limit',type=int,default=5)
+    top.add_argument('-n','--limit',type=int,default=10)
     top.add_argument('--by',choices=('cost','tokens'),default='cost')
     top.add_argument('--start',help='Inclusive ISO timestamp; offset required.')
     top.add_argument('--end',help='Exclusive ISO timestamp; offset required.')

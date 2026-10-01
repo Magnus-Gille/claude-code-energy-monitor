@@ -122,8 +122,8 @@ async function ready(page, errors, what = 'report') {
     // The toggle marks the active language; the export buttons and filter labels are localized too.
     assert.equal(await page.locator('.langtoggle').getAttribute('aria-label'),T.toggleLabel);
     assert.equal(await page.locator('[data-lang="'+T.lang+'"]').getAttribute('aria-pressed'),'true');
-    // "Dyraste prompterna" / "Costliest prompts": the card renders the top prompts of the current selection (at most 5), previews only in private fixtures.
-    const promptRows=await page.evaluate(()=>({card:!!document.getElementById('top-prompts'),rows:document.querySelectorAll('#top-prompts tr.prompt-row').length,expected:Math.min(5,UsageReport.topPrompts(UsageReport.getSelected()).length)}));
+    // "Dyraste prompterna" / "Costliest prompts": the card renders the top prompts of the current selection (at most 10), previews only in private fixtures.
+    const promptRows=await page.evaluate(()=>({card:!!document.getElementById('top-prompts'),rows:document.querySelectorAll('#top-prompts tr.prompt-row').length,expected:Math.min(10,UsageReport.topPrompts(UsageReport.getSelected()).length)}));
     assert.ok(promptRows.card);assert.equal(promptRows.rows,promptRows.expected);
     assert.deepEqual(errors,[]);assert.deepEqual(requests,[]);
     summary[T.lang]={records:check.records,known_tokens:check.actual,network_requests:requests.length,console_errors:errors.length};

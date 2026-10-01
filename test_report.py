@@ -327,6 +327,12 @@ if __name__ == '__main__':
     unittest.main()
 
 
+class TopTurnsCardSize(unittest.TestCase):
+    def test_card_shows_ten_turns(self):
+        template = (Path(__file__).parent / 'tokenatlas' / 'report_template.html').read_text(encoding='utf-8')
+        self.assertIn('function topPrompts(rows,n=10)', template)
+
+
 class I18nPlurals(unittest.TestCase):
     def test_count_strings_have_singular_forms(self):
         import json, re

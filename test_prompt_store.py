@@ -209,6 +209,15 @@ class StoreUnit(unittest.TestCase):
         self.assertEqual(shown, {('claude', 's', 't2'): 'TEXT-t2'})
         self.assertEqual(prompt_store.visible(self.path.with_name('none.json'), recs, TABLE), {})
 
+    def test_an_invalid_recorded_k_or_by_shows_no_text(self):
+        self.update(rows((1, 1000000), (2, 3000000)))
+        recs = rows((1, 1000000), (2, 3000000))
+        good = json.loads(self.path.read_text())
+        for k, by in ((-1, 'cost'), (True, 'cost'), (0, 'cost'), (2, 'nope')):
+            self.path.write_text(json.dumps(dict(good, k=k, by=by)))
+            os.chmod(self.path, 0o600)
+            self.assertEqual(prompt_store.visible_all(self.path, recs, TABLE), ({}, {}), (k, by))
+
     def write_good(self, mode=0o600):
         self.update(rows((1, 1000000)))
         os.chmod(self.path, mode)

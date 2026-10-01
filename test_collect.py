@@ -96,6 +96,41 @@ class CollectTest(CollectBase):
         self.assertIn('report_exists=1', calls[0], 'the first report was built before the sync')
         self.assertRegex(proc.stdout, r'refresh exit=0 \(\d+\.\ds\)')
 
+    def test_top_keeps_the_stored_k_and_by(self):
+        from tokenatlas import prompt_store
+        store = self.state / 'top-prompts.json'
+        for k, by in ((10, 'tokens'), (3, 'cost'), (7, 'tokens')):
+            store.write_text('{"version":2,"k":%d,"by":"%s","entries":[]}\n' % (k, by))
+            store.chmod(0o600)
+            proc = self.collect()
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn('top', self.steps(proc.stdout))
+            self.assertEqual(prompt_store.load_meta(store)[1:], (k, by))
+
+    def test_top_is_skipped_and_the_store_untouched_without_a_valid_choice(self):
+        store = self.state / 'top-prompts.json'
+        for k, by in (('"x"', '"cost"'), ('true', '"cost"'), ('0', '"cost"'), ('-3', '"cost"'), ('5', '"nope"'), ('5', '7'), ('null', 'null')):
+            raw = ('{"version":2,"k":%s,"by":%s,"entries":[]}\n' % (k, by)).encode()
+            store.write_bytes(raw)
+            store.chmod(0o600)
+            proc = self.collect()
+            self.assertEqual(proc.returncode, 1, (k, by, proc.stdout + proc.stderr))
+            self.assertIn('top: skipped: %s has no valid recorded k/by' % store, proc.stdout)
+            self.assertNotIn('top', self.steps(proc.stdout))
+            self.assertEqual(store.read_bytes(), raw, (k, by))
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX permission bits')
+    def test_top_is_skipped_for_an_unsafe_store(self):
+        store = self.state / 'top-prompts.json'
+        raw = b'{"version":2,"k":3,"by":"cost","entries":[]}\n'
+        store.write_bytes(raw)
+        store.chmod(0o644)
+        proc = self.collect()
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn('top: skipped:', proc.stdout)
+        self.assertNotIn('top', self.steps(proc.stdout))
+        self.assertEqual(store.read_bytes(), raw)
+
     def test_top_only_when_opted_in(self):
         proc = self.collect()
         self.assertNotIn('top', self.steps(proc.stdout))

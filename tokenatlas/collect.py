@@ -54,6 +54,13 @@ def _quiet(call,*argv):
     return rc
 
 
+def _kept_choice(db):
+    """['-n',k,'--by',by] from the store's recorded choice (read with its safety checks), so collect keeps it and never raises k; None when there is no valid pair."""
+    from tokenatlas import prompt_store
+    k,by=prompt_store.load_meta(prompt_store.store_path(db))[1:]
+    return ['-n',str(k),'--by',by] if prompt_store.valid_choice(k,by) else None
+
+
 def _hosts(args,state):
     if args.remote:return ' '.join(args.remote)
     if os.environ.get('REMOTE_HOSTS_OVERRIDE','').strip():return os.environ['REMOTE_HOSTS_OVERRIDE'].strip()
@@ -141,7 +148,10 @@ def _run(args):
         def report(*extra):
             return lambda:_quiet(main,'--db',str(db),'report','--html',str(state/'report.html'),'--private','--if-changed','--lang',args.lang,*extra)
         failed=_step('refresh',refresh)!=0
-        if prompt_store.store_path(db).exists():failed|=_step('top',lambda:_quiet(main,'--db',str(db),'top','--keep-text'))!=0
+        if prompt_store.store_path(db).exists():
+            choice=_kept_choice(db)
+            if choice is None:log(f'top: skipped: {prompt_store.store_path(db)} has no valid recorded k/by; choose one with tokenatlas top --keep-text -n N (or --forget-text)');failed=True
+            else:failed|=_step('top',lambda:_quiet(main,'--db',str(db),'top','--keep-text',*choice))!=0
         if not args.no_report:failed|=_step('report',report('--max-age','1h'))!=0
         hosts=_hosts(args,state)
         if hosts:
