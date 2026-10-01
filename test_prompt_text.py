@@ -282,7 +282,7 @@ class SanitizeTests(unittest.TestCase):
     def test_secret_patterns_masked(self):
         cases = [
             "sk-abcdefghijklmnop1234", "sk-ant-api03-AbCdEf_ghIJkl-mnop12", "ghp_" + "a" * 36, "gho_" + "b" * 36,
-            "ghs_" + "c" * 36, "github_pat_" + "d" * 30, "AKIAABCDEFGHIJKLMNOP", "ASIAABCDEFGHIJKLMNOP",
+            "ghs_" + "c" * 36, "github_pat_" + "d" * 30, "AKIA" + "ABCDEFGHIJKLMNOP", "ASIA" + "ABCDEFGHIJKLMNOP",
             "xoxb-1234567890-abcdefghij", "xoxp-1234567890-abcdefghij", "xoxa-1234567890-abcdefghij",
             "xoxr-1234567890-abcdefghij", "xoxs-1234567890-abcdefghij",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpMeJf36P",
