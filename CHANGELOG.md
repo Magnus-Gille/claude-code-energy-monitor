@@ -4,9 +4,13 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+### Added
+
+- `tokenatlas collect` replaces the reference shell collector `scripts/collect.sh`: one scheduled command that refreshes, stores top-turn text if opted in, builds the conditional private report, runs the remote sync and rebuilds the report after every attempted sync. It takes a kernel lock (`flock`, `msvcrt.locking` on Windows) on `collect.lock`, so runs never overlap and a crashed run leaves nothing stale; a busy lock prints `collect: already running` and exits 0. `--remote tag:host`, `--remote-sync`, `--sync-timeout`, `--no-report`, `--lang`. The remote sync script now ships in the package as `tokenatlas/remote_sync.sh`; the repository-root `remote_sync.sh` is a shim.
+
 ### Fixed
 
-- Remote sync can no longer hang on a stalled host (#39): `remote_sync.sh` bounds every ssh/scp/rsync call (connect timeout, keep-alive, `BatchMode`, rsync `--timeout`, `TOKENATLAS_SSH_OPTS`) and each host as a whole (`TOKENATLAS_HOST_TIMEOUT`, default 300 s; reported as `ERROR (timeout after Ns)`). The new reference collector `scripts/collect.sh` takes a lock so runs never overlap and builds the local report before the remote sync, so a stuck remote never delays local results. README and `docs/remote-machines.md` use it.
+- Remote sync can no longer hang on a stalled host (#39): `remote_sync.sh` bounds every ssh/scp/rsync call (connect timeout, keep-alive, `BatchMode`, rsync `--timeout`, `TOKENATLAS_SSH_OPTS`) and each host as a whole (`TOKENATLAS_HOST_TIMEOUT`, default 300 s; reported as `ERROR (timeout after Ns)`); `tokenatlas collect --sync-timeout` (default 600 s) bounds the whole sync and kills its process group. The script closes the signal window before its worker pid is recorded, and rsync exit 23 is a benign missing file only when the error names the remote path ("No such file or directory" for a local destination is now a failure).
 
 ## [1.4.0] - 2026-10-01
 

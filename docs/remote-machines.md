@@ -50,10 +50,19 @@ A stalled host must not block anything else, so every remote call is bounded:
   is killed with its child processes, reported as `<host>: ERROR (timeout after Ns)`, and the script moves
   on to the next host. It then exits 1, but returns promptly.
 
-Schedule `scripts/collect.sh` (copy it next to `remote_sync.sh`) instead of calling `remote_sync.sh` from
-cron. It takes a lock so runs never overlap, refreshes and rebuilds the local report first, runs the sync
-afterwards (hosts from `REMOTE_HOSTS_OVERRIDE` or the `remote-hosts` file in the state directory) and
-rebuilds the report once more after a successful sync. See "Keeping the report fresh" in the README.
+Schedule `tokenatlas collect` instead of calling `remote_sync.sh` from cron. The sync script ships inside the
+package (the repository-root `remote_sync.sh` is a shim that runs it for checkout users). `collect` takes a kernel
+lock (`flock` on `collect.lock` in the state directory; released by the OS on exit or crash, so no stale-lock
+logic), refreshes and rebuilds the local report first, then runs the sync, and rebuilds the report once more
+after every attempted sync, even a failed or timed-out one, so partial imports show up. The whole sync is limited
+by `--sync-timeout` (default 600 s): on expiry its process group gets SIGTERM, 2 seconds later SIGKILL. Hosts
+come from `--remote tag:host` (repeatable), `REMOTE_HOSTS_OVERRIDE` or the `remote-hosts` file in the state
+directory. A busy lock prints `collect: already running` and exits 0.
+
+    */30 * * * * $HOME/.local/bin/tokenatlas collect --remote pi:myhost >> ~/Library/Logs/tokenatlas/collect.log 2>&1
+
+For launchd see "Keeping the report fresh" in the README. A missing remote file counts as benign only when rsync
+reports "No such file or directory" for the remote path it was asked to pull; a local write error is a failure.
 
 By hand:
 

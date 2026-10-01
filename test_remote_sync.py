@@ -8,7 +8,8 @@ import time
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).with_name('remote_sync.sh')
+SHIM = Path(__file__).with_name('remote_sync.sh')
+SCRIPT = Path(__file__).with_name('tokenatlas') / 'remote_sync.sh'
 
 
 def kill_group(proc):
@@ -129,10 +130,29 @@ class RemoteSyncTest(unittest.TestCase):
         self.assertIn('history: OK', proc.stdout)
 
     def test_missing_remote_files_are_benign(self):
-        proc, _ = self.run_script('a:h1', bodies_override={
-            'rsync': 'echo "rsync: link_stat No such file or directory" >&2; exit 23'})
+        proc, _ = self.run_script('a:h1', bodies_override={'rsync': (
+            'p=${@: -2:1}; echo "rsync: [sender] link_stat \"/home/u/.claude/${p##*/}\" failed: No such file or directory (2)" >&2; '
+            'echo "rsync error: some files/attrs were not transferred (see previous errors) (code 23)" >&2; exit 23')})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn('not found', proc.stdout)
+
+    def test_missing_remote_file_message_must_name_the_pulled_file(self):
+        # Pulls of the other three files do not match this name: they fail, so the run fails.
+        proc, _ = self.run_script('a:h1', bodies_override={'rsync': (
+            'echo "rsync: [sender] link_stat \"/home/u/.claude/pi_journal.jsonl\" failed: No such file or directory (2)" >&2; exit 23')})
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertEqual(proc.stdout.count('not found'), 1, proc.stdout)
+
+    def test_local_destination_enoent_is_a_failure(self):
+        proc, _ = self.run_script('a:h1', bodies_override={'rsync': (
+            'echo "rsync: [receiver] mkstemp \"/h/.claude/.a_journal.jsonl.X\" failed: No such file or directory (2)" >&2; exit 23')})
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertNotIn('not found', proc.stdout)
+        self.assertIn('ERROR (rsync exit 23)', proc.stderr)
+
+    def test_generic_enoent_without_a_path_is_a_failure(self):
+        proc, _ = self.run_script('a:h1', bodies_override={'rsync': 'echo "rsync: link_stat No such file or directory" >&2; exit 23'})
+        self.assertEqual(proc.returncode, 1, proc.stderr)
 
     def test_remote_without_tokenatlas_is_benign(self):
         proc, log = self.run_script('a:h1', bodies_override={'ssh': 'exit 1'})
@@ -190,10 +210,6 @@ class RemoteSyncTest(unittest.TestCase):
         self.assertNotIn('not installed locally', proc.stderr)
         self.assertIn('tokenatlas import ', log)
         self.assertIn('history: OK', proc.stdout)
-
-
-if __name__ == '__main__':
-    unittest.main()
 
 
 @unittest.skipIf(os.name == 'nt', 'remote_sync.sh targets macOS/Linux hosts')
@@ -297,5 +313,20 @@ class RemoteSyncTimeoutTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
 
     def test_bash_syntax(self):
-        for path in (SCRIPT, SCRIPT.parent / 'scripts' / 'collect.sh'):
+        for path in (SCRIPT, SHIM):
             subprocess.run(['bash', '-n', str(path)], check=True)
+
+    def test_shim_runs_packaged_script(self):
+        self.stub('ssh', 'exit 0')
+        self.stub('rsync', 'exit 0')
+        self.stub('tokenatlas', 'exit 0')
+        self.stub('scp', 'touch "${@: -1}"')
+        e = {'PATH': f'{self.root / "bin"}:/usr/bin:/bin', 'HOME': str(self.root / 'home'), 'STUB_LOG': str(self.log),
+             'REMOTE_HOSTS_OVERRIDE': 'a:h1'}
+        proc = subprocess.run(['bash', str(SHIM)], env=e, capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('history: OK', proc.stdout)
+
+
+if __name__ == '__main__':
+    unittest.main()
