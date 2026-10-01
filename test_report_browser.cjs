@@ -6,10 +6,10 @@ const path = require('node:path');
 const playwright = require(process.env.PLAYWRIGHT_MODULE || '/usr/local/lib/node_modules/@playwright/test');
 const zlib = require('node:zlib');
 const L = {
-  sv: {lang:'sv', locale:'sv-SE', h1:'Tokenanvändning', prompts:'Dyraste prompterna', total:'Totalt', totalRe:/^Totalt( \(minst\))?$/, atLeast:/ \(minst\)$/,
+  sv: {lang:'sv', locale:'sv-SE', h1:'Tokenanvändning', prompts:'Dyraste turerna', inputs:'Inmatningar', labels:['Titel','Första inmatningen','Plats','Slutrapport','Aktivitet','PR:er','Commits'], activity:'1 842 shell · 1 redigering · 21 webb', total:'Totalt', totalRe:/^Totalt( \(minst\))?$/, atLeast:/ \(minst\)$/,
     note:/^[\d\s\u00a0\u202f]+ anrop · [\d\s\u00a0\u202f]+ (?:sessioner|session)$/, cache:/^(—|\d+,\d % av all input)$/, selection:/ anrop · /, reasoning:/^varav reasoning |^inkl\. reasoning$/,
     unknown:'Okänt', short:['43,8 mdr','136,5 milj.',(12345).toLocaleString('sv-SE')], money:['$9,00','≥$3,00','$0,60','n/a'], toggleLabel:'Språk'},
-  en: {lang:'en', locale:'en-US', h1:'Token usage', prompts:'Costliest prompts', total:'Total', totalRe:/^Total( \(at least\))?$/, atLeast:/ \(at least\)$/,
+  en: {lang:'en', locale:'en-US', h1:'Token usage', prompts:'Costliest turns', inputs:'Inputs', labels:['Title','Initiating input','Place','Final message','Activity','PRs','Commits'], activity:'1,842 shell · 1 edit · 21 web', total:'Total', totalRe:/^Total( \(at least\))?$/, atLeast:/ \(at least\)$/,
     note:/^[\d,]+ requests? · [\d,]+ sessions?$/, cache:/^(—|\d+\.\d% of all input)$/, selection:/ requests · /, reasoning:/^of which reasoning |^incl\. reasoning$/,
     unknown:'Unknown', short:['43.8B','136.5M','12.3K'], money:['$9.00','≥$3.00','$0.60','n/a'], toggleLabel:'Language'},
 };
@@ -31,7 +31,7 @@ async function ready(page, errors, what = 'report') {
 (async()=>{
   const browserName=process.env.BROWSER || 'chromium';
   const screenshotDir=process.env.SCREENSHOT_DIR || os.tmpdir();
-  const smoke=fs.readFileSync(process.argv[2],'utf8'),fixture=process.argv[3]?fs.readFileSync(process.argv[3],'utf8'):null;
+  const smoke=fs.readFileSync(process.argv[2],'utf8'),fixture=process.argv[3]?fs.readFileSync(process.argv[3],'utf8'):null,sharedFixture=process.argv[4]?fs.readFileSync(process.argv[4],'utf8'):null;if(process.env.REQUIRE_FIXTURES==='1'&&!(fixture&&sharedFixture))throw new Error('REQUIRE_FIXTURES: the prompts and shared fixtures must both be given');
   const browser=await playwright[browserName].launch({headless:true});
   const summary={};
   const newPage=async(opts,html,init)=>{
@@ -113,11 +113,30 @@ async function ready(page, errors, what = 'report') {
       const {context:c2,page:p2,errors:errors2}=await newPage({locale:T.locale},fixture);
       const card=await p2.evaluate(()=>({rows:[...document.querySelectorAll('#top-prompts tr.prompt-row')].map(r=>[...r.children].map(c=>c.textContent)),texts:[...document.querySelectorAll('#top-prompts tr.prompt-text')].map(r=>r.textContent),markup:document.querySelectorAll('#top-prompts tr.prompt-text b').length}));
       assert.equal(card.rows.length,4);assert.equal(card.rows[0][0],'1');
-      assert.deepEqual(card.rows.map(r=>r[8].replace(/ /g,' ')),T.money);assert.equal(card.rows[1][6],'1');assert.equal(card.rows[1][5],'2');
-      assert.equal(await p2.locator('#top-prompts th').nth(8).innerText(),T.lang==='sv'?'Kostnad':'Cost');
+      assert.deepEqual(card.rows.map(r=>r[9].replace(/ /g,' ')),T.money);assert.equal(card.rows[1][6],'1');assert.equal(card.rows[1][5],'2');assert.deepEqual(card.rows.map(r=>r[7]),['3','14','–','–'],'inputs column: stored counts, – when unknown');
+      assert.equal(await p2.locator('#top-prompts th').nth(9).innerText(),T.lang==='sv'?'Kostnad':'Cost');assert.equal(await p2.locator('#top-prompts th').nth(7).innerText(),T.inputs);
       assert.deepEqual(card.texts,['Refactor the importer','Fix the <b>failing</b> build']);assert.equal(card.markup,0,'preview must be text, not markup');
       await p2.screenshot({path:path.join(screenshotDir,'energy-report-prompts-'+T.lang+'.png'),fullPage:true});
+      // Private context: a collapsed details block per stored turn; opening shows title, place, final message and activity, all as text.
+      const det=p2.locator('#top-prompts tr.prompt-ctx details.tc');assert.equal(await det.count(),2);
+      const costly=det.nth(1);assert.equal(await costly.locator('.tc-row').first().isVisible(),false,'collapsed until opened');
+      const tableWidth=()=>p2.evaluate(()=>{const tb=document.querySelector('#top-prompts table')||document.querySelector('#top-prompts');return {table:tb.scrollWidth,box:tb.parentElement.clientWidth}});const before=await tableWidth();await costly.locator('summary').click();assert.equal(await costly.locator('.tc-row').first().isVisible(),true);const after=await tableWidth();assert.ok(after.table<=Math.max(before.table,after.box)+1,'opening context must not widen the table: '+JSON.stringify({before,after}));
+      const body=(await costly.innerText()).replace(/\s/g,' ');
+      for(const x of [...T.labels,'Fix the <i>build</i> pipeline','Fix the <b>failing</b> build','also <u>lint</u>','and tests','Done: <b>all green</b>','https://example.test/o/app.git · feat/x · /w/app','#16','Fix <b>build</b> order','Add lint',T.activity])assert.ok(body.includes(x),x+' in '+body);
+      assert.equal(await p2.locator('#top-prompts details.tc :is(b,i,u)').count(),0,'context must be text, not markup');
+      const sparse=det.nth(0);await sparse.locator('summary').click();const sparseText=await sparse.innerText();
+      assert.ok(sparseText.includes('Refactor the importer'));for(const x of [T.labels[0],T.labels[2],T.labels[3],T.labels[4]])assert.ok(!sparseText.includes(x),'unknown parts are omitted: '+x);
+      await p2.locator('#prompts').screenshot({path:path.join(screenshotDir,'energy-report-context-'+T.lang+'.png')});
       assert.deepEqual(errors2,[]);await c2.close();
+    }
+    if(sharedFixture){
+      // Shared: no side-file data at all (the Inputs column is all unknown); no details block, no context text of any kind.
+      const {context:c3,page:p3,errors:errors3}=await newPage({locale:T.locale},sharedFixture);
+      const shared=await p3.evaluate(()=>({rows:[...document.querySelectorAll('#top-prompts tr.prompt-row')].map(r=>[...r.children].map(c=>c.textContent)),details:document.querySelectorAll('#top-prompts details, #top-prompts tr.prompt-ctx, #top-prompts tr.prompt-text').length,page:document.body.innerText,data:Object.keys(window.UsageReport.data)}));
+      assert.deepEqual(shared.rows.map(r=>r[7]),['–','–','–','–']);assert.equal(shared.details,0);assert.equal(await p3.locator('#top-prompts th').nth(7).innerText(),T.inputs);
+      for(const x of ['feat/x','Fix the','pipeline','all green','example.test','#16','Add lint'])assert.ok(!shared.page.includes(x),'shared page must not show '+x);
+      assert.ok(!shared.data.includes('prompt_inputs')&&!shared.data.includes('prompt_context')&&!shared.data.includes('prompt_texts'));
+      assert.deepEqual(errors3,[]);await c3.close();
     }
   }
   try {
@@ -173,6 +192,6 @@ async function ready(page, errors, what = 'report') {
       assert.equal(await page.evaluate(()=>document.documentElement.lang),'en');
       assert.deepEqual(errors,[]);await context.close();
     }
-    console.log(JSON.stringify({pass:true,browser:browserName,...summary,checks:'both languages (summary cards, legend, totals, K/M/B vs mdr/milj., money, cache comparisons, bucket conservation, filters, empty state, zoom, drilldown, export, mobile overflow, prompts card), live toggle, explicit payload language, remembered choice, throwing storage'}));
+    console.log(JSON.stringify({pass:true,browser:browserName,prompts_fixture:!!fixture,shared_fixture:!!sharedFixture,...summary,checks:'both languages (summary cards, legend, totals, K/M/B vs mdr/milj., money, cache comparisons, bucket conservation, filters, empty state, zoom, drilldown, export, mobile overflow, prompts card), live toggle, explicit payload language, remembered choice, throwing storage'}));
   } finally {await browser.close()}
 })().catch(e=>{console.error(e);process.exitCode=1});

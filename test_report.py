@@ -120,8 +120,8 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(set(i18n), {'sv', 'en'})
         base = lambda lang: {k for k in i18n[lang] if not k.endswith('_one')}  # singular forms are per language
         self.assertEqual(base('sv'), base('en'))
-        self.assertEqual(i18n['sv']['p4_title'], 'Dyraste prompterna')
-        self.assertEqual(i18n['en']['p4_title'], 'Costliest prompts')
+        self.assertEqual(i18n['sv']['p4_title'], 'Dyraste turerna')
+        self.assertEqual(i18n['en']['p4_title'], 'Costliest turns')
         used = set(re.findall(r'data-t(?:-[a-z-]+)?="([a-z_0-9]+)"', html))
         self.assertTrue(used)
         self.assertLessEqual(used, set(i18n['sv']))

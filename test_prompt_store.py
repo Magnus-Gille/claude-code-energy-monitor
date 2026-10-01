@@ -38,6 +38,21 @@ def fake(calls):
     return extract
 
 
+def ctx_for(turn_id):
+    return {'title': f'TITLE-{turn_id}', 'title_source': 'custom-title', 'cwd': '/w/app', 'branch': 'feat/x',
+            'repository': 'https://h.example/o/app.git',
+            'inputs': {'count': 3, 'first': f'FIRST-{turn_id}', 'followups': [f'FUP-{turn_id}']}, 'final': f'FINAL-{turn_id}',
+            'activity': {'shell': 1842, 'edits': 1, 'web': 21, 'subagents': 0},
+            'outcomes': {'prs': ['#16'], 'commits': [f'COMMIT-{turn_id}']}}
+
+
+def fakectx(calls):
+    def context(harness, sources, session, turn_id, start=None, end=None):
+        calls.append((turn_id, list(sources), start, end))
+        return ctx_for(turn_id) if turn_id != 'tnone' else {'title': None, 'inputs': {'count': None, 'first': None, 'followups': []}, 'activity': {'shell': None}, 'outcomes': {'prs': [], 'commits': []}}
+    return context
+
+
 class StoreUnit(unittest.TestCase):
     def setUp(self):
         import tempfile
@@ -45,9 +60,11 @@ class StoreUnit(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name) / 'top-prompts.json'
         self.calls = []
+        self.ctx_calls = []
 
-    def update(self, records, k=2, machine='m1', extract=None):
-        return prompt_store.update(self.path, records, TABLE, machine, k=k, extract=extract or fake(self.calls))
+    def update(self, records, k=2, machine='m1', extract=None, context=None):
+        return prompt_store.update(self.path, records, TABLE, machine, k=k, extract=extract or fake(self.calls),
+                                   context=context or fakectx(self.ctx_calls))
 
     def test_store_path(self):
         self.assertEqual(prompt_store.store_path(Path('/x/y/history.sqlite3')), Path('/x/y/top-prompts.json'))
@@ -61,8 +78,8 @@ class StoreUnit(unittest.TestCase):
         self.assertEqual(prompt_store.load(self.path),
                          {('claude', 's', 't2'): 'TEXT-t2', ('claude', 's', 't3'): 'TEXT-t3'})
         data = json.loads(self.path.read_text())
-        self.assertEqual((data['version'], data['k'], data['by']), (1, 2, 'cost'))
-        self.assertEqual(sorted(data['entries'][0]), ['captured_at', 'harness', 'session', 'text', 'turn_id'])
+        self.assertEqual((data['version'], data['k'], data['by']), (2, 2, 'cost'))
+        self.assertEqual(sorted(data['entries'][0]), ['captured_at', 'context', 'harness', 'session', 'text', 'turn_id'])
         if os.name != 'nt':
             self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
         self.assertEqual(list(self.path.parent.iterdir()), [self.path])
@@ -77,6 +94,66 @@ class StoreUnit(unittest.TestCase):
         res = self.update(rows((1, 1000000), (2, 3000000), (3, 5000000), (4, 4000000), (5, 4500000)))
         self.assertEqual((res['kept'], res['added'], res['evicted']), (1, 1, 1))
         self.assertNotIn(b'TEXT-t4', self.path.read_bytes())
+
+    def test_context_is_captured_with_the_prompts_window_and_own_sources(self):
+        self.update(rows((1, 1000000), (2, 3000000)), k=1)
+        self.assertEqual(prompt_store.load_context(self.path), {('claude', 's', 't2'): ctx_for('t2')})
+        (turn, sources, start, end), = self.ctx_calls
+        self.assertEqual((turn, sources, start, end), ('t2', ['/logs/2.jsonl'], '2026-09-03T10:02:00+00:00', '2026-09-03T10:02:00+00:00'))
+
+    def test_v1_file_is_read_and_upgraded_with_context(self):
+        self.update(rows((1, 1000000), (2, 3000000)))
+        data = json.loads(self.path.read_text())
+        data['version'] = 1
+        for e in data['entries']:del e['context']
+        self.path.write_text(json.dumps(data))
+        os.chmod(self.path, 0o600)
+        self.assertEqual(set(prompt_store.load(self.path).values()), {'TEXT-t1', 'TEXT-t2'})
+        self.assertEqual(prompt_store.load_context(self.path), {('claude', 's', 't1'): None, ('claude', 's', 't2'): None})
+        self.calls.clear()
+        res = self.update(rows((1, 1000000), (2, 3000000)))
+        self.assertEqual(self.calls, [], 'kept text is not re-extracted')
+        self.assertEqual(json.loads(self.path.read_text())['version'], 2)
+        self.assertEqual(prompt_store.load_context(self.path), {('claude', 's', 't1'): ctx_for('t1'), ('claude', 's', 't2'): ctx_for('t2')})
+        self.assertEqual(prompt_store.load(self.path), {('claude', 's', 't1'): 'TEXT-t1', ('claude', 's', 't2'): 'TEXT-t2'})
+
+    def test_empty_context_is_retried_like_text(self):
+        recs = rows((1, 3000000))
+        self.update(recs, context=lambda *a, **k: {'title': None, 'inputs': {'count': None, 'first': None, 'followups': []}, 'outcomes': {'prs': [], 'commits': []}})
+        self.assertEqual(prompt_store.load_context(self.path), {('claude', 's', 't1'): None})
+        self.update(recs)
+        self.assertEqual(prompt_store.load_context(self.path), {('claude', 's', 't1'): ctx_for('t1')})
+        self.ctx_calls.clear()
+        self.update(recs, context=lambda *a, **k: self.fail('stored context is not re-extracted'))
+
+    def test_eviction_removes_context_bytes(self):
+        self.update(rows((1, 1000000), (2, 3000000)))
+        self.assertIn(b'TITLE-t1', self.path.read_bytes())
+        self.update(rows((1, 1000000), (2, 3000000), (3, 5000000), (4, 4000000)))
+        for turn in (b't1', b't2'):
+            self.assertNotIn(b'TITLE-' + turn, self.path.read_bytes())
+            self.assertNotIn(b'COMMIT-' + turn, self.path.read_bytes())
+
+    def test_remote_machine_gets_no_context(self):
+        self.update(rows((1, 1000000), (2, 3000000), machine='m2'))
+        self.assertEqual(self.ctx_calls, [])
+        self.assertEqual(prompt_store.load_context(self.path), {})
+        self.assertNotIn(b'TITLE', self.path.read_bytes())
+
+    def test_visible_context_only_for_the_current_top_k(self):
+        self.update(rows((1, 1000000), (2, 3000000)))
+        recs = rows((1, 1000000), (2, 3000000), (3, 5000000))
+        self.assertEqual(prompt_store.visible_context(self.path, recs, TABLE), {('claude', 's', 't2'): ctx_for('t2')})
+        self.assertEqual(prompt_store.visible_context(self.path.with_name('none.json'), recs, TABLE), {})
+        self.assertEqual(prompt_store.visible(self.path, recs, TABLE), {('claude', 's', 't2'): 'TEXT-t2'})
+
+    def test_hash_covers_context(self):
+        a = prompt_store.texts_hash({('c', 's', 't'): 'x'})
+        c1, c2 = {('c', 's', 't'): ctx_for('a')}, {('c', 's', 't'): ctx_for('b')}
+        self.assertNotEqual(a, prompt_store.texts_hash({('c', 's', 't'): 'x'}, c1))
+        self.assertNotEqual(prompt_store.texts_hash({}, c1), prompt_store.texts_hash({}, c2))
+        self.assertEqual(prompt_store.texts_hash({}, c1), prompt_store.texts_hash({}, c1))
+        self.assertIsNone(prompt_store.texts_hash({}, {}))
 
     def test_remote_machine_gets_no_text(self):
         self.update(rows((1, 1000000), (2, 3000000), machine='m2'))
@@ -385,6 +462,110 @@ class Cli(Base):
         self.keep('3')
         self.assertTrue(json.loads(self.run_cli(*shared)[1])['skipped'])
 
+    def rich_log(self):
+        """sess.jsonl with a title, a branch and a final message on turn u2 (read at --keep-text time only)."""
+        r2 = claude_row('2026-09-03T11:00:05Z', 'r2', 1000000)
+        r2['gitBranch'] = 'feat/x'
+        final = {'type': 'assistant', 'uuid': 'f2', 'timestamp': '2026-09-03T11:00:10Z', 'cwd': '/work/app',
+                 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'FINAL-ANSWER shipped'}]}}
+        jl(why.CLAUDE_PROJECTS / 'proj' / 'sess.jsonl',
+           [{'type': 'custom-title', 'customTitle': 'TITLE-TOKEN', 'sessionId': 'sess'}, user('2026-09-03T09:59:00Z', 'u1'),
+            claude_row('2026-09-03T10:00:00Z', 'r1', 10), user('2026-09-03T11:00:00Z', 'u2'), r2, final,
+            user('2026-09-03T12:00:00Z', 'u3'), claude_row('2026-09-03T12:00:05Z', 'r3', 2000000)])
+
+    def keep_rich(self, n='2'):
+        self.rich_log()
+        return self.keep(n)
+
+    def set_store_context(self, **changes):
+        data = json.loads(self.store.read_text())
+        for e in data['entries']:e['context'].update(changes)
+        self.store.write_text(json.dumps(data))  # in place: the 0600 mode stays
+
+    def test_top_prints_context_lines_and_json_only_with_text(self):
+        out = self.keep_rich()
+        lines = out.splitlines()
+        i = max(n for n, l in enumerate(lines) if l.strip() == 'TITLE-TOKEN')  # u3 (rank 1) has the title too, no branch or final
+        self.assertEqual(lines[i:i + 4], ['    TITLE-TOKEN', '    feat/x · app', '    1 input', '    final: FINAL-ANSWER shipped'])
+        plain = self.top('--json')[1]
+        self.assertNotIn('TITLE-TOKEN', plain)
+        self.assertTrue(all('context' not in p for p in json.loads(plain)['prompts']))
+        withtext = json.loads(self.top('--json', '--with-text')[1])['prompts']
+        by = {p['turn_id']: p.get('context') for p in withtext}
+        self.assertEqual(by['u2']['title'], 'TITLE-TOKEN')
+        self.assertEqual((by['u2']['branch'], by['u2']['inputs']['count'], by['u2']['final']), ('feat/x', 1, 'FINAL-ANSWER shipped'))
+
+    def test_malformed_stored_context_is_normalized_not_fatal(self):
+        self.keep_rich()
+        self.set_store_context(title=123, cwd=['x'], branch={'a': 1}, repository=7, final=5, title_source=[],
+                               inputs={'count': -3, 'first': 5, 'followups': 'abc'},
+                               activity={'shell': -1, 'edits': 'x', 'web': True, 'subagents': 4},
+                               outcomes={'prs': '#1', 'commits': [1, 'ok']})
+        code, out, err = self.top()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn('TITLE-TOKEN', out)
+        self.assertEqual(self.run_cli('report', '--html', str(self.html), '--private')[0], 0)
+        data = payload(self.html.read_text())
+        for c in data.get('prompt_context', {}).values():
+            self.assertEqual((c['title'], c['cwd'], c['branch'], c['repository'], c['final'], c['title_source']), (None,) * 6)
+            self.assertEqual(c['inputs'], {'count': None, 'first': None, 'followups': []})
+            self.assertEqual(c['activity'], {'shell': None, 'edits': None, 'web': None, 'subagents': 4})
+            self.assertEqual(c['outcomes'], {'prs': [], 'commits': ['ok']})
+        self.set_store_context(inputs={'count': 2, 'followups': ['a'] * 9}, outcomes={'prs': ['#1'] * 9, 'commits': []})
+        meta = prompt_store.load_meta(self.store)[0]
+        for e in meta.values():
+            self.assertEqual((len(e['context']['inputs']['followups']), len(e['context']['outcomes']['prs'])), (5, 5))
+        data = json.loads(self.store.read_text())
+        for e in data['entries']:e['context'] = 'junk'
+        self.store.write_text(json.dumps(data))
+        code, out, err = self.top()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(prompt_store.load_context(self.store).popitem()[1], None)
+        self.assertEqual(self.run_cli('report', '--html', str(self.html), '--private')[0], 0)
+
+    def test_shared_report_never_reads_the_side_file_private_has_context(self):
+        self.keep_rich('3')
+        strings = ('TITLE-TOKEN', '/work/app', 'feat/x', 'FINAL-ANSWER', 'secret u2')
+        boom = patch.object(prompt_store, 'load_meta', side_effect=AssertionError('side file read'))
+        with boom, patch.object(prompt_store, 'load', side_effect=AssertionError('side file read')):
+            self.assertEqual(self.run_cli('report', '--html', str(self.html))[0], 0)
+            shared = self.html.read_text()
+            data = payload(shared)
+            for text in strings:
+                self.assertNotIn(text, json.dumps(data))
+                self.assertNotIn(text, shared)
+            for key in ('prompt_context', 'prompt_texts', 'prompt_inputs'):self.assertNotIn(key, data)
+            with patch.object(cli, '_open_in_browser'):
+                self.assertEqual(self.run_cli('open', '--html', str(self.html), '--no-refresh', '--shared')[0], 0)
+            data = payload(self.html.read_text())
+            for key in ('prompt_context', 'prompt_texts', 'prompt_inputs'):self.assertNotIn(key, data)
+        self.assertEqual(self.run_cli('report', '--html', str(self.html), '--private')[0], 0)
+        data = payload(self.html.read_text())
+        found = [c for c in data['prompt_context'].values() if c['final']]
+        self.assertEqual([(c['title'], c['branch'], c['cwd'], c['final']) for c in found], [('TITLE-TOKEN', 'feat/x', '/work/app', 'FINAL-ANSWER shipped')])
+
+    def test_snapshot_never_contains_stored_context(self):
+        self.keep_rich('3')
+        out = Path(self.tmp.name) / 'snap.sqlite3'
+        self.assertEqual(self.run_cli('snapshot', str(out))[0], 0)
+        for text in (b'TITLE-TOKEN', b'FINAL-ANSWER', b'feat/x'):
+            self.assertNotIn(text, out.read_bytes())
+            self.assertNotIn(text, self.db.read_bytes())
+
+    def test_private_conditional_report_rebuilds_when_context_changes_shared_skips(self):
+        self.keep_rich('1')
+        private = ('report', '--html', str(self.html), '--private', '--if-changed')
+        shared = ('report', '--html', str(self.html), '--if-changed')
+        self.run_cli(*private)
+        self.assertTrue(json.loads(self.run_cli(*private)[1])['skipped'])
+        self.set_store_context(title='TITLE-CHANGED')
+        self.assertNotIn('skipped', json.loads(self.run_cli(*private)[1]))
+        self.assertTrue(json.loads(self.run_cli(*private)[1])['skipped'])
+        self.run_cli(*shared)
+        self.assertTrue(json.loads(self.run_cli(*shared)[1])['skipped'])
+        self.set_store_context(title='TITLE-AGAIN')
+        self.assertTrue(json.loads(self.run_cli(*shared)[1])['skipped'])
+
 
 class ReportBuild(unittest.TestCase):
     def test_redacted_with_texts_raises(self):
@@ -424,6 +605,19 @@ class ReportBuild(unittest.TestCase):
         got = {r['id']: r['prompt'] for r in expand(report)}
         self.assertEqual(got, {'o1': 0, 'o2': 1})
         self.assertEqual(report['prompt_texts'], {1: 'hello'})
+
+    def test_redacted_report_rejects_every_context_argument(self):
+        for kw in ({'prompt_context': {}}, {'prompt_texts': {}}, {'prompt_inputs': {}}, {'prompt_inputs': {('claude', 's', 't2'): 14}}):
+            with self.assertRaises(ValueError):build_report(rows((1, 1)), {}, redact=True, **kw)
+        self.assertNotIn('prompt_inputs', build_report(rows((1, 1), (2, 5)), {}, redact=True, table=TABLE))
+
+    def test_private_context_keyed_by_ordinal(self):
+        report = build_report(rows((1, 1), (2, 5)), {}, redact=False, table=TABLE,
+                              prompt_context={('claude', 's', 't2'): ctx_for('t2'), ('claude', 's', 'gone'): ctx_for('g')})
+        self.assertEqual(report['prompt_context'], {1: ctx_for('t2')})
+
+    def test_state_covers_context_hash(self):
+        self.assertNotEqual(report_state(1, 'm', {}, {}, 'tok')[0], report_state(1, 'm', {}, {}, 'tok', texts_hash=prompt_store.texts_hash({}, {('c', 's', 't'): ctx_for('a')}))[0])
 
     def test_unassigned_observation_has_no_prompt(self):
         recs = rows((1, 1))

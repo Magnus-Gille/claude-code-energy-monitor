@@ -9,7 +9,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from tokenatlas import prompt_text, prompts
+from tokenatlas import prompt_text, prompts, turn_context
 
 FILE = 'top-prompts.json'
 
@@ -18,12 +18,33 @@ def store_path(db_path):
     return Path(db_path).expanduser().with_name(FILE)
 
 
+def _str(v):return v if isinstance(v,str) else None
+
+
+def _count(v):return v if isinstance(v,int) and not isinstance(v,bool) and v>=0 else None
+
+
+def _strs(v,n):return [x for x in v if isinstance(x,str)][:n] if isinstance(v,list) else []
+
+
+def _norm_context(c):
+    """The full turn-context shape with every invalid part dropped to None or empty; a non-dict is no context (None)."""
+    if not isinstance(c,dict):return None
+    g=lambda k:c.get(k) if isinstance(c.get(k),dict) else {}
+    i,a,o=g('inputs'),g('activity'),g('outcomes')
+    return {**{k:_str(c.get(k)) for k in ('title','title_source','cwd','branch','repository','final')},
+            'inputs':{'count':_count(i.get('count')),'first':_str(i.get('first')),'followups':_strs(i.get('followups'),5)},
+            'activity':{k:_count(a.get(k)) for k in ('shell','edits','web','subagents')},
+            'outcomes':{'prs':_strs(o.get('prs'),5),'commits':_strs(o.get('commits'),5)}}
+
+
 def _entries(raw):
-    """Validated entry dicts from file bytes; ValueError when the file is not a well-formed store."""
+    """Validated entry dicts from file bytes, contexts normalized; ValueError when the file is not a well-formed store."""
     try:
         entries=json.loads(raw)['entries']
         for e in entries:
             if not (isinstance(e['text'],(str,type(None))) and all(isinstance(e[k],str) for k in ('harness','session','turn_id'))):raise ValueError('bad entry')
+            e['context']=_norm_context(e.get('context'))
         return entries
     except (ValueError,KeyError,TypeError) as exc:raise ValueError(f'{type(exc).__name__}: {exc}') from exc
 
@@ -63,34 +84,61 @@ def _read(path):
     except OSError as exc:return None,f'cannot read: {exc}'
 
 
+def _blank(v):
+    """True for a context with nothing known: None, empty containers, or only blank parts (a 0 count is known)."""
+    if isinstance(v,dict):return all(_blank(x) for x in v.values())
+    if isinstance(v,list):return all(_blank(x) for x in v)
+    return v is None or v==''
+
+
 def load_meta(path):
-    """({(harness, session, turn_id): text or None}, k, by); a missing file is empty, a corrupt or unsafe one is empty plus a stderr warning."""
+    """({key: entry}, k, by) with key (harness, session, turn_id); a missing file is empty, a corrupt or unsafe one is empty plus a stderr warning.
+    Version 1 files (no context) read as entries without one."""
     raw,bad=_read(path)
     if bad:_warn(f'ignoring {path}: {bad}');return {},None,None
     if raw is None:return {},None,None
     try:
         data=json.loads(raw);entries=_entries(raw)
-        return {(e['harness'],e['session'],e['turn_id']):e['text'] for e in entries},data.get('k'),data.get('by')
+        return {(e['harness'],e['session'],e['turn_id']):e for e in entries},data.get('k'),data.get('by')
     except ValueError as exc:
         _warn(f'ignoring corrupt {path} ({exc})');return {},None,None
 
 
 def load(path):
-    return load_meta(path)[0]
+    """{key: text or None}."""
+    return {k:e['text'] for k,e in load_meta(path)[0].items()}
+
+
+def load_context(path):
+    """{key: context dict or None}."""
+    return {k:e.get('context') for k,e in load_meta(path)[0].items()}
+
+
+def visible_all(path,records,table):
+    """(texts, contexts) of the stored prompts in the current global top k (the store's recorded k and by): all a private report may embed.
+    Contexts that are blank are left out."""
+    entries,k,by=load_meta(path)
+    if not entries or not isinstance(k,int) or by not in ('cost','tokens'):return {},{}
+    top={(p['harness'],p['session'],p['turn_id']) for p in prompts.top_prompts(records,table,k,by)['prompts']}
+    return ({key:e['text'] for key,e in entries.items() if key in top},
+            {key:e['context'] for key,e in entries.items() if key in top and not _blank(e.get('context'))})
 
 
 def visible(path,records,table):
-    """The stored texts whose prompt is in the current global top k (the store's recorded k and by): all a private report may embed."""
-    texts,k,by=load_meta(path)
-    if not texts or not isinstance(k,int) or by not in ('cost','tokens'):return {}
-    top={(p['harness'],p['session'],p['turn_id']) for p in prompts.top_prompts(records,table,k,by)['prompts']}
-    return {key:text for key,text in texts.items() if key in top}
+    """The stored texts whose prompt is in the current global top k."""
+    return visible_all(path,records,table)[0]
 
 
-def texts_hash(texts):
-    """Stable digest of loaded texts for the report state; None when there are none."""
-    if not texts:return None
-    body=json.dumps(sorted([*k,v] for k,v in texts.items()),separators=(',',':'),ensure_ascii=True)
+def visible_context(path,records,table):
+    """The stored non-blank contexts whose prompt is in the current global top k."""
+    return visible_all(path,records,table)[1]
+
+
+def texts_hash(texts,context=None):
+    """Stable digest of loaded texts and contexts for the report state; None when there are none."""
+    if not texts and not context:return None
+    listed=sorted([*k,v] for k,v in (texts or {}).items())
+    body=json.dumps([listed,sorted([*k,v] for k,v in context.items())] if context else listed,sort_keys=True,separators=(',',':'),ensure_ascii=True)
     return hashlib.sha256(body.encode()).hexdigest()[:32]
 
 
@@ -116,8 +164,9 @@ def _write(path,data):
         if os.path.exists(tmp):os.unlink(tmp)
 
 
-def update(path,records,table,machine,k=5,by='cost',extract=prompt_text.extract_prompt):
-    """Keep text for the global top k prompts only: keep known entries, add local new ones, retry unreadable ones, evict the rest."""
+def update(path,records,table,machine,k=5,by='cost',extract=prompt_text.extract_prompt,context=turn_context.turn_context):
+    """Keep text and turn context for the global top k prompts only: keep known entries, add local new ones, retry unreadable or
+    blank ones (also upgrading version 1 entries), evict the rest. Remote prompts get neither."""
     _clean_temps(Path(path).parent)
     top=prompts.top_prompts(records,table,k,by)['prompts']
     old_raw,bad=_read(path)  # an unsafe file is not trusted: start over and replace it
@@ -130,17 +179,25 @@ def update(path,records,table,machine,k=5,by='cost',extract=prompt_text.extract_
     for p in top:
         key=(p['harness'],p['session'],p['turn_id'])
         known=old.get(key)
-        if known and (known['text'] is not None or p.get('machine')!=machine):entries.append(known);kept+=1;continue
+        need_text=known is None or known['text'] is None
+        need_ctx=known is None or _blank(known.get('context'))
+        if known and not need_text and not need_ctx or known and p.get('machine')!=machine:entries.append(known);kept+=1;continue
         if p.get('machine')!=machine:continue  # only this machine's own logs can be read
+        sources=sorted(set(own.get(key,())))
         text=None
-        for source in sorted(set(own.get(key,()))):
+        for source in sources if need_text else ():
             text=extract(p['harness'],source,p['session'],p['turn_id'])
             if text:break
-        if known and not text:entries.append(known);kept+=1;continue  # still unreadable: keep the entry as is
+        ctx=None
+        if need_ctx and sources:
+            found=context(p['harness'],sources,p['session'],p['turn_id'],p['first_ts'],p['last_ts'])
+            ctx=None if _blank(found) else found
+        if known and not text and not ctx:entries.append(known);kept+=1;continue  # still unreadable: keep the entry as is
         entries.append({'harness':p['harness'],'session':p['session'],'turn_id':p['turn_id'],
-                        'captured_at':datetime.now(timezone.utc).isoformat(timespec='seconds'),'text':text});added+=1
+                        'captured_at':known['captured_at'] if known else datetime.now(timezone.utc).isoformat(timespec='seconds'),
+                        'text':text if need_text else known['text'],'context':ctx if need_ctx else known.get('context')});added+=1
     evicted=len(set(old)-{(e['harness'],e['session'],e['turn_id']) for e in entries})
-    data=json.dumps({'version':1,'k':k,'by':by,'entries':entries},sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()+b'\n'
+    data=json.dumps({'version':2,'k':k,'by':by,'entries':[{**e,'context':e.get('context')} for e in entries]},sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()+b'\n'
     if data!=old_raw or bad:_write(path,data)
     return {'kept':kept,'added':added,'evicted':evicted,'path':str(path)}
 
