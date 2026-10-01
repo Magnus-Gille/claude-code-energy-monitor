@@ -140,9 +140,13 @@ def render_top(result,texts=None,contexts=None):
     return '\n'.join(lines)
 
 
+def _state_base():
+    return Path(os.environ.get('XDG_STATE_HOME',Path.home()/'.local/state'))
+
+
 def default_db():
     """Default history path; one-time move of the pre-rename agentmon directory (never used with --db)."""
-    base=Path(os.environ.get('XDG_STATE_HOME',Path.home()/'.local/state'))
+    base=_state_base()
     new,old=base/'tokenatlas',base/'agentmon'
     if old.is_dir():
         if new.exists():
@@ -182,7 +186,7 @@ def main(argv=None):
     which.add_argument('--all',action='store_true',help='Refresh every harness from its default roots; missing ones are reported as absent.')
     refresh.add_argument('--root',type=Path,help='Override the harness session directory (with --harness).')
     opener=commands.add_parser('open',help='Refresh, build the report (private by default) and open it in the browser.')
-    opener.add_argument('--html',type=Path,help='Report path; default $XDG_STATE_HOME/tokenatlas/report.html.')
+    opener.add_argument('--html',type=Path,help=f'Report path; default: report.html next to the database ({_state_base()/"tokenatlas"/"report.html"}).')  # no migration side effect
     opener.add_argument('--shared',action='store_true',help='Pseudonymize the report instead of keeping project labels.')
     opener.add_argument('--lang',choices=('auto','sv','en'),default='auto',help='Report language; auto follows the browser (Swedish for sv, otherwise English).')
     opener.add_argument('--no-refresh',action='store_true',help='Use the saved history as it is.')
@@ -334,9 +338,11 @@ def main(argv=None):
                     records=history.records()
                     payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=None if args.shared else _counts(ctx))
                     payload['initial_granularity']='day'
+                    if not args.shared:payload['saved_at']=str(path.resolve())  # private only: a shared report never carries a local path
                     write_report(path,render_report(payload,state=state))
                     result={'html':str(path.resolve()),'observations':len(records),'privacy':payload['privacy']}
                 _open_in_browser(path)
+                print(f'Report: {path.resolve()} (reopen any time with: tokenatlas open)',file=sys.stderr)
             elif args.command=='refresh' and args.all:
                 result=refresh_all(history)
             elif args.command=='refresh':
@@ -400,6 +406,7 @@ def main(argv=None):
                                 'too recent' if max_age is not None and found is not None and found[0]==state[0] and 0<=age<max_age else None)
                         if reason:
                             print(json.dumps({'html':str(path.resolve()),'skipped':True,'reason':reason}))
+                            print(f'Report: {path.resolve()} (unchanged)',file=sys.stderr)
                             return 0
                 records=history.records(start,end,args.harness,args.project,args.session,args.turn)
                 records=[row for row in records if all(getattr(args,key) is None or row[key]==getattr(args,key)
@@ -414,7 +421,9 @@ def main(argv=None):
                     texts,ctx=_visible(history,args.db,history.records() if filtered else records) if args.private else (None,None)
                     payload=build_report(records,source_status,args.timezone,redact=not args.private,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=_counts(ctx) if args.private else None)
                     payload['initial_granularity']=args.granularity
+                    if args.private:payload['saved_at']=str(path.resolve())  # private only: a shared report never carries a local path
                     write_report(path,render_report(payload,state=state))
+                    print(f'Report: {path.resolve()}',file=sys.stderr)
                     result={'html':str(path.resolve()),'observations':len(records),
                             'privacy':payload['privacy'],'billing_verified':False,'coverage_complete':False}
         print(json.dumps(result,indent=2,sort_keys=True))
