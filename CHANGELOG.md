@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-01
+
 ### Added
 
 - Harness logs moved with the harness's own variable are found: `CLAUDE_CONFIG_DIR`, `CODEX_HOME` (sessions and `session_index.jsonl`), `PI_CODING_AGENT_DIR` and an absolute `XDG_DATA_HOME` (OpenCode); an explicit root still wins, and `doctor` reports each resolved root and its source (#52).
