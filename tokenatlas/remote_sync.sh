@@ -88,11 +88,13 @@ pull() {
     fi
 }
 
-# 0 when rsync's stderr holds at least one "remote source missing" line and nothing else but the summary line.
+# 0 when rsync's stderr holds at least one "remote source missing" line and nothing else but the summary line
+# (GNU rsync) or openrsync's (macOS /usr/bin/rsync) "receiver has empty file list" warning that follows it.
+OPENRSYNC_EMPTY='^rsync\([0-9]+\): warning: receiver has empty file list: exiting$'
 remote_missing_only() {
     local err="$1" name="$2" line seen=1
     while IFS= read -r line; do
-        [[ -z "$line" || "$line" == "rsync error:"* ]] && continue
+        [[ -z "$line" || "$line" == "rsync error:"* || "$line" =~ $OPENRSYNC_EMPTY ]] && continue
         if [[ "$line" == *"No such file or directory"* && "$line" == *"/.claude/$name"* &&
               "$line" != *"[receiver]"* && "$line" != *"[generator]"* && "$line" != *mkstemp* && "$line" != *rename* ]]; then
             seen=0

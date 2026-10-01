@@ -136,6 +136,20 @@ class RemoteSyncTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn('not found', proc.stdout)
 
+    def test_missing_remote_files_are_benign_with_openrsync(self):
+        # macOS /usr/bin/rsync (openrsync): no "rsync error:" summary, but a receiver warning after the sender's missing-file line (#43)
+        proc, _ = self.run_script('a:h1', bodies_override={'rsync': (
+            'p=${@: -2:1}; echo "rsync: [sender] link_stat \\"/home/u/.claude/${p##*/}\\" failed: No such file or directory (2)" >&2; '
+            'echo "rsync(31563): warning: receiver has empty file list: exiting" >&2; exit 23')})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.count('not found'), 4, proc.stdout)
+        self.assertNotIn('ERROR', proc.stderr)
+
+    def test_openrsync_warning_alone_is_a_failure(self):
+        proc, _ = self.run_script('a:h1', bodies_override={'rsync': 'echo "rsync(1): warning: receiver has empty file list: exiting" >&2; exit 23'})
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertNotIn('not found', proc.stdout)
+
     def test_missing_remote_file_message_must_name_the_pulled_file(self):
         # Pulls of the other three files do not match this name: they fail, so the run fails.
         proc, _ = self.run_script('a:h1', bodies_override={'rsync': (
