@@ -6,8 +6,8 @@ All notable changes to this project are documented in this file. The project fol
 
 ### Added
 
+- `tokenatlas statusline` (#62): the Claude Code statusline as a packaged command. Context and quota come live from Claude Code's payload; day, week and month tokens and energy come from the all-harness history through a small `statusline.json` cache that `refresh` (and so `open` and `collect`) writes next to the database, so the statusline never opens the database, makes no network call and uses no credentials. It appends the cache time when older than 45 minutes, omits totals when the cache is missing, prints a short fallback line on any error, and starts without importing the history modules. `tokenatlas statusline --setup` prints the `statusLine` settings entry and never edits the file.
 - Where the report is saved is visible (#64): `tokenatlas open` and `report --html` print `Report: <path>` on stderr (the JSON on stdout is unchanged), a private report's footer shows where it is saved and how to reopen it (shared reports never contain a local path), `open --help` shows the resolved default path, and the README quick start says where the file is.
-
 - Energy estimates in TokenAtlas (#61): an "Energi (uppskattning)" / "Energy (estimate)" card in the report that follows the page filters, and an `energy` fact in `tokenatlas insights` and the report's cost facts card. An order-of-magnitude proxy, not a measurement: the methodology's mid estimates per token class (`tokenatlas/energy.py`) x a Claude tier multiplier (haiku 0.3, sonnet 0.6, opus 1.0), rounded to 1, 2 or 5 per power of ten, with a mid / 3 to mid x 3 range. Models that are not a Claude tier are counted with multiplier 1 and the number of such requests is stated; incomplete observations make it a lower bound (`≥`).
 
 ## [1.7.0] - 2026-10-01

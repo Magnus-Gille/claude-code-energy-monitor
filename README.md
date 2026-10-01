@@ -380,28 +380,30 @@ a source checkout remains supported. On first run the former `agentmon` data dir
 
 ## Install the Claude Code statusline
 
-**30-second setup** — paste this into Claude Code:
-
-> Please set up a custom statusline for me. Do the following:
->
-> 1. Download `statusline.py` from https://github.com/Magnus-Gille/tokenatlas and save it to `~/.claude/statusline.py`
-> 2. Run `chmod +x ~/.claude/statusline.py`
-> 3. Run `claude config set --global statusline "python3 ~/.claude/statusline.py"` to enable it
-
-Or do it manually:
+The statusline is the packaged command `tokenatlas statusline`. Print the exact settings entry for your install:
 
 ```bash
-# Download the script
-curl -o ~/.claude/statusline.py https://raw.githubusercontent.com/Magnus-Gille/tokenatlas/master/statusline.py
-
-# Make it executable
-chmod +x ~/.claude/statusline.py
-
-# Register it with Claude Code
-claude config set --global statusline "python3 ~/.claude/statusline.py"
+tokenatlas statusline --setup
 ```
 
-That's it. The statusline appears the next time you start a Claude Code session.
+It shows the absolute path of the running `tokenatlas` executable and where Claude Code's settings file is (`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`). Merge the printed `statusLine` entry into that file yourself; the command never edits it. It looks like this:
+
+```json
+{"statusLine": {"type": "command", "command": "/home/you/.local/bin/tokenatlas statusline"}}
+```
+
+The line reads `Opus 4.8 | Ctx:42% | 5h:29% 7d:52% | D:2.0M ~2 kWh | W:45.3M ~20 kWh | M:412M ~50 kWh`:
+
+| Segment | Meaning | Source |
+|---|---|---|
+| `Opus 4.8` | Model | Claude Code's payload, live |
+| `Ctx:42%` | Context window used | Payload, live |
+| `5h:29% 7d:52%` | Quota used in the 5-hour and 7-day windows (omitted when the payload has none) | Payload, live |
+| `D:` `W:` `M:` | Tokens and order-of-magnitude energy for today, the last 7 days and the last 30 days, across all harnesses | TokenAtlas history, as of the last refresh |
+
+Totals are the same numbers as the report (ambiguous observations excluded) and are only as fresh as the last `tokenatlas refresh`, `open` or `collect`, which write a small `statusline.json` (0600) next to the history database; schedule `collect` to keep them current. The statusline reads only that file, never the database, so a new day rolls the totals over without a rewrite. When the file is older than 45 minutes its time is appended, e.g. `(14:40)`; when it is missing, the totals are left out. It makes no network calls, uses no credentials and writes nothing; if anything goes wrong it prints a short fallback line. It starts without loading the history modules to stay fast on every status update.
+
+The legacy `statusline.py` script is retired in #63.
 
 ## Codex CLI
 
