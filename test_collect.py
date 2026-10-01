@@ -162,6 +162,7 @@ class CollectTest(CollectBase):
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(int(sync_pid.read_text()), signal.SIGKILL)
 
+    @unittest.skipIf(os.name == 'nt', 'the remote sync is a bash script; collect skips it on Windows')
     def test_custom_db_reaches_the_sync(self):
         custom = self.tmp / 'other' / 'my.sqlite3'
         proc = self.collect('--db', str(custom), '--remote', 'pi:myhost', '--remote-sync', str(self.sync))
@@ -275,6 +276,80 @@ class CollectWindowsLockTest(CollectBase):
         proc = self.collect()
         self.assertNotIn('already running', proc.stdout)
         self.assertEqual(self.steps(proc.stdout), ['refresh', 'report'])
+
+
+
+@unittest.skipUnless(POSIX, 'signals and process groups are POSIX only')
+class CollectSignalWindowTest(CollectBase):
+    """A real signal delivered inside the critical steps of _sync, in-process: it must never leave the sync tree running unsupervised."""
+
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+        from tokenatlas import collect
+        self.c, self.mock = collect, mock
+        for name in ('SIGTERM', 'SIGINT'):
+            old = signal.signal(getattr(signal, name), collect._on_signal)
+            self.addCleanup(signal.signal, getattr(signal, name), old)
+        self.addCleanup(collect._DEFER.update, depth=0, pending=None)
+        env = self.env(FAKE_MODE='hang')
+        patcher = mock.patch.dict(os.environ, {k: env[k] for k in ('CALLS', 'CHILD_PID', 'SYNC_PID', 'STATE', 'FAKE_MODE')})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        lock = open(self.tmp / 'lock', 'a+')
+        self.addCleanup(lock.close)
+        self.lock_fd = lock.fileno()
+
+    def group_gone(self, pid):
+        self.addCleanup(self.kill_group, pid)  # a regression must not leave the tree holding the test runner's output open
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pid, 0)
+
+    @staticmethod
+    def kill_group(pid):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pid, signal.SIGKILL)
+
+    def test_signal_while_the_sync_is_being_started(self):
+        real, started = subprocess.Popen, []
+        def popen(*a, **k):
+            proc = real(*a, **k)
+            started.append(proc)
+            os.kill(os.getpid(), signal.SIGTERM)  # delivered before Popen returns to _sync
+            return proc
+        with self.mock.patch.object(self.c.subprocess, 'Popen', popen):
+            with self.assertRaises(self.c.Terminated) as cm:
+                self.c._sync(self.sync, 'pi:myhost', 60, self.tmp / 'db', self.lock_fd)
+        self.assertEqual(cm.exception.sig, signal.SIGTERM)
+        self.group_gone(started[0].pid)
+
+    def test_second_signal_while_the_group_is_being_stopped(self):
+        real, seen = self.c._stop_group, []
+        def stop(proc, grace=self.c.GRACE):
+            seen.append(proc.pid)
+            os.kill(os.getpid(), signal.SIGINT)  # must not cut the TERM-wait-KILL-reap short
+            return real(proc, grace)
+        with self.mock.patch.object(self.c, '_stop_group', stop):
+            with self.assertRaises(self.c.Terminated) as cm:
+                self.c._sync(self.sync, 'pi:myhost', 1, self.tmp / 'db', self.lock_fd)
+        self.assertEqual(cm.exception.sig, signal.SIGINT)
+        self.group_gone(seen[0])
+        child = int(self.child_pid.read_text())
+        time.sleep(0.2)
+        self.assertFalse(alive(child))
+
+    def test_signal_while_waiting_stops_the_group(self):
+        def later():
+            time.sleep(0.5)
+            os.kill(os.getpid(), signal.SIGTERM)
+        import threading
+        threading.Thread(target=later, daemon=True).start()
+        start = time.monotonic()
+        with self.assertRaises(self.c.Terminated):
+            self.c._sync(self.sync, 'pi:myhost', 60, self.tmp / 'db', self.lock_fd)
+        self.assertLess(time.monotonic() - start, 15)
+        self.group_gone(int((self.tmp / 'sync.pid').read_text()))
+        self.assertFalse(alive(int(self.child_pid.read_text())))
 
 
 if __name__ == '__main__':

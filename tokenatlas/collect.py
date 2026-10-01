@@ -11,6 +11,7 @@ from pathlib import Path
 
 PACKAGED_SYNC=Path(__file__).with_name('remote_sync.sh')
 GRACE=5  # seconds between TERM and KILL of the sync group; longer than remote_sync.sh's own 2 s
+POLL=0.2  # seconds between checks for a noted signal while the sync runs
 
 
 def log(msg):
@@ -65,7 +66,25 @@ class Terminated(BaseException):
     def __init__(self,sig):super().__init__(sig);self.sig=sig
 
 
-def _on_signal(sig,_frame):raise Terminated(sig)
+_DEFER={'depth':0,'pending':None}
+
+
+def _on_signal(sig,_frame):
+    if _DEFER['depth']:_DEFER['pending']=_DEFER['pending'] or sig;return
+    raise Terminated(sig)
+
+
+@contextlib.contextmanager
+def _deferred():
+    """Hold TERM/INT/HUP while a step must not stop half-way (starting the sync and taking charge of it, stopping its group); a signal that
+    arrived meanwhile is raised as soon as the step is done."""
+    _DEFER['depth']+=1
+    try:yield
+    finally:
+        _DEFER['depth']-=1
+        if not _DEFER['depth'] and _DEFER['pending']:
+            sig,_DEFER['pending']=_DEFER['pending'],None
+            raise Terminated(sig)
 
 
 def _stop_group(proc,grace=GRACE):
@@ -87,12 +106,17 @@ def _sync(script,hosts,timeout,db,lock_fd):
     if not script.is_file():log(f'{script} not found');return 127
     # One group: remote_sync.sh must not use job control, so every descendant stays in the group that is signalled.
     env={**os.environ,'REMOTE_HOSTS_OVERRIDE':hosts,'TOKENATLAS_DB':str(db),'TOKENATLAS_SINGLE_GROUP':'1'}
-    proc=subprocess.Popen(['bash',str(script)],env=env,start_new_session=True,pass_fds=(lock_fd,))
-    try:return proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        log(f'remote sync: timeout after {timeout}s');_stop_group(proc);return 124
-    except BaseException:
-        _stop_group(proc);raise
+    # A signal never interrupts this function: it is noted, the group is stopped, and it is raised on the way out (no bytecode gap in which
+    # the sync could be left running without its supervisor).
+    with _deferred():
+        proc=subprocess.Popen(['bash',str(script)],env=env,start_new_session=True,pass_fds=(lock_fd,))
+        deadline=time.monotonic()+timeout
+        while True:
+            if _DEFER['pending']:_stop_group(proc);return None
+            left=deadline-time.monotonic()
+            if left<=0:log(f'remote sync: timeout after {timeout}s');_stop_group(proc);return 124
+            try:return proc.wait(timeout=min(POLL,left))
+            except subprocess.TimeoutExpired:pass
 
 
 def run(args):
