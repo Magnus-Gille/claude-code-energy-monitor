@@ -13,7 +13,7 @@ import statistics
 from datetime import datetime
 from pathlib import Path
 
-from tokenatlas import pricing, prompts
+from tokenatlas import energy, pricing, prompts
 
 I18N = Path(__file__).with_name('report_i18n.json')
 BIG_TURN = 50.0
@@ -134,7 +134,8 @@ def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=Non
     facts += _context(rows)
     if k and total > 0:
         facts += _long(priced, table, k) + _turns(clean, inside, big_turn, scope, memo) + _subagents(priced, total, k) + _tiers(priced, table, k)
-    order = ('model_share', 'price_comparison', 'cost_parts', 'context_size', 'long_context_premium', 'big_turns', 'subagent_share', 'premium_tiers')
+    facts += _energy(inside)
+    order = ('model_share', 'price_comparison', 'cost_parts', 'context_size', 'long_context_premium', 'big_turns', 'subagent_share', 'premium_tiers', 'energy')
     facts = [_finish(f, ctx) for f in sorted(facts, key=lambda f: order.index(f['id']))]
     return {'window': {'start': start and start.isoformat(), 'end': end and end.isoformat()}, **{k_: scope[k_] for k_ in ('requests', 'priced_requests', 'unpriced_requests')},
             'ambiguous_requests': ctx['ambiguous'], 'incomplete_requests': ctx['incomplete'], 'price_table': {'retrieved_on': ctx['retrieved']}, 'big_turn': big_turn, 'facts': facts}
@@ -272,6 +273,31 @@ def _subagents(priced, total, k):
                   'ins_subagent_share_c', (*COMMON, 'ins_a_subagent'), used=priced)]
 
 
+def _energy(inside):
+    """Mid estimate over every request in scope (priced or not: energy needs no price), summed per token class with the model multiplier, plus
+    the uncertainty range and the requests counted unweighted. The rows carry no price result, so no pricing assumption is attached."""
+    by, unweighted, tiers = dict.fromkeys(energy.PER_1K, 0.0), 0, {}
+    for r in inside:
+        mult, weighted = energy.multiplier(r.get('provider'), r.get('model'))
+        for k, v in energy.parts(r.get('tokens') or {}, mult).items():
+            by[k] += v
+        if weighted:
+            t = energy.tier(r.get('provider'), r.get('model'))
+            tiers[t] = tiers.get(t, 0) + 1
+        else:
+            unweighted += 1
+    mid = sum(by.values())
+    if not inside:
+        return []  # no request in scope; with requests the fact is shown even at 0 mWh, so the unweighted count is always stated (as on the page)
+    low, high = energy.bounds(mid)
+    e, m = energy.PER_1K, energy.TIERS
+    return [_fact('energy', dict(mid_mwh=mid, low_mwh=low, high_mwh=high, parts=[dict(part=p, mwh=by[p], share=by[p] / mid if mid else 0.0) for p in ('fresh_input', 'cache_write', 'cache_read', 'output')],
+                                 requests=len(inside), unweighted_requests=unweighted, tiers=dict(sorted(tiers.items()))),
+                  'ins_energy_c', ('ins_a_energy_proxy', 'ins_a_energy_constants', 'ins_a_energy_range', 'ins_a_energy_unweighted', 'ins_a_energy_reasoning'),
+                  used=[(r, {'assumptions': []}, None, {}) for r in inside], e_in=e['fresh_input'], e_out=e['output'], e_cr=e['cache_read'], e_cw=e['cache_write'],
+                  m_haiku=m['haiku'], m_sonnet=m['sonnet'], m_opus=m['opus'], factor=energy.UNCERTAINTY, unweighted=unweighted)]
+
+
 def _turns(records, inside, big_turn, scope, memo):
     """Turn costs as prompts.top_prompts defines them (assign_prompts over all records; a turn's cost is the sum of its priced requests inside the
     window, a turn without a priced request has none), without building its per-turn detail: that is what makes 200k observations affordable."""
@@ -355,6 +381,12 @@ def _lines(f):
                 f"their cost: {u(v['cost'])} of {u(v['attributed_cost'])} ({_pct(v['share'])})", f"median requests per such turn: {_num(v['median_requests'])}"]
     if i == 'subagent_share':
         return [f"cost from subagents: {u(v['subagent_cost'])} of {u(v['total_cost'])} ({_pct(v['share'])})", f"requests from subagents: {v['subagent_requests']:,} of {v['priced_requests']:,} priced"]
+    if i == 'energy':
+        parts = {'fresh_input': 'input (uncached)', 'cache_write': 'cache write', 'cache_read': 'cache read', 'output': 'output'}
+        return [f"mid estimate (order of magnitude, not a measurement): {lb}{energy.fmt(v['mid_mwh'])}",
+                f"range (mid / {energy.UNCERTAINTY} to mid x {energy.UNCERTAINTY}): {lb}{energy.fmt(v['low_mwh'])} to {lb}{energy.fmt(v['high_mwh'])}"] + \
+               [f"{parts[p['part']]}: {_pct(p['share'])} of the mid estimate" for p in v['parts']] + \
+               [f"requests: {v['requests']:,}; without model weighting (counted with multiplier 1): {v['unweighted_requests']:,}"]
     return [f"requests at a fast or priority tier: {v['requests']:,} ({', '.join(f'{k} {n:,}' for k, n in v['tiers'].items())})", f"cost at the tier applied: {u(v['actual'])}",
             f"same requests at the standard tier: {u(v['standard'])}", f"extra cost: {u(v['extra'])}"]
 
@@ -363,7 +395,7 @@ def render_text(result):
     """Human-readable English block per fact: the numbers, then the computation and assumptions on indented lines. Aggregates only."""
     w = result['window']
     span = f"{w['start'] or 'the first request'} to {w['end'] or 'now'}" if w['start'] or w['end'] else 'all history'
-    out = ['Cost facts: list-price USD, computed locally from saved observations (no language model, no interpretation)',
+    out = ['Cost facts: list-price USD and an energy estimate, computed locally from saved observations (no language model, no interpretation)',
            f"Window: {span}", f"Requests: {result['requests']:,} ({result['priced_requests']:,} with a complete USD list price, {result['unpriced_requests']:,} without); left out as ambiguous: {result['ambiguous_requests']:,}; incomplete (lower bounds): {result['incomplete_requests']:,}"]
     if not result['facts']:
         out.append('No cost facts can be computed for this window.')
