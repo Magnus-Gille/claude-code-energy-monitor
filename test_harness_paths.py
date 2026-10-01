@@ -66,17 +66,14 @@ class RefreshThroughVariable(Base):
                 for other in set(LAYOUT) - {harness}:
                     self.assertEqual(by[other]['status'], 'absent')
 
-    def test_empty_variable_means_default(self):
-        shutil.copytree(self.demo / '.claude', self.home / '.claude')
-        for var in VARS:
-            with self.subTest(var=var):
-                code, by = self.refresh_all({var: ''})
-                self.assertEqual(by['claude']['status'], 'ok')
-
-    def test_relative_xdg_data_home_is_ignored(self):
-        shutil.copytree(self.demo / '.local', self.home / '.local')
-        code, by = self.refresh_all({'XDG_DATA_HOME': 'data'})  # relative: the default under HOME is used
-        self.assertEqual(by['opencode']['status'], 'ok')
+    def test_empty_or_relative_variable_means_default(self):
+        for src in ('.claude', '.codex', '.pi', '.local'):
+            shutil.copytree(self.demo / src, self.home / src)
+        for value in ('', 'rel'):
+            with self.subTest(value=value):
+                code, by = self.refresh_all({var: value for var in VARS})
+                self.assertEqual(code, 0, by)
+                self.assertEqual({h: x['status'] for h, x in by.items()}, {h: 'ok' for h in LAYOUT})
 
     def test_explicit_root_beats_variable(self):
         var, value = self.moved('claude')
@@ -90,37 +87,53 @@ class RefreshThroughVariable(Base):
 
 
 class Resolver(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.x = Path(tmp.name).resolve() / 'x'  # platform-native absolute path
+
     def resolve(self, name, **env):
         clean = {k: v for k, v in os.environ.items() if k not in VARS}
         with patch.dict(os.environ, {**clean, **env}, clear=True):
             return why.harness_root(name)
 
     def test_variable_and_default(self):
-        self.assertEqual(self.resolve('claude', CLAUDE_CONFIG_DIR='/x/c'), (Path('/x/c/projects'), 'CLAUDE_CONFIG_DIR'))
-        self.assertEqual(self.resolve('codex', CODEX_HOME='/x/x'), (Path('/x/x/sessions'), 'CODEX_HOME'))
-        self.assertEqual(self.resolve('pi', PI_CODING_AGENT_DIR='/x/p'), (Path('/x/p/sessions'), 'PI_CODING_AGENT_DIR'))
-        self.assertEqual(self.resolve('opencode', XDG_DATA_HOME='/x/d'), (Path('/x/d/opencode/opencode.db'), 'XDG_DATA_HOME'))
+        x = self.x
+        self.assertEqual(self.resolve('claude', CLAUDE_CONFIG_DIR=str(x)), (x / 'projects', 'CLAUDE_CONFIG_DIR'))
+        self.assertEqual(self.resolve('codex', CODEX_HOME=str(x)), (x / 'sessions', 'CODEX_HOME'))
+        self.assertEqual(self.resolve('pi', PI_CODING_AGENT_DIR=str(x)), (x / 'sessions', 'PI_CODING_AGENT_DIR'))
+        self.assertEqual(self.resolve('opencode', XDG_DATA_HOME=str(x)), (x / 'opencode' / 'opencode.db', 'XDG_DATA_HOME'))
         self.assertEqual(self.resolve('pi'), (why.PI_SESSIONS, 'default'))
 
     def test_empty_and_relative_are_default(self):
-        self.assertEqual(self.resolve('claude', CLAUDE_CONFIG_DIR=''), (why.CLAUDE_PROJECTS, 'default'))
-        self.assertEqual(self.resolve('opencode', XDG_DATA_HOME='rel/dir'), (why.OPENCODE_DB, 'default'))
+        defaults = {'claude': why.CLAUDE_PROJECTS, 'codex': why.CODEX_SESSIONS, 'pi': why.PI_SESSIONS, 'opencode': why.OPENCODE_DB}
+        for name, (var, _, _) in LAYOUT.items():
+            for value in ('', 'rel/dir'):
+                with self.subTest(harness=name, value=value):
+                    self.assertEqual(self.resolve(name, **{var: value}), (defaults[name], 'default'))
 
     def test_pi_expands_leading_tilde(self):
-        with patch.dict(os.environ, {'HOME': '/h', 'PI_CODING_AGENT_DIR': '~/agent'}):
-            self.assertEqual(why.harness_root('pi'), (Path('/h/agent/sessions'), 'PI_CODING_AGENT_DIR'))
+        with patch.dict(os.environ, {'HOME': str(self.x), 'USERPROFILE': str(self.x), 'PI_CODING_AGENT_DIR': '~/agent'}):
+            expected = Path('~/agent').expanduser() / 'sessions'
+            self.assertEqual(why.harness_root('pi'), (expected, 'PI_CODING_AGENT_DIR'))
+            self.assertEqual(expected, self.x / 'agent' / 'sessions')
 
-    def test_claude_state_dir_follows_variable(self):
-        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': '/x/c'}):
-            self.assertEqual(why.claude_state_dir(), Path('/x/c'))
-        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': ''}):
+    def test_pi_unknown_user_tilde_falls_back_to_default(self):
+        with patch.dict(os.environ, {'PI_CODING_AGENT_DIR': '~nonexistent-user-xyz/agent'}):
+            self.assertEqual(why.harness_root('pi'), (why.PI_SESSIONS, 'default'))
+
+    def test_claude_state_dir_does_not_follow_variable(self):
+        # statusline.py always writes under ~/.claude, whatever CLAUDE_CONFIG_DIR says
+        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.x)}):
             self.assertEqual(why.claude_state_dir(), why.CLAUDE_STATE)
 
 
 class CodexIndex(unittest.TestCase):
     def test_session_index_follows_codex_home(self):
-        with patch.dict(os.environ, {'CODEX_HOME': '/x/codex'}):
-            self.assertEqual(why.codex_session_index(), Path('/x/codex/session_index.jsonl'))
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve() / 'codex'
+            with patch.dict(os.environ, {'CODEX_HOME': str(home)}):
+                self.assertEqual(why.codex_session_index(), home / 'session_index.jsonl')
         with patch.dict(os.environ, {'CODEX_HOME': ''}):
             self.assertEqual(why.codex_session_index(), why.CODEX_SESSIONS.parent / 'session_index.jsonl')
 
@@ -134,10 +147,11 @@ class CodexIndex(unittest.TestCase):
 class Doctor(Base):
     def test_doctor_reports_path_and_source(self):
         self.cli('refresh', '--all')  # creates the (empty) history; doctor needs one
-        code, out = self.cli('doctor', env={'CODEX_HOME': '/x/codex', 'PI_CODING_AGENT_DIR': ''})
+        codex = self.base / 'codex'
+        code, out = self.cli('doctor', env={'CODEX_HOME': str(codex), 'PI_CODING_AGENT_DIR': ''})
         self.assertEqual(code, 0, out)
         roots = json.loads(out)['roots']
-        self.assertEqual(roots['codex'], {'path': '/x/codex/sessions', 'source': 'CODEX_HOME'})
+        self.assertEqual(roots['codex'], {'path': str(codex / 'sessions'), 'source': 'CODEX_HOME'})
         self.assertEqual(roots['pi'], {'path': str(self.home / '.pi/agent/sessions'), 'source': 'default'})
         self.assertEqual(set(roots), set(LAYOUT))
 

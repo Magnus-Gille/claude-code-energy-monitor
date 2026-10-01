@@ -37,7 +37,10 @@ def _env_dir(var, tilde=False):
     """Absolute directory named by `var`, else None; unset, empty and (per the XDG spec) relative values mean the default."""
     value = os.environ.get(var, '')
     if tilde and value.startswith('~'):
-        value = str(Path(value).expanduser())
+        try:
+            value = str(Path(value).expanduser())
+        except (RuntimeError, KeyError):  # unknown ~user (RuntimeError) or no home to expand (KeyError): default
+            return None
     return Path(value) if value and Path(value).is_absolute() else None
 
 
@@ -55,8 +58,8 @@ def harness_root(name):
 
 
 def claude_state_dir():
-    """Claude Code's config directory (statusline cache): CLAUDE_CONFIG_DIR, else the default."""
-    return _env_dir('CLAUDE_CONFIG_DIR') or CLAUDE_STATE
+    """Where the statusline keeps its files: always ~/.claude, since statusline.py ignores CLAUDE_CONFIG_DIR."""
+    return CLAUDE_STATE
 
 
 def codex_session_index():

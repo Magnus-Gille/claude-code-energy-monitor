@@ -107,7 +107,7 @@ variable, which TokenAtlas reads at every run (an unset, empty or relative value
 | OpenCode | `XDG_DATA_HOME` | `$XDG_DATA_HOME/opencode/opencode.db` | `~/.local/share/opencode/opencode.db` |
 
 An explicit command-line root (`--root`, `--claude-root`, ...) beats the variable, which beats the default.
-The Claude desktop Cowork location is not affected by `CLAUDE_CONFIG_DIR`. `tokenatlas doctor` lists the
+The Claude desktop Cowork location and the statusline's own files (`statusline_daily.json`, `statusline_history.jsonl`, always under `~/.claude`) are not affected by `CLAUDE_CONFIG_DIR`. `tokenatlas doctor` lists the
 resolved path and its source (`default` or the variable name) per harness under `roots`. A scheduled job
 (cron, launchd) does not inherit your interactive shell's environment: set the variable in the schedule
 itself, for example `CODEX_HOME=/data/codex tokenatlas refresh --all` in the crontab line, or under
