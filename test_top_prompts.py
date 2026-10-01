@@ -224,6 +224,11 @@ class Cli(Base):
         self.assertEqual(u1['resume'], 'claude --resume sess')
         self.assertEqual(self.top('--json', '--by', 'tokens', '-n', '1')[1].count('"turn_id"'), 1)
 
+    def test_default_limit_is_ten(self):
+        from tokenatlas import prompt_store
+        self.assertEqual(self.top('--keep-text')[0], 0)
+        self.assertEqual(prompt_store.load_meta(prompt_store.store_path(self.db))[1:], (10, 'cost'))
+
     def test_table(self):
         code, out, err = self.top()
         self.assertEqual(code, 0, err)

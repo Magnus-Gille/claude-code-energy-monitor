@@ -96,6 +96,25 @@ class CollectTest(CollectBase):
         self.assertIn('report_exists=1', calls[0], 'the first report was built before the sync')
         self.assertRegex(proc.stdout, r'refresh exit=0 \(\d+\.\ds\)')
 
+    def test_top_keeps_the_stored_k_and_by(self):
+        from tokenatlas import prompt_store
+        store = self.state / 'top-prompts.json'
+        for k, by in ((10, 'tokens'), (3, 'cost'), (7, 'tokens')):
+            store.write_text('{"version":2,"k":%d,"by":"%s","entries":[]}\n' % (k, by))
+            store.chmod(0o600)
+            proc = self.collect()
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn('top', self.steps(proc.stdout))
+            self.assertEqual(prompt_store.load_meta(store)[1:], (k, by))
+
+    def test_top_falls_back_to_defaults_when_the_recorded_choice_is_invalid(self):
+        from tokenatlas import prompt_store
+        store = self.state / 'top-prompts.json'
+        store.write_text('{"version":2,"k":"x","by":"nope","entries":[]}\n')
+        store.chmod(0o600)
+        self.assertEqual(self.collect().returncode, 0)
+        self.assertEqual(prompt_store.load_meta(store)[1:], (10, 'cost'))
+
     def test_top_only_when_opted_in(self):
         proc = self.collect()
         self.assertNotIn('top', self.steps(proc.stdout))

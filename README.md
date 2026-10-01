@@ -139,7 +139,7 @@ ships inside the package (`tokenatlas/remote_sync.sh`; override with `--remote-s
 `TOKENATLAS_REMOTE_SYNC`). The steps run in this order, so local results never wait for a remote machine:
 
 1. refresh all harnesses (`refresh --all`)
-2. `top --keep-text`, only if you opted in (`top-prompts.json` exists in the state directory)
+2. `top --keep-text`, only if you opted in (`top-prompts.json` exists in the state directory); it keeps the `-n` and `--by` the store was created with
 3. the conditional private report to `report.html` in the state directory (`--if-changed --max-age 1h`)
 4. then, only if hosts are configured (`--remote tag:host`, repeatable; else `REMOTE_HOSTS_OVERRIDE`; else a
    `remote-hosts` file of space-separated `tag:host` pairs in the state directory), the remote sync with
@@ -205,8 +205,8 @@ Costs are API-equivalent list prices, not what was paid; unknown cost prints `n/
 ## Top turns
 
 ```bash
-tokenatlas top [-n 5] [--by cost|tokens] [--harness H] [--project P] [--start ISO] [--end ISO] [--json]
-tokenatlas top --keep-text -n 5     # opt in: remember the text and context of the current top 5 turns
+tokenatlas top [-n 10] [--by cost|tokens] [--harness H] [--project P] [--start ISO] [--end ISO] [--json]
+tokenatlas top --keep-text          # opt in: remember the text and context of the current top 10 turns (-n N for another k)
 tokenatlas top --forget-text        # delete the stored text and context
 tokenatlas top --json --with-text   # include stored text and context in JSON
 ```
@@ -223,6 +223,9 @@ preview (whitespace collapsed, secret-like strings masked, at most about 200 cha
 all read from this machine's own logs; turns from other machines get neither. A turn that falls out of the top is removed
 from the file on the next `--keep-text`. Turns whose text or context could not be read are retried on each `--keep-text`,
 which also fills the context of entries kept by an older version (the file format is version 2; version 1 files are still read).
+The default is the top 10 turns. A store created with a smaller k stays at that k, also under `collect`, which reuses the store's recorded `-n` and `--by`
+and never raises k on its own; move an existing store to 10 once with `tokenatlas top --keep-text -n 10`. Stored text outlives the harness's own
+log cleanup (for example Claude Code's `cleanupPeriodDays`) while the turn stays in the top k; `top --forget-text` deletes it.
 
 ### Turn context
 
