@@ -72,6 +72,14 @@ class ReportLocation(unittest.TestCase):
         self.run_cli('report', '--html', str(link), '--private')
         self.assertEqual(payload(link.read_text(encoding='utf-8'))['saved_at'], str(link))
 
+    def test_windows_shows_a_reopen_command_only_for_plain_paths(self):
+        from tokenatlas import __main__ as cli
+        self.assertIsNone(cli._shell_command(['tokenatlas', 'open', '--html', r'C:\a&b\r.html'], windows=True))  # & would split it in cmd.exe
+        self.assertIsNone(cli._shell_command(['tokenatlas', 'open', '--html', r'C:\100%\r.html'], windows=True))
+        self.assertEqual(cli._shell_command(['tokenatlas', 'open', '--html', r'C:\my reports\r.html'], windows=True),
+                         r'tokenatlas open --html "C:\my reports\r.html"')
+        self.assertEqual(cli._shell_command(['tokenatlas', 'open', '--html', '/a&b/r.html'], windows=False), "tokenatlas open --html '/a&b/r.html'")
+
     def test_skipped_report_still_says_where_it_is(self):
         out = self.tmp / 'r.html'
         self.run_cli('report', '--html', str(out), '--private', '--if-changed')

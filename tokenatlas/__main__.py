@@ -146,6 +146,13 @@ def _state_base():
     return Path(os.environ.get('XDG_STATE_HOME',Path.home()/'.local/state'))
 
 
+def _shell_command(cmd,windows=None):
+    """cmd quoted for the user's shell; on Windows None unless every argument is plain, since cmd.exe has no quoting that is safe for every
+    character (&, |, ^, %, !, ...), so only the path is shown there."""
+    if not (os.name=='nt' if windows is None else windows):return shlex.join(cmd)
+    return None if any(re.search(r'[^\w\-.:\\/ ]',a) for a in cmd) else subprocess.list2cmdline(cmd)
+
+
 def _reopen(path,db,always=False):
     """The command that reopens exactly this report: `tokenatlas open` (with --db/--html when they are not the defaults). For a report
     written by `report`, only when it is open's own default file (open reuses it); otherwise None: open would rebuild it with other options."""
@@ -156,7 +163,7 @@ def _reopen(path,db,always=False):
     if Path(db).expanduser().absolute()!=default_db_path.absolute():cmd+=['--db',str(Path(db).expanduser().absolute())]
     cmd.append('open')
     if Path(path).absolute()!=default_html:cmd+=['--html',str(Path(path).absolute())]
-    return shlex.join(cmd) if os.name!='nt' else subprocess.list2cmdline(cmd)  # quoted for the user's shell
+    return _shell_command(cmd)
 
 
 def default_db():
