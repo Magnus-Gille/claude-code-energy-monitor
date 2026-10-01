@@ -33,6 +33,38 @@ OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 COWORK_SESSIONS = Path.home() / "Library" / "Application Support" / "Claude" / "local-agent-mode-sessions"
 
 
+def _env_dir(var, tilde=False):
+    """Absolute directory named by `var`, else None; unset, empty and (per the XDG spec) relative values mean the default."""
+    value = os.environ.get(var, '')
+    if tilde and value.startswith('~'):
+        value = str(Path(value).expanduser())
+    return Path(value) if value and Path(value).is_absolute() else None
+
+
+def harness_root(name):
+    """(path, source) of a harness's log root, read from the environment at call time; source is 'default' or the variable."""
+    for var, harness, tail, default, tilde in (
+            ('CLAUDE_CONFIG_DIR', 'claude', ('projects',), CLAUDE_PROJECTS, False),
+            ('CODEX_HOME', 'codex', ('sessions',), CODEX_SESSIONS, False),
+            ('PI_CODING_AGENT_DIR', 'pi', ('sessions',), PI_SESSIONS, True),
+            ('XDG_DATA_HOME', 'opencode', ('opencode', 'opencode.db'), OPENCODE_DB, False)):
+        if harness == name:
+            base = _env_dir(var, tilde)
+            return (base.joinpath(*tail), var) if base else (default, 'default')
+    raise ValueError(f'unknown harness: {name}')
+
+
+def claude_state_dir():
+    """Claude Code's config directory (statusline cache): CLAUDE_CONFIG_DIR, else the default."""
+    return _env_dir('CLAUDE_CONFIG_DIR') or CLAUDE_STATE
+
+
+def codex_session_index():
+    """Codex's session index next to its sessions: CODEX_HOME/session_index.jsonl, else the default."""
+    base = _env_dir('CODEX_HOME')
+    return (base if base else CODEX_SESSIONS.parent) / 'session_index.jsonl'
+
+
 def cowork_scan() -> tuple[list[Path], list[str]]:
     """Every <org>/<acct>/local_*/.claude/projects directory plus the errors met while walking; a missing base is empty."""
     roots, errors = [], []
@@ -1183,12 +1215,18 @@ def main(argv: list[str] | None = None) -> int:
     window.add_argument("--hours", type=float, help="Trailing number of hours (default: 24)")
     parser.add_argument("--limit", type=int, default=5, help="Rows per grouping (default: 5)")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
-    parser.add_argument("--claude-root", type=Path, default=CLAUDE_PROJECTS)
-    parser.add_argument("--claude-state-dir", type=Path, default=CLAUDE_STATE)
-    parser.add_argument("--codex-root", type=Path, default=CODEX_SESSIONS)
-    parser.add_argument("--pi-root", type=Path, default=PI_SESSIONS)
-    parser.add_argument("--opencode-db", type=Path, default=OPENCODE_DB)
+    parser.add_argument("--claude-root", type=Path, default=None)
+    parser.add_argument("--claude-state-dir", type=Path, default=None)
+    parser.add_argument("--codex-root", type=Path, default=None)
+    parser.add_argument("--pi-root", type=Path, default=None)
+    parser.add_argument("--opencode-db", type=Path, default=None)
     args = parser.parse_args(argv)
+    # Explicit option > harness environment variable > default.
+    args.claude_root = args.claude_root or harness_root("claude")[0]
+    args.claude_state_dir = args.claude_state_dir or claude_state_dir()
+    args.codex_root = args.codex_root or harness_root("codex")[0]
+    args.pi_root = args.pi_root or harness_root("pi")[0]
+    args.opencode_db = args.opencode_db or harness_root("opencode")[0]
     if args.hours is not None and args.hours <= 0:
         parser.error("--hours must be greater than zero")
     if args.limit <= 0:

@@ -665,7 +665,7 @@ def run(args):
     from tokenatlas.history import History
     if not args.refresh and not args.db.expanduser().is_file():
         raise ValueError('history database does not exist; run refresh or overhead --refresh first')
-    roots = {'claude': why.CLAUDE_PROJECTS, 'codex': why.CODEX_SESSIONS, 'pi': why.PI_SESSIONS, 'opencode': why.OPENCODE_DB}
+    roots = {h: why.harness_root(h)[0] for h in ('claude', 'codex', 'pi', 'opencode')}
     with History(args.db) as history:
         db = history.connection
         if args.refresh:

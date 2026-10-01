@@ -74,7 +74,7 @@ def _with_problems(entry,problems):
 
 def refresh_all(history):
     """Refresh every harness from its default roots; absent ones are reported, an OSError only fails its own harness."""
-    roots={'claude':why.CLAUDE_PROJECTS,'codex':why.CODEX_SESSIONS,'pi':why.PI_SESSIONS,'opencode':why.OPENCODE_DB}
+    roots={h:why.harness_root(h)[0] for h in ('claude','codex','pi','opencode')}
     order=('ok','partial','missing','error')
     rank=lambda s:order.index(s) if s in order else len(order)
     entries,worst=[],'ok'
@@ -340,8 +340,7 @@ def main(argv=None):
             elif args.command=='refresh' and args.all:
                 result=refresh_all(history)
             elif args.command=='refresh':
-                roots={'claude':why.CLAUDE_PROJECTS,'codex':why.CODEX_SESSIONS,
-                       'pi':why.PI_SESSIONS,'opencode':why.OPENCODE_DB}
+                roots={h:why.harness_root(h)[0] for h in ('claude','codex','pi','opencode')}
                 if args.root or args.harness!='claude':
                     result=history.refresh(args.harness,args.root or roots[args.harness])
                 else:
@@ -383,6 +382,8 @@ def main(argv=None):
             elif args.command=='doctor':
                 history.connection.execute('BEGIN')
                 result=history.doctor()
+                # Where each harness is read from now, and why; only the harness variables, never the whole environment.
+                result['roots']={h:dict(zip(('path','source'),(str(r),src))) for h in ('claude','codex','pi','opencode') for r,src in [why.harness_root(h)]}
             else:
                 history.connection.execute('BEGIN')
                 source_status=history.doctor()
