@@ -314,6 +314,31 @@ class CollectWindowsLockTest(CollectBase):
 
 
 
+
+@unittest.skipIf(os.name == 'nt', 'the remote sync and its second report are skipped on Windows')
+class CollectReportArgsTest(CollectBase):
+    """In-process, with the steps' work replaced: which arguments each report step gets (#49)."""
+
+    def test_both_reports_build_at_most_once_an_hour(self):
+        import argparse
+        from unittest import mock
+        from tokenatlas import collect
+        for name in ('SIGTERM', 'SIGINT', 'SIGHUP'):
+            if hasattr(signal, name):
+                self.addCleanup(signal.signal, getattr(signal, name), signal.getsignal(getattr(signal, name)))
+        calls = []
+        args = argparse.Namespace(db=self.state / 'history.sqlite3', remote=['pi:myhost'], remote_sync=str(self.sync), sync_timeout=60,
+                                  no_report=False, lang='auto')
+        with mock.patch.object(collect, '_quiet', lambda call, *argv: calls.append(argv) or 0), \
+             mock.patch('tokenatlas.__main__.refresh_all', return_value={'status': 'ok'}), \
+             mock.patch.object(collect, '_sync', return_value=0):
+            self.assertEqual(collect.run(args), 0)
+        reports = [a for a in calls if 'report' in a]
+        self.assertEqual(len(reports), 2, calls)
+        for argv in reports:
+            self.assertIn('--if-changed', argv)
+            self.assertEqual(argv[argv.index('--max-age') + 1], '1h', argv)
+
 @unittest.skipUnless(POSIX, 'signals and process groups are POSIX only')
 class CollectSignalWindowTest(CollectBase):
     """A real signal delivered inside the critical steps of _sync, in-process: it must never leave the sync tree running unsupervised."""

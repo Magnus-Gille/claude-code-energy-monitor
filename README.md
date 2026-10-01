@@ -144,7 +144,9 @@ ships inside the package (`tokenatlas/remote_sync.sh`; override with `--remote-s
 4. then, only if hosts are configured (`--remote tag:host`, repeatable; else `REMOTE_HOSTS_OVERRIDE`; else a
    `remote-hosts` file of space-separated `tag:host` pairs in the state directory), the remote sync with
    bounded ssh/scp/rsync calls (see [Other machines](docs/remote-machines.md)). Skipped on Windows.
-5. the conditional report again after every attempted sync, successful or not, so partial imports show up
+5. the conditional report again after every attempted sync, successful or not, with the same `--if-changed --max-age 1h`:
+   imported data shows up at the next build, at most an hour later, so the report is built at most once an hour while
+   only the data changes (`tokenatlas open` gives an exact view on demand)
 
 `--no-report` skips both reports and `--lang auto|sv|en` is passed to them. The exit code is 0 when every step
 succeeded and 1 when any failed (a failed sync still gets its second report).

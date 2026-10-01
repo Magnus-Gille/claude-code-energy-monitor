@@ -145,14 +145,14 @@ def _run(args):
         def refresh():
             with History(db) as history:result=refresh_all(history)
             return 0 if result['status']=='ok' else 2
-        def report(*extra):
-            return lambda:_quiet(main,'--db',str(db),'report','--html',str(state/'report.html'),'--private','--if-changed','--lang',args.lang,*extra)
+        def report():  # at most one build an hour while only the data changes (an option or privacy change always rebuilds)
+            return lambda:_quiet(main,'--db',str(db),'report','--html',str(state/'report.html'),'--private','--if-changed','--max-age','1h','--lang',args.lang)
         failed=_step('refresh',refresh)!=0
         if prompt_store.store_path(db).exists():
             choice=_kept_choice(db)
             if choice is None:log(f'top: skipped: {prompt_store.store_path(db)} has no valid recorded k/by; choose one with tokenatlas top --keep-text -n N (or --forget-text)');failed=True
             else:failed|=_step('top',lambda:_quiet(main,'--db',str(db),'top','--keep-text',*choice))!=0
-        if not args.no_report:failed|=_step('report',report('--max-age','1h'))!=0
+        if not args.no_report:failed|=_step('report',report())!=0
         hosts=_hosts(args,state)
         if hosts:
             script=Path(args.remote_sync or os.environ.get('TOKENATLAS_REMOTE_SYNC') or PACKAGED_SYNC)

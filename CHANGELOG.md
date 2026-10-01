@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+### Fixed
+
+- `tokenatlas collect`: the report after the remote sync also uses `--max-age 1h`, so the report is built at most once an hour while only the data changes, as with the old shell collector; it was rebuilt on every run (about 90 s CPU each on 400k observations) (#49).
+
 ## [1.6.0] - 2026-10-01
 
 ### Changed
