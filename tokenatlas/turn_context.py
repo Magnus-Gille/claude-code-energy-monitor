@@ -21,7 +21,7 @@ from .prompt_text import (
 )
 from .why import (
     _CODEX_TURN_END, _codex_event_turn_id, _codex_user_event_identity, _explicit_turn_id, _first_text,
-    _is_genuine_user_row, _mapping, _meta_text, parse_iso_timestamp,
+    _is_genuine_user_row, _mapping, _meta_text, codex_session_index, parse_iso_timestamp,
 )
 
 _ERRORS = (OSError, OverflowError, ValueError, TypeError, AttributeError, KeyError, RuntimeError, sqlite3.Error)
@@ -466,7 +466,7 @@ def turn_context(harness: str, sources: object, session: object, turn_id: object
         if harness == "claude":
             raw = _claude(sources, session, turn_id)
         elif harness == "codex":
-            raw = _codex(sources, session, turn_id, Path(codex_index) if codex_index else Path.home() / ".codex/session_index.jsonl")
+            raw = _codex(sources, session, turn_id, Path(codex_index) if codex_index else codex_session_index())
         elif harness == "opencode":
             raw = _opencode(sources, session, turn_id)
         elif harness == "pi":

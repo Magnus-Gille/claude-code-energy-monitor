@@ -96,6 +96,23 @@ history survives source deletion. Schedule refresh separately if desired;
 there is no background service, and already-deleted logs cannot be recovered.
 `refresh` exits 2 for missing sources or partial imports and records diagnostics.
 
+Logs are read from each harness's default location unless the harness itself has been moved with its own
+variable, which TokenAtlas reads at every run (an unset, empty or relative value means the default):
+
+| Harness | Variable | Read from | Default |
+| --- | --- | --- | --- |
+| Claude Code | `CLAUDE_CONFIG_DIR` | `$CLAUDE_CONFIG_DIR/projects` | `~/.claude/projects` |
+| Codex | `CODEX_HOME` | `$CODEX_HOME/sessions` and `session_index.jsonl` | `~/.codex/sessions` |
+| Pi | `PI_CODING_AGENT_DIR` (leading `~` expanded) | `$PI_CODING_AGENT_DIR/sessions` | `~/.pi/agent/sessions` |
+| OpenCode | `XDG_DATA_HOME` | `$XDG_DATA_HOME/opencode/opencode.db` | `~/.local/share/opencode/opencode.db` |
+
+An explicit command-line root (`--root`, `--claude-root`, ...) beats the variable, which beats the default.
+The Claude desktop Cowork location and the statusline's own files (`statusline_daily.json`, `statusline_history.jsonl`, always under `~/.claude`) are not affected by `CLAUDE_CONFIG_DIR`. `tokenatlas doctor` lists the
+resolved path and its source (`default` or the variable name) per harness under `roots`. A scheduled job
+(cron, launchd) does not inherit your interactive shell's environment: set the variable in the schedule
+itself, for example `CODEX_HOME=/data/codex tokenatlas refresh --all` in the crontab line, or under
+`EnvironmentVariables` in the launchd plist.
+
 `report` supports day/hour/minute, `--timezone`, `--harness`, `--project` (full
 identity), `--session` (including displayed `HARNESS:SESSION_ID` names), and `--turn`. `--records` includes source-file references
 and observed/derived turn links. The output is **private local data**: project
