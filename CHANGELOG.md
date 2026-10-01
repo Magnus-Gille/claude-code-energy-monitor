@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-01
+
 ### Added
 
 - Turn context: `top --keep-text` also stores, for the current top turns only and in the same 0600 `top-prompts.json` (now version 2; version 1 is still read and upgraded), the title (Claude `custom-title`, Codex `session_index` thread name, OpenCode session title, Pi `session_info` name), working directory, branch, repository, input count, initiating and follow-up inputs, final message, shell/edit/web/subagent counts, PR numbers and up to 5 commit subjects from local `git log --all` over the turn window. No network, no model calls. `top` prints up to four context lines per turn and `--json --with-text` adds `context`. Private reports get an "Inputs" column and an expandable context block per stored turn; shared reports carry only the input count and never any context text. See README "Top turns".
