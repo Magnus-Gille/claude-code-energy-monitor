@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-01
+
 ### Added
 
 - `tokenatlas statusline` (#62): the Claude Code statusline as a packaged command. Context and quota come live from Claude Code's payload; day, week and month tokens and energy come from the all-harness history through a small `statusline.json` cache that `refresh` (and so `open` and `collect`) writes next to the database, so the statusline never opens the database, makes no network call and uses no credentials. It appends the cache time when older than 45 minutes, omits totals when the cache is missing, prints a short fallback line on any error, and starts without importing the history modules. `tokenatlas statusline --setup` prints the `statusLine` settings entry and never edits the file.
