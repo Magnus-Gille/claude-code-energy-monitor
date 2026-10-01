@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-01
+
 ### Changed
 
 - `tokenatlas top` shows and `top --keep-text` stores the top 10 turns by default (was 5), and the report's "Costliest turns" card shows 10. An existing store keeps its recorded k; move it to 10 once with `tokenatlas top --keep-text -n 10`.
