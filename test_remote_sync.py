@@ -1,5 +1,6 @@
 """remote_sync.sh: entry validation and per-host failure isolation, with stubbed commands on a temp PATH."""
 import os
+import signal
 import stat
 import subprocess
 import tempfile
@@ -8,12 +9,41 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).with_name('remote_sync.sh')
+
+
+def kill_group(proc):
+    """Kill the whole process group of a start_new_session child and reap it."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    proc.wait()
+
+
+def run_group(env, timeout=60):
+    proc = subprocess.Popen(['bash', str(SCRIPT)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    finally:
+        kill_group(proc)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 STUB = '#!/bin/bash\necho "{name} $*" >> "$STUB_LOG"\n{body}\n'
 
 
 @unittest.skipIf(os.name == 'nt', 'remote_sync.sh targets macOS/Linux hosts')
 class RemoteSyncTest(unittest.TestCase):
-    def run_script(self, hosts, mv_fails_first=False, rm_fails=False, extra_env=None, em_in_home_bin=False, remote_only=None):
+    def run_script(self, hosts, bodies_override=None, mv_fails_first=False, rm_fails=False, extra_env=None, em_in_home_bin=False, remote_only=None):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -25,6 +55,7 @@ class RemoteSyncTest(unittest.TestCase):
                   'rm': 'exit 1' if rm_fails else 'exit 0',
                   'mv': (f'if [ ! -e "{counter}" ]; then touch "{counter}"; exit 1; fi; exit 0'
                          if mv_fails_first else 'exit 0')}
+        bodies.update(bodies_override or {})
         if remote_only:
             # ssh really runs the remote command line in a fake remote home holding only `remote_only`.
             remote_bin = root / 'remote_home' / '.local' / 'bin'
@@ -42,7 +73,7 @@ class RemoteSyncTest(unittest.TestCase):
             stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
         env = {'PATH': f'{root / "bin"}:/usr/bin:/bin', 'HOME': str(root / 'home'), 'STUB_LOG': str(log),
                'REMOTE_HOSTS_OVERRIDE': hosts, **(extra_env or {})}
-        proc = subprocess.run(['bash', str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60)
+        proc = run_group(env)
         return proc, log.read_text() if log.exists() else ''
 
     def test_invalid_pairs_rejected(self):
@@ -57,7 +88,7 @@ class RemoteSyncTest(unittest.TestCase):
 
     def test_failing_mv_does_not_stop_next_host(self):
         proc, log = self.run_script('a:h1 b:h2', mv_fails_first=True)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn('cannot store snapshot for a', proc.stderr)
         self.assertIn('Syncing energy data from b (h2)', proc.stdout)
         self.assertIn('history: OK', proc.stdout)
@@ -65,10 +96,52 @@ class RemoteSyncTest(unittest.TestCase):
 
     def test_failing_rm_cleanup_does_not_stop_next_host(self):
         proc, log = self.run_script('a:h1 b:h2', mv_fails_first=True, rm_fails=True)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn('cannot store snapshot for a', proc.stderr)
         self.assertIn('Syncing energy data from b (h2)', proc.stdout)
         self.assertIn('history: OK', proc.stdout)
+
+    def test_import_failure_is_nonzero_but_other_host_syncs(self):
+        proc, log = self.run_script('a:h1 b:h2', bodies_override={
+            'tokenatlas': 'case "$*" in *"--label a"*) echo boom >&2; exit 1;; esac; exit 0'})
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn('import failed for a', proc.stderr)
+        self.assertIn('Syncing energy data from b (h2)', proc.stdout)
+        self.assertIn('import ', log.split('--label a', 1)[1])  # b's import ran after a's failure
+        self.assertIn('history: OK', proc.stdout)
+
+    def test_snapshot_failure_is_nonzero(self):
+        proc, _ = self.run_script('a:h1', bodies_override={
+            'ssh': 'case "$*" in *snapshot*) echo nope >&2; exit 3;; esac; exit 0'})
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn('snapshot failed on a', proc.stderr)
+
+    def test_scp_failure_is_nonzero(self):
+        proc, _ = self.run_script('a:h1', bodies_override={'scp': 'echo nope >&2; exit 1'})
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn('scp failed for a', proc.stderr)
+
+    def test_rsync_real_error_is_nonzero_and_steps_continue(self):
+        proc, log = self.run_script('a:h1', bodies_override={'rsync': 'echo "Permission denied" >&2; exit 23'})
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn('ERROR (rsync exit 23)', proc.stderr)
+        self.assertEqual(log.count('rsync '), 4)
+        self.assertIn('history: OK', proc.stdout)
+
+    def test_missing_remote_files_are_benign(self):
+        proc, _ = self.run_script('a:h1', bodies_override={
+            'rsync': 'echo "rsync: link_stat No such file or directory" >&2; exit 23'})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('not found', proc.stdout)
+
+    def test_remote_without_tokenatlas_is_benign(self):
+        proc, log = self.run_script('a:h1', bodies_override={'ssh': 'exit 1'})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('history: not installed on a', proc.stdout)
+
+    def test_ssh_connection_failure_on_probe_is_nonzero(self):
+        proc, _ = self.run_script('a:h1', bodies_override={'ssh': 'exit 255'})
+        self.assertEqual(proc.returncode, 1, proc.stderr)
 
     def test_remote_commands_prepend_user_bin_to_path(self):
         proc, log = self.run_script('a:h1')
@@ -142,12 +215,12 @@ class RemoteSyncTimeoutTest(unittest.TestCase):
         e = {'PATH': f'{self.root / "bin"}:/usr/bin:/bin', 'HOME': str(self.root / 'home'),
              'STUB_LOG': str(self.log), 'REMOTE_HOSTS_OVERRIDE': hosts, **env}
         start = time.monotonic()
-        proc = subprocess.run(['bash', str(SCRIPT)], env=e, capture_output=True, text=True, timeout=60)
+        proc = run_group(e)
         return proc, time.monotonic() - start
 
     def test_stalled_host_times_out_and_next_host_runs(self):
         # ssh hangs for host "stuck" only; the healthy host answers at once.
-        self.stub('ssh', 'case "$*" in *stuck*) sleep 1000;; esac; exit 0')
+        self.stub('ssh', f'case "$*" in *stuck*) echo $$ > "{self.root}/ssh.pid"; exec sleep 1000;; esac; exit 0')
         self.stub('rsync', 'exit 0')
         self.stub('tokenatlas', 'exit 0')
         self.stub('scp', 'touch "${@: -1}"')
@@ -158,9 +231,31 @@ class RemoteSyncTimeoutTest(unittest.TestCase):
         self.assertIn('stuck: ERROR (timeout after 3s)', proc.stderr)
         self.assertIn('Syncing energy data from b (healthy)', proc.stdout)
         self.assertIn('history: OK', proc.stdout)
+        pid = int((self.root / 'ssh.pid').read_text().split()[0])
         time.sleep(0.5)
-        left = subprocess.run(['pgrep', '-f', 'sleep 1000'], capture_output=True, text=True).stdout.split()
-        self.assertEqual(left, [], 'killed host left a sleeping child behind')
+        self.assertFalse(pid_alive(pid), 'killed host left its ssh behind')
+
+    def test_term_kills_worker_group(self):
+        self.stub('ssh', f'echo $$ > "{self.root}/ssh.pid"; exec sleep 1000')
+        env = {'PATH': f'{self.root / "bin"}:/usr/bin:/bin', 'HOME': str(self.root / 'home'),
+               'STUB_LOG': str(self.log), 'REMOTE_HOSTS_OVERRIDE': 'a:h1'}
+        proc = subprocess.Popen(['bash', str(SCRIPT)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, start_new_session=True)
+        self.addCleanup(kill_group, proc)
+        pidfile = self.root / 'ssh.pid'
+        deadline = time.monotonic() + 5
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(1)
+        pid = int(pidfile.read_text().split()[0])
+        self.assertTrue(pid_alive(pid))
+        proc.send_signal(signal.SIGTERM)  # the script only, not its group
+        gone = time.monotonic() + 3
+        while pid_alive(pid) and time.monotonic() < gone:
+            time.sleep(0.1)
+        self.assertFalse(pid_alive(pid), 'fake ssh survived TERM of remote_sync.sh')
+        self.assertEqual(proc.wait(timeout=5), 143)
+        proc.communicate()
 
     def test_hanging_rsync_is_killed_too(self):
         self.stub('ssh', 'exit 0')
@@ -188,8 +283,9 @@ class RemoteSyncTimeoutTest(unittest.TestCase):
         self.assertIn('BatchMode=yes', rsync)
 
     def test_ssh_opts_overridable(self):
-        for name in ('ssh', 'rsync', 'tokenatlas', 'scp'):
-            self.stub(name, 'exit 0')
+        for name, body in (('ssh', 'exit 0'), ('rsync', 'exit 0'), ('tokenatlas', 'exit 0'),
+                           ('scp', 'touch "${@: -1}"')):
+            self.stub(name, body)
         proc, _ = self.run_sync('a:h1', TOKENATLAS_SSH_OPTS='-o ConnectTimeout=3')
         self.assertEqual(proc.returncode, 0, proc.stderr)
         log = self.log.read_text()

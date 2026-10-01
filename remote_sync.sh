@@ -70,11 +70,12 @@ valid_pair() {
 pull() {
     local tag="$1" host="$2" remote_name="$3" local_name="$4" label="$5"
     local rsync_err
-    rsync_err=$(rsync -az --timeout=60 -e "ssh $SSH_OPTS_STR" -- "$host:~/.claude/$remote_name" "$DEST/$local_name" 2>&1) && {
+    local rc=0
+    rsync_err=$(rsync -az --timeout=60 -e "ssh $SSH_OPTS_STR" -- "$host:~/.claude/$remote_name" "$DEST/$local_name" 2>&1) || rc=$?
+    if [[ $rc -eq 0 ]]; then
         echo "  $label: OK"
-        return
-    }
-    local rc=$?
+        return 0
+    fi
     # rsync exits 23 ("some files/attrs were not transferred") for a missing
     # remote file, but also for other partial-transfer failures — permission
     # denied on the remote read, a local write failure, etc. — that exit code
@@ -87,42 +88,50 @@ pull() {
         echo "  $label: not found ($tag scanner may not have run yet)"
     else
         echo "  $label: ERROR (rsync exit $rc) — $rsync_err" >&2
+        return 1
     fi
 }
 
 # Merge the remote machine's history database (tokenatlas snapshot -> scp -> local import).
-# Any failure is reported for this host only; the loop continues with the next one.
+# Any failure is reported for this host only (return 1) and the loop continues with the next host.
+# A remote without tokenatlas is a benign absence (return 0).
 sync_history() {
     local tag="$1" host="$2"
     local state="$HOME/.local/state/tokenatlas" remote_dir
     remote_dir="$state/remote"
     # Non-interactive ssh has a minimal PATH too, so each remote call prepends ~/.local/bin.
     # Single quotes: the remote shell expands $HOME and ~, not this one.
-    if ! ssh "${SSH_OPTS[@]}" -- "$host" 'PATH="$HOME/.local/bin:$PATH"; command -v tokenatlas || command -v energy-monitor' >/dev/null 2>&1; then
+    # Exit 1 from `command -v` means genuinely absent; anything else (255 = connection failure, ...) is an error.
+    local probe_rc=0
+    ssh "${SSH_OPTS[@]}" -- "$host" 'PATH="$HOME/.local/bin:$PATH"; command -v tokenatlas || command -v energy-monitor' >/dev/null 2>&1 || probe_rc=$?
+    if [[ $probe_rc -eq 1 ]]; then
         echo "  history: not installed on $tag"
         return 0
+    elif [[ $probe_rc -ne 0 ]]; then
+        echo "  history: ERROR cannot check $tag for tokenatlas (ssh exit $probe_rc)" >&2
+        return 1
     fi
     if ! command -v tokenatlas >/dev/null 2>&1; then
         echo "  history: ERROR tokenatlas is not installed locally" >&2
-        return 0
+        return 1
     fi
-    { mkdir -p "$remote_dir" && chmod 700 "$remote_dir"; } || { echo "  history: ERROR cannot create $remote_dir" >&2; return 0; }
+    { mkdir -p "$remote_dir" && chmod 700 "$remote_dir"; } || { echo "  history: ERROR cannot create $remote_dir" >&2; return 1; }
     local err
     if ! err=$(ssh "${SSH_OPTS[@]}" -- "$host" 'PATH="$HOME/.local/bin:$PATH"; c=$(command -v tokenatlas || command -v energy-monitor) && "$c" snapshot ~/.local/state/tokenatlas/snapshot.sqlite3' 2>&1 >/dev/null); then
         echo "  history: ERROR snapshot failed on $tag: $err" >&2
-        return 0
+        return 1
     fi
     if ! err=$(scp -q "${SSH_OPTS[@]}" -- "$host:.local/state/tokenatlas/snapshot.sqlite3" "$remote_dir/$tag.sqlite3.part" 2>&1); then
         rm -f -- "$remote_dir/$tag.sqlite3.part" 2>/dev/null || true
         echo "  history: ERROR scp failed for $tag: $err" >&2
-        return 0
+        return 1
     fi
     # Under set -e an unguarded failure here would abort the whole loop, not just this host.
     if ! err=$(chmod 600 "$remote_dir/$tag.sqlite3.part" 2>&1 &&
                mv -f "$remote_dir/$tag.sqlite3.part" "$remote_dir/$tag.sqlite3" 2>&1); then
         rm -f -- "$remote_dir/$tag.sqlite3.part" 2>/dev/null || true
         echo "  history: ERROR cannot store snapshot for $tag: $err" >&2
-        return 0
+        return 1
     fi
     local db_args=()
     local db="${TOKENATLAS_DB:-${ENERGY_MONITOR_DB:-}}"
@@ -131,6 +140,7 @@ sync_history() {
         echo "  history: OK"
     else
         echo "  history: ERROR import failed for $tag: $err" >&2
+        return 1
     fi
 }
 
@@ -146,22 +156,27 @@ kill_tree() {
     kill "-$sig" "$pid" 2>/dev/null || true
 }
 
+# Every step still runs after a failure; the host returns 1 if any step had a real failure.
 sync_host() {
-    local tag="$1" host="$2"
+    local tag="$1" host="$2" fail=0
     echo "Syncing energy data from $tag ($host)..."
-    pull "$tag" "$host" "pi_journal.jsonl" "${tag}_journal.jsonl" "journal"
-    pull "$tag" "$host" "pi_daily_rollup.jsonl" "${tag}_daily_rollup.jsonl" "rollup"
-    pull "$tag" "$host" "interactive_journal_raw.jsonl" "${tag}_interactive_journal.jsonl" "interactive journal"
-    pull "$tag" "$host" "interactive_rollup_raw.jsonl" "${tag}_interactive_daily_rollup.jsonl" "interactive rollup"
-    sync_history "$tag" "$host"
+    pull "$tag" "$host" "pi_journal.jsonl" "${tag}_journal.jsonl" "journal" || fail=1
+    pull "$tag" "$host" "pi_daily_rollup.jsonl" "${tag}_daily_rollup.jsonl" "rollup" || fail=1
+    pull "$tag" "$host" "interactive_journal_raw.jsonl" "${tag}_interactive_journal.jsonl" "interactive journal" || fail=1
+    pull "$tag" "$host" "interactive_rollup_raw.jsonl" "${tag}_interactive_daily_rollup.jsonl" "interactive rollup" || fail=1
+    sync_history "$tag" "$host" || fail=1
+    return "$fail"
 }
 
 # Run sync_host in a background subshell with a deadline. Returns 124 on timeout.
+# The active worker is tracked in WORKER_PID so a termination signal can clean it up.
+WORKER_PID=""
 run_with_deadline() {
     local pid deadline waited=0
     set -m
     ( sync_host "$1" "$2" ) &
     pid=$!
+    WORKER_PID=$pid
     set +m
     deadline=$HOST_TIMEOUT
     while kill -0 "$pid" 2>/dev/null; do
@@ -170,6 +185,7 @@ run_with_deadline() {
             sleep 1
             kill_tree "$pid" KILL
             { wait "$pid"; } 2>/dev/null || true
+            WORKER_PID=""
             return 124
         fi
         sleep 1
@@ -177,8 +193,29 @@ run_with_deadline() {
     done
     local rc=0
     wait "$pid" || rc=$?
+    WORKER_PID=""
     return "$rc"
 }
+
+# On TERM/INT/HUP: TERM the worker's process group, give it 2 s, KILL it, reap it, exit 128+signal.
+on_signal() {
+    local code="$1" i
+    trap '' TERM INT HUP
+    if [[ -n "$WORKER_PID" ]]; then
+        kill_tree "$WORKER_PID" TERM
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+            kill -0 "$WORKER_PID" 2>/dev/null || break
+            sleep 0.2
+        done
+        kill_tree "$WORKER_PID" KILL
+        { wait "$WORKER_PID"; } 2>/dev/null || true
+        WORKER_PID=""
+    fi
+    exit "$code"
+}
+trap 'on_signal 143' TERM
+trap 'on_signal 130' INT
+trap 'on_signal 129' HUP
 
 overall_rc=0
 for entry in "${REMOTE_HOSTS[@]}"; do
