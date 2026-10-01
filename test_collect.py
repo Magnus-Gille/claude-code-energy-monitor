@@ -1,6 +1,8 @@
 """tokenatlas collect: kernel lock, step order, remote-sync timeout, exit codes. Fakes only; no real host is contacted."""
+import contextlib
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -13,10 +15,10 @@ ROOT = Path(__file__).parent
 POSIX = os.name != 'nt'
 
 FAKE_SYNC = r'''#!/usr/bin/env bash
-echo "sync $(python3 -c 'import time;print(time.time())') hosts=${REMOTE_HOSTS_OVERRIDE:-} report_exists=$([ -f "$STATE/report.html" ] && echo 1 || echo 0)" >> "$CALLS"
+echo "sync $(python3 -c 'import time;print(time.time())') hosts=${REMOTE_HOSTS_OVERRIDE:-} db=${TOKENATLAS_DB:-} report_exists=$([ -f "$STATE/report.html" ] && echo 1 || echo 0)" >> "$CALLS"
 case "${FAKE_MODE:-ok}" in
   fail) echo "fake failure" >&2; exit 3;;
-  hang) sleep 1000 & echo $! > "$CHILD_PID"; wait;;
+  hang) echo $$ > "$SYNC_PID"; sleep 1000 & echo $! > "$CHILD_PID"; wait;;
 esac
 exit 0
 '''
@@ -48,12 +50,15 @@ class CollectBase(unittest.TestCase):
     def env(self, **extra):
         env = {k: v for k, v in os.environ.items() if k not in ('REMOTE_HOSTS_OVERRIDE', 'TOKENATLAS_REMOTE_SYNC')}
         env.update(HOME=str(self.home), USERPROFILE=str(self.home), XDG_STATE_HOME=str(self.tmp / 'state'),
-                   STATE=str(self.state), CALLS=str(self.calls), CHILD_PID=str(self.child_pid),
+                   STATE=str(self.state), CALLS=str(self.calls), CHILD_PID=str(self.child_pid), SYNC_PID=str(self.tmp / 'sync.pid'),
                    PYTHONPATH=str(ROOT), **extra)
         return env
 
     def popen(self, *args, **extra):
-        return subprocess.Popen([sys.executable, '-m', 'tokenatlas', 'collect', *args], env=self.env(**extra), cwd=ROOT,
+        pre = []
+        if args and args[0] == '--db':
+            pre, args = list(args[:2]), args[2:]
+        return subprocess.Popen([sys.executable, '-m', 'tokenatlas', *pre, 'collect', *args], env=self.env(**extra), cwd=ROOT,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def collect(self, *args, timeout=60, **extra):
@@ -143,6 +148,70 @@ class CollectTest(CollectBase):
         time.sleep(0.3)
         self.assertFalse(alive(pid), 'the sleeping grandchild survived the timeout')
 
+    def wait_for(self, path, secs=15):
+        deadline = time.monotonic() + secs
+        while not path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(path.exists(), f'{path.name} never appeared')
+        time.sleep(0.2)
+        return int(path.read_text().split()[0])
+
+    def reap_group(self):
+        sync_pid = self.tmp / 'sync.pid'
+        if sync_pid.exists():
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(int(sync_pid.read_text()), signal.SIGKILL)
+
+    def test_custom_db_reaches_the_sync(self):
+        custom = self.tmp / 'other' / 'my.sqlite3'
+        proc = self.collect('--db', str(custom), '--remote', 'pi:myhost', '--remote-sync', str(self.sync))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn(f'db={custom}', self.sync_calls()[0])
+        self.assertTrue(custom.exists())
+
+    @unittest.skipUnless(POSIX, 'process groups and flock are POSIX only')
+    def test_lock_outlives_a_killed_collector_while_the_sync_runs(self):
+        self.addCleanup(self.reap_group)
+        proc = self.popen('--remote', 'pi:myhost', '--remote-sync', str(self.sync), FAKE_MODE='hang')
+        self.addCleanup(lambda: (proc.kill(), proc.wait(), proc.stdout.close(), proc.stderr.close()))
+        child = self.wait_for(self.child_pid)
+        proc.send_signal(signal.SIGKILL)
+        proc.wait()
+        second = self.collect()
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn('already running', second.stdout)
+        self.assertTrue(alive(child))
+
+    @unittest.skipUnless(POSIX, 'signals and process groups are POSIX only')
+    def test_sigterm_terminates_the_sync_tree(self):
+        self.addCleanup(self.reap_group)
+        proc = self.popen('--remote', 'pi:myhost', '--remote-sync', str(self.sync), FAKE_MODE='hang')
+        self.addCleanup(lambda: (proc.kill(), proc.wait(), proc.stdout.close(), proc.stderr.close()))
+        child = self.wait_for(self.child_pid)
+        leader = self.wait_for(self.tmp / 'sync.pid')
+        proc.send_signal(signal.SIGTERM)
+        self.assertEqual(proc.wait(timeout=20), 143)
+        self.assertFalse(alive(child))
+        self.assertFalse(alive(leader))
+        self.assertEqual(self.collect().returncode, 0)  # lock free again
+
+    @unittest.skipUnless(POSIX and shutil.which('bash'), 'the packaged script needs bash and POSIX groups')
+    def test_timeout_leaves_no_survivor_with_the_packaged_script_and_term_resistant_ssh(self):
+        bindir = self.tmp / 'bin'
+        bindir.mkdir()
+        pids = self.tmp / 'ssh.pids'
+        for name, body in (('ssh', f'trap "" TERM; echo $$ >> "{pids}"; sleep 1000 & echo $! >> "{pids}"; wait'),
+                           ('rsync', 'exit 0'), ('scp', 'exit 0'), ('tokenatlas', 'exit 0')):
+            (bindir / name).write_text(f'#!/bin/bash\n{body}\n')
+            (bindir / name).chmod(0o755)
+        self.addCleanup(lambda: [os.kill(int(x), signal.SIGKILL) for x in pids.read_text().split() if alive(int(x))] if pids.exists() else None)
+        proc = self.collect('--remote', 'a:h1', '--sync-timeout', '3', PATH=f'{bindir}:/usr/bin:/bin', timeout=60)
+        self.assertIn('remote sync: timeout after 3s', proc.stdout, proc.stdout + proc.stderr)
+        self.assertEqual(proc.returncode, 1)
+        time.sleep(0.3)
+        found = [int(x) for x in pids.read_text().split()]
+        self.assertTrue(found)
+        self.assertEqual([x for x in found if alive(x)], [])
 
     @unittest.skipUnless(os.name == 'nt', 'Windows behaviour')
     def test_windows_skips_remote_sync_but_reports(self):
@@ -184,6 +253,27 @@ class CollectLockTest(CollectBase):
     def test_lock_released_after_normal_run(self):
         self.collect()
         proc = self.collect()
+        self.assertEqual(self.steps(proc.stdout), ['refresh', 'report'])
+
+
+WIN_HOLDER = '''import msvcrt,sys
+f=open(sys.argv[1],'a+');msvcrt.locking(f.fileno(),msvcrt.LK_NBLCK,1);print('held',flush=True);sys.stdin.read()'''
+
+
+@unittest.skipUnless(os.name == 'nt', 'msvcrt.locking is Windows only')
+class CollectWindowsLockTest(CollectBase):
+    def test_msvcrt_contention_then_release(self):
+        holder = subprocess.Popen([sys.executable, '-c', WIN_HOLDER, str(self.state / 'collect.lock')],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (holder.kill(), holder.wait()))
+        self.assertEqual(holder.stdout.readline().strip(), 'held')
+        busy = self.collect()
+        self.assertEqual(busy.returncode, 0, busy.stdout + busy.stderr)
+        self.assertIn('already running', busy.stdout)
+        holder.stdin.close()
+        holder.wait(timeout=20)
+        proc = self.collect()
+        self.assertNotIn('already running', proc.stdout)
         self.assertEqual(self.steps(proc.stdout), ['refresh', 'report'])
 
 

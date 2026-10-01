@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 PACKAGED_SYNC=Path(__file__).with_name('remote_sync.sh')
+GRACE=5  # seconds between TERM and KILL of the sync group; longer than remote_sync.sh's own 2 s
 
 
 def log(msg):
@@ -20,6 +21,7 @@ def _lock(fd):
     """Take the exclusive non-blocking lock; False when another process holds it. The kernel drops it on exit or crash."""
     if os.name=='nt':
         import msvcrt
+        os.lseek(fd,0,os.SEEK_SET)
         try:msvcrt.locking(fd,msvcrt.LK_NBLCK,1)
         except OSError:return False
         return True
@@ -58,22 +60,47 @@ def _hosts(args,state):
     except OSError:return ''
 
 
-def _sync(script,hosts,timeout):
-    """Run the remote sync script in its own session; on timeout TERM the whole group, wait 2 s, then KILL it."""
+class Terminated(BaseException):
+    """Raised by the signal handler so the sync group is cleaned up before collect exits 128+signal."""
+    def __init__(self,sig):super().__init__(sig);self.sig=sig
+
+
+def _on_signal(sig,_frame):raise Terminated(sig)
+
+
+def _stop_group(proc,grace=GRACE):
+    """TERM the sync's process group, wait up to grace s for every member to go (the leader is reaped as it exits), then KILL the group."""
+    with contextlib.suppress(ProcessLookupError,PermissionError):os.killpg(proc.pid,signal.SIGTERM)
+    deadline=time.monotonic()+grace
+    while time.monotonic()<deadline:
+        proc.poll()
+        try:os.killpg(proc.pid,0)
+        except (ProcessLookupError,PermissionError):break
+        time.sleep(0.1)
+    with contextlib.suppress(ProcessLookupError,PermissionError):os.killpg(proc.pid,signal.SIGKILL)
+    proc.wait()
+
+
+def _sync(script,hosts,timeout,db,lock_fd):
+    """Run the remote sync script in its own session, holding the collect lock (the fd is inherited, so the lock lives until the whole
+    tree is gone even if collect dies). On timeout or a signal: TERM the group, wait longer than the script's own 2 s grace, KILL it."""
     if not script.is_file():log(f'{script} not found');return 127
-    proc=subprocess.Popen(['bash',str(script)],env={**os.environ,'REMOTE_HOSTS_OVERRIDE':hosts},start_new_session=True)
+    # One group: remote_sync.sh must not use job control, so every descendant stays in the group that is signalled.
+    env={**os.environ,'REMOTE_HOSTS_OVERRIDE':hosts,'TOKENATLAS_DB':str(db),'TOKENATLAS_SINGLE_GROUP':'1'}
+    proc=subprocess.Popen(['bash',str(script)],env=env,start_new_session=True,pass_fds=(lock_fd,))
     try:return proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        log(f'remote sync: timeout after {timeout}s')
-        for sig,wait in ((signal.SIGTERM,2),(signal.SIGKILL,None)):
-            with contextlib.suppress(ProcessLookupError,PermissionError):os.killpg(proc.pid,sig)
-            try:proc.wait(timeout=wait);break
-            except subprocess.TimeoutExpired:pass
-        with contextlib.suppress(ProcessLookupError,PermissionError):os.killpg(proc.pid,signal.SIGKILL)  # stragglers of an already exited leader
-        return 124
+        log(f'remote sync: timeout after {timeout}s');_stop_group(proc);return 124
+    except BaseException:
+        _stop_group(proc);raise
 
 
 def run(args):
+    try:return _run(args)
+    except Terminated as exc:log(f'terminated by signal {exc.sig}');return 128+exc.sig
+
+
+def _run(args):
     from tokenatlas import prompt_store
     from tokenatlas.__main__ import main,refresh_all
     from tokenatlas.history import History
@@ -82,6 +109,8 @@ def run(args):
     except OSError as exc:log(f'cannot open lock in {state}: {exc}');return 1
     with lock:
         if not _lock(lock.fileno()):log('already running');return 0
+        for name in ('SIGTERM','SIGINT','SIGHUP'):
+            if hasattr(signal,name):signal.signal(getattr(signal,name),_on_signal)
         def refresh():
             with History(db) as history:result=refresh_all(history)
             return 0 if result['status']=='ok' else 2
@@ -95,6 +124,6 @@ def run(args):
             script=Path(args.remote_sync or os.environ.get('TOKENATLAS_REMOTE_SYNC') or PACKAGED_SYNC)
             if os.name=='nt':log('remote sync skipped: bash is not assumed on Windows')
             else:
-                failed|=_step('remote sync',lambda:_sync(script,hosts,args.sync_timeout))!=0
+                failed|=_step('remote sync',lambda:_sync(script,hosts,args.sync_timeout,db,lock.fileno()))!=0
                 if not args.no_report:failed|=_step('report after sync',report())!=0  # partial imports show up even after a failed sync
         return int(failed)

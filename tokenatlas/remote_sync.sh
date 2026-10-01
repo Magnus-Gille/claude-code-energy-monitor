@@ -184,7 +184,8 @@ sync_host() {
 WORKER_PID=""
 run_with_deadline() {
     local pid deadline waited=0
-    set -m
+    # Under `tokenatlas collect` (TOKENATLAS_SINGLE_GROUP=1) every descendant stays in the collector's process group, which it signals.
+    [[ -n "${TOKENATLAS_SINGLE_GROUP:-}" ]] || set -m
     ( sync_host "$1" "$2" ) &
     WORKER_PID=$!
     pid=$WORKER_PID
