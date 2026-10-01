@@ -78,6 +78,7 @@ class CollectTest(CollectBase):
         self.assertEqual(self.sync_calls(), [])
         self.assertTrue((self.state / 'collect.lock').exists(), 'the lock file is kept')
 
+    @unittest.skipIf(os.name == 'nt', 'the remote sync is a bash script; collect skips it on Windows')
     def test_step_order_with_keep_text_and_sync(self):
         (self.state / 'top-prompts.json').write_text('{"version":2,"k":5,"by":"cost","entries":[]}\n')
         (self.state / 'top-prompts.json').chmod(0o600)
@@ -94,18 +95,21 @@ class CollectTest(CollectBase):
         proc = self.collect()
         self.assertNotIn('top', self.steps(proc.stdout))
 
+    @unittest.skipIf(os.name == 'nt', 'the remote sync is a bash script; collect skips it on Windows')
     def test_second_report_runs_when_sync_fails(self):
         proc = self.collect('--remote', 'pi:myhost', '--remote-sync', str(self.sync), FAKE_MODE='fail')
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertEqual(self.steps(proc.stdout), ['refresh', 'report', 'remote sync', 'report after sync'])
         self.assertIn('remote sync exit=3', proc.stdout)
 
+    @unittest.skipIf(os.name == 'nt', 'the remote sync is a bash script; collect skips it on Windows')
     def test_no_report_skips_both_reports(self):
         proc = self.collect('--no-report', '--remote', 'pi:myhost', '--remote-sync', str(self.sync))
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(self.steps(proc.stdout), ['refresh', 'remote sync'])
         self.assertFalse((self.state / 'report.html').exists())
 
+    @unittest.skipIf(os.name == 'nt', 'the remote sync is a bash script; collect skips it on Windows')
     def test_hosts_from_env_and_file(self):
         self.collect('--remote-sync', str(self.sync), REMOTE_HOSTS_OVERRIDE='a:h1 b:h2')
         self.assertIn('hosts=a:h1 b:h2', self.sync_calls()[0])
@@ -114,12 +118,14 @@ class CollectTest(CollectBase):
         self.collect('--remote-sync', str(self.sync))
         self.assertIn('hosts=c:h3 d:h4', self.sync_calls()[0])
 
+    @unittest.skipIf(os.name == 'nt', 'the remote sync is a bash script; collect skips it on Windows')
     def test_remote_sync_env_override_and_packaged_default(self):
         self.collect('--remote', 'pi:myhost', TOKENATLAS_REMOTE_SYNC=str(self.sync))
         self.assertEqual(len(self.sync_calls()), 1)
         from tokenatlas import collect
         self.assertTrue(collect.PACKAGED_SYNC.is_file())
 
+    @unittest.skipIf(os.name == 'nt', 'the remote sync is a bash script; collect skips it on Windows')
     def test_missing_sync_script_is_a_failure(self):
         proc = self.collect('--remote', 'pi:myhost', '--remote-sync', str(self.tmp / 'nope.sh'))
         self.assertEqual(proc.returncode, 1, proc.stdout)
@@ -136,6 +142,13 @@ class CollectTest(CollectBase):
         pid = int(self.child_pid.read_text())
         time.sleep(0.3)
         self.assertFalse(alive(pid), 'the sleeping grandchild survived the timeout')
+
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows behaviour')
+    def test_windows_skips_remote_sync_but_reports(self):
+        proc = self.collect('--remote-sync', str(self.sync), REMOTE_HOSTS_OVERRIDE='a:h1')
+        self.assertIn('remote sync skipped', proc.stdout)
+        self.assertFalse(self.calls.exists() and self.sync_calls(), proc.stdout)
 
 
 HOLDER = '''import fcntl,sys,time
