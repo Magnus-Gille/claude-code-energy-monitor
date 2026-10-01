@@ -267,7 +267,7 @@ class sqlite_ro:
 @unittest.skipIf(os.name == 'nt', 'remote_sync.sh targets macOS/Linux hosts')
 class RemoteSyncScriptTests(unittest.TestCase):
     def test_script_syntax_and_history_step(self):
-        script = Path(__file__).with_name('remote_sync.sh')
+        script = Path(__file__).with_name('tokenatlas') / 'remote_sync.sh'
         self.assertEqual(subprocess.run(['bash', '-n', str(script)]).returncode, 0)
         text = script.read_text()
         for needle in ('command -v tokenatlas', 'snapshot', 'history: not installed on', 'import'):

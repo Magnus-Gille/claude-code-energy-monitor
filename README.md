@@ -134,12 +134,38 @@ finds nothing new leaves the revision alone; a re-import of identical rows with 
 
 The report is available in Swedish and English. `--lang auto|sv|en` (on `report` and `open`, default `auto`) picks the language: `auto` follows the browser (`sv` gives Swedish, anything else English). The SV/EN toggle in the report header switches live and remembers the choice in the browser when storage is available; an explicit `--lang` wins over a remembered choice. `--lang` is part of the report identity, so changing it rebuilds a conditional report.
 
+`tokenatlas collect` does all of this in one scheduled command. Nothing to copy: the remote sync script
+ships inside the package (`tokenatlas/remote_sync.sh`; override with `--remote-sync PATH` or
+`TOKENATLAS_REMOTE_SYNC`). The steps run in this order, so local results never wait for a remote machine:
+
+1. refresh all harnesses (`refresh --all`)
+2. `top --keep-text`, only if you opted in (`top-prompts.json` exists in the state directory)
+3. the conditional private report to `report.html` in the state directory (`--if-changed --max-age 1h`)
+4. then, only if hosts are configured (`--remote tag:host`, repeatable; else `REMOTE_HOSTS_OVERRIDE`; else a
+   `remote-hosts` file of space-separated `tag:host` pairs in the state directory), the remote sync with
+   bounded ssh/scp/rsync calls (see [Other machines](docs/remote-machines.md)). Skipped on Windows.
+5. the conditional report again after every attempted sync, successful or not, so partial imports show up
+
+`--no-report` skips both reports and `--lang auto|sv|en` is passed to them. The exit code is 0 when every step
+succeeded and 1 when any failed (a failed sync still gets its second report).
+
+One run at a time, by a kernel lock: `collect` takes an exclusive `flock` on `collect.lock` in the state
+directory (`msvcrt.locking` on Windows). A second run prints `collect: already running` and exits 0. The kernel
+releases the lock when the process exits or crashes, so there is no stale-lock cleanup; the file itself is kept.
+
+Time limits: every ssh/scp/rsync call is bounded, each host gets `TOKENATLAS_HOST_TIMEOUT` seconds (default 300), and
+the whole sync gets `--sync-timeout` seconds (default 600). Past that, `collect` sends SIGTERM to the sync's whole
+process group, waits 2 seconds, then SIGKILL, and logs `remote sync: timeout after Ns`. The log is one line per
+step with its exit status and duration.
+
 Cron, every 30 minutes (use the full path; cron has a short `PATH`):
 
-    */30 * * * * ~/.local/bin/tokenatlas refresh --all && ~/.local/bin/tokenatlas report --html ~/.local/state/tokenatlas/report.html --private --if-changed --max-age 1h
+    */30 * * * * $HOME/.local/bin/tokenatlas collect --remote pi:myhost >> ~/Library/Logs/tokenatlas/collect.log 2>&1
 
-On macOS prefer launchd: it runs a missed job after sleep, cron does not. Save as
-`~/Library/LaunchAgents/com.tokenatlas.report.plist` and run `launchctl load` on it:
+(`mkdir -p ~/Library/Logs/tokenatlas` first; on Linux use e.g. `~/.local/state/tokenatlas/collect.log`.) Without
+remote machines, drop `--remote`. On macOS prefer launchd: it runs a missed job after sleep, cron does not. Save as
+`~/Library/LaunchAgents/com.tokenatlas.report.plist` (replace `YOU` with your user name; launchd does not expand
+`$HOME`) and run `launchctl load` on it:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -148,9 +174,11 @@ On macOS prefer launchd: it runs a missed job after sleep, cron does not. Save a
   <key>Label</key><string>com.tokenatlas.report</string>
   <key>StartInterval</key><integer>1800</integer>
   <key>ProgramArguments</key><array>
-    <string>/bin/sh</string><string>-c</string>
-    <string>$HOME/.local/bin/tokenatlas refresh --all &amp;&amp; $HOME/.local/bin/tokenatlas report --html $HOME/.local/state/tokenatlas/report.html --private --if-changed --max-age 1h</string>
+    <string>/Users/YOU/.local/bin/tokenatlas</string><string>collect</string>
+    <string>--remote</string><string>pi:myhost</string>
   </array>
+  <key>StandardOutPath</key><string>/Users/YOU/Library/Logs/tokenatlas/collect.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/tokenatlas/collect.log</string>
 </dict></plist>
 ```
 

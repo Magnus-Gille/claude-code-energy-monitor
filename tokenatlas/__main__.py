@@ -245,6 +245,12 @@ def main(argv=None):
     overhead.add_argument('--harness',choices=('claude','codex','pi','opencode'))
     overhead.add_argument('--since',help='Inclusive ISO timestamp of the session start.')
     overhead.add_argument('--json',action='store_true')
+    collect=commands.add_parser('collect',help='One scheduled run under a lock: refresh, top text if opted in, report, remote sync, report again.')
+    collect.add_argument('--remote',action='append',default=[],metavar='TAG:HOST',help='Remote machine to sync (repeatable); else REMOTE_HOSTS_OVERRIDE or the remote-hosts file in the state directory.')
+    collect.add_argument('--remote-sync',type=Path,help='Remote sync script; default the packaged one, or $TOKENATLAS_REMOTE_SYNC.')
+    collect.add_argument('--sync-timeout',type=int,default=600,help='Seconds for the whole remote sync before its process group is killed (default 600).')
+    collect.add_argument('--no-report',action='store_true',help='Do not build the report.')
+    collect.add_argument('--lang',choices=('auto','sv','en'),default='auto',help='Report language.')
     commands.add_parser('doctor',help='Show source availability, import errors and known coverage limits.')
     args=parser.parse_args(argv)
     if args.db is None:args.db=default_db()
@@ -272,6 +278,9 @@ def main(argv=None):
             if args.command=='insights' and args.days:end=datetime.now(ZoneInfo('UTC'));start=end-timedelta(days=args.days)  # one captured now: the exclusive end
             if args.command=='report' and args.html:_output_path(args.html,args.db)
         if args.command=='open':path=_output_path(args.html or args.db.parent/'report.html',args.db)
+        if args.command=='collect':
+            from tokenatlas import collect as _collect
+            return _collect.run(args)
         if args.command=='overhead':
             from tokenatlas import overhead as _overhead
             return _overhead.run(args)
