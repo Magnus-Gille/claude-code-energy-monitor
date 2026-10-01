@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-10-01
+
 ### Fixed
 
 - Remote sync with macOS `/usr/bin/rsync` (openrsync): a missing remote file is again a benign "not found" instead of an error that made `collect` exit 1 on every run (#43). openrsync prints a `receiver has empty file list` warning and no `rsync error:` summary; that warning is accepted only together with the sender's missing-file line for the requested file.
