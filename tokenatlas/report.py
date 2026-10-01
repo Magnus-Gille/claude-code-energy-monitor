@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from tokenatlas import __version__
-from tokenatlas import insights, pricing, prompts
+from tokenatlas import energy, insights, pricing, prompts
 from tokenatlas.history import ALL_FIELDS
 
 PUBLIC_NAMES = dict(
@@ -179,9 +179,17 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
     # one captured `now` is the exclusive end of the 30-day window: later-dated observations are not 'the last 30 days'
     windows = [dict(id=wid, **insights.public(insights.cost_facts(records, table, start, end, name=display, memo=memo)))
                for wid, start, end in (('30d', now - timedelta(days=INSIGHT_DAYS), now), ('all', None, None))]
+    # the page's energy card (filter-following) sums tokens x per-class constant x a multiplier per (provider, model); only Claude tiers have one
+    # (the rest is unweighted, multiplier 1), keyed by the provider and model names as the rows carry them (after redaction)
+    weights = {}
+    for record, row in zip(records, rows):
+        mult, weighted = energy.multiplier(record.get('provider'), record.get('model'))
+        if weighted:
+            weights.setdefault(row['provider'], {})[row['model']] = mult
     report = dict(version=2, generated_at=now.isoformat(),
                   timezone=timezone_name, lang=lang, privacy='redacted' if redact else 'local',
-                  columns=encode_columns(rows), coverage=coverage, insights=dict(days=INSIGHT_DAYS, big_turn=insights.BIG_TURN, windows=windows))
+                  columns=encode_columns(rows), coverage=coverage,
+                  energy=dict(per_1k=energy.PER_1K, uncertainty=energy.UNCERTAINTY, tier_multipliers=energy.TIERS, multipliers=weights), insights=dict(days=INSIGHT_DAYS, big_turn=insights.BIG_TURN, windows=windows))
     if prompt_texts is not None:
         report['prompt_texts'] = {shown[':'.join(k)]: t for k, t in prompt_texts.items() if t and ':'.join(k) in shown}
     if prompt_context is not None:

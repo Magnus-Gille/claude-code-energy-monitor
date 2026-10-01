@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+### Added
+
+- Energy estimates in TokenAtlas (#61): an "Energi (uppskattning)" / "Energy (estimate)" card in the report that follows the page filters, and an `energy` fact in `tokenatlas insights` and the report's cost facts card. An order-of-magnitude proxy, not a measurement: the methodology's mid estimates per token class (`tokenatlas/energy.py`) x a Claude tier multiplier (haiku 0.3, sonnet 0.6, opus 1.0), rounded to 1, 2 or 5 per power of ten, with a mid / 3 to mid x 3 range. Models that are not a Claude tier are counted with multiplier 1 and the number of such requests is stated; incomplete observations make it a lower bound (`≥`).
+
 ## [1.7.0] - 2026-10-01
 
 ### Added

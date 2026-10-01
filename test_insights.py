@@ -73,9 +73,9 @@ class Shape(unittest.TestCase):
         self.assertEqual({f['id']: f['provenance'] for f in facts}['context_size'], 'measured')
         self.assertEqual({f['id']: f['provenance'] for f in facts}['model_share'], 'computed')
 
-    def test_only_unpriced_has_just_the_measured_fact(self):
+    def test_only_unpriced_has_only_price_free_facts(self):
         res = cost_facts([ob('u', model='mystery', fresh=10, read=0)], TABLE)
-        self.assertEqual([f['id'] for f in res['facts']], ['context_size'])
+        self.assertEqual([f['id'] for f in res['facts']], ['context_size', 'energy'])  # energy needs no price
         self.assertEqual((res['requests'], res['priced_requests'], res['unpriced_requests']), (1, 0, 1))
 
     def test_no_wording_of_advice(self):
