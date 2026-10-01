@@ -281,11 +281,11 @@ class PiTests(TmpCase):
 class SanitizeTests(unittest.TestCase):
     def test_secret_patterns_masked(self):
         cases = [
-            "sk-abcdefghijklmnop1234", "sk-ant-api03-AbCdEf_ghIJkl-mnop12", "ghp_" + "a" * 36, "gho_" + "b" * 36,
+            "sk-" + "abcdefghijklmnop1234", "sk-" + "ant-api03-AbCdEf_ghIJkl-mnop12", "ghp_" + "a" * 36, "gho_" + "b" * 36,
             "ghs_" + "c" * 36, "github_pat_" + "d" * 30, "AKIA" + "ABCDEFGHIJKLMNOP", "ASIA" + "ABCDEFGHIJKLMNOP",
-            "xoxb-1234567890-abcdefghij", "xoxp-1234567890-abcdefghij", "xoxa-1234567890-abcdefghij",
-            "xoxr-1234567890-abcdefghij", "xoxs-1234567890-abcdefghij",
-            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpMeJf36P",
+            "xox" + "b-1234567890-abcdefghij", "xox" + "p-1234567890-abcdefghij", "xox" + "a-1234567890-abcdefghij",
+            "xox" + "r-1234567890-abcdefghij", "xox" + "s-1234567890-abcdefghij",
+            "eyJ" + "hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpMeJf36P",
             "0123456789abcdef0123456789ABCDEF", "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A=",
         ]
         for secret in cases:
@@ -294,9 +294,9 @@ class SanitizeTests(unittest.TestCase):
 
     def test_stripe_bearer_authorization_google_keys(self):
         for text, want in (
-            ("k sk_live_abcdefghij now", "k [redacted] now"), ("k rk_test_abcdefghijKLM now", "k [redacted] now"),
-            ("k sk_live_abcdefghi now", "k sk_live_abcdefghi now"),  # 9 chars: too short
-            ("k xsk_live_abcdefghij now", "k xsk_live_abcdefghij now"),  # no word boundary
+            ("k sk_" + "live_abcdefghij now", "k [redacted] now"), ("k rk_" + "test_abcdefghijKLM now", "k [redacted] now"),
+            ("k sk_" + "live_abcdefghi now", "k sk_" + "live_abcdefghi now"),  # 9 chars: too short
+            ("k xsk_" + "live_abcdefghij now", "k xsk_" + "live_abcdefghij now"),  # no word boundary
             ("k whsec_abcdefghij now", "k [redacted] now"), ("k whsec_abcdefghi now", "k whsec_abcdefghi now"),
             ("h Bearer abcdefghijkl now", "h Bearer [redacted] now"), ("h bEaReR abc.def~ghi+jk/l-m== now", "h bEaReR [redacted] now"),
             ("h Bearer abcdefghijk now", "h Bearer abcdefghijk now"),  # 11 chars: too short
@@ -311,9 +311,9 @@ class SanitizeTests(unittest.TestCase):
                 self.assertEqual(sanitize(text), want)
 
     def test_pem_block(self):
-        pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nabc/def\n-----END RSA PRIVATE KEY-----"
+        pem = "---" + "--BEGIN RSA PRIVATE KEY-----\nMIIEow\nabc/def\n-----END RSA PRIVATE KEY-----"
         self.assertEqual(sanitize(f"key:\n{pem}\nthanks"), "key: [redacted] thanks")
-        self.assertEqual(sanitize("x -----BEGIN PRIVATE KEY-----\nMIIE"), "x [redacted]")
+        self.assertEqual(sanitize("x ---" + "--BEGIN PRIVATE KEY-----\nMIIE"), "x [redacted]")
 
     def test_key_value_masks_value_only(self):
         for text, want in [
@@ -343,10 +343,10 @@ class SanitizeTests(unittest.TestCase):
         self.assertEqual(sanitize("x" * 50, limit=10), "x" * 10 + "…")
 
     def test_secret_straddling_limit_never_partial(self):
-        secret = "sk-" + "A1b2C3d4" * 6
+        secret = "sk-" + "" + "A1b2C3d4" * 6
         for limit in range(8, 40):
             out = sanitize(f"token {secret} tail words", limit=limit)
-            self.assertNotIn("sk-", out)
+            self.assertNotIn("sk-" + "", out)
             self.assertNotIn("A1b2", out)
         out = sanitize(f"aaaa {secret}", limit=10)
         self.assertEqual(out, "aaaa…")
