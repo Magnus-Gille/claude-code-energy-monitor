@@ -11,12 +11,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from tokenatlas import why
 from tokenatlas import __version__
-from tokenatlas import sessions
-from tokenatlas.history import History, summarize
-from tokenatlas import insights, pricing, prompt_store, prompts
-from tokenatlas.report import build_report, coverage_key, read_report_state, render_report, report_state, write_report
+from tokenatlas import statusline
+# The heavy modules (history, report, insights, pricing, why, ...) are imported where they are used, so `tokenatlas statusline`, which Claude Code
+# runs on every status update, starts without them.
 
 DEFAULT_TIMEZONE='Europe/Stockholm'
 FILTERS=('start','end','harness','project','session','turn','model','effort','provider','agent')
@@ -73,7 +71,8 @@ def _with_problems(entry,problems):
 
 
 def refresh_all(history):
-    """Refresh every harness from its default roots; absent ones are reported, an OSError only fails its own harness."""
+    """Refresh every harness from its default roots; absent ones are reported, an OSError only fails its own harness. Then rewrites the statusline cache."""
+    from tokenatlas import why
     roots={h:why.harness_root(h)[0] for h in ('claude','codex','pi','opencode')}
     order=('ok','partial','missing','error')
     rank=lambda s:order.index(s) if s in order else len(order)
@@ -92,6 +91,7 @@ def refresh_all(history):
             entry={'harness':name,'status':'error','errors':[f'{type(exc).__name__}: {exc}']}
         entries.append(entry)
         worst=max(worst,entry['status'],key=rank)
+    statusline.refresh_cache(history)
     return {'status':worst,'harnesses':entries}
 
 
@@ -155,6 +155,7 @@ def default_db():
 
 def _visible(history,db,records=None):
     """(texts, contexts) a private report may embed (the current global top k); the history is read only when a store exists."""
+    from tokenatlas import pricing, prompt_store
     store=prompt_store.store_path(db)
     if not os.path.lexists(store):return {},{}
     return prompt_store.visible_all(store,history.records() if records is None else records,pricing.load_prices())
@@ -166,10 +167,23 @@ def _counts(contexts):
     return found or None
 
 
+def _statusline_dispatch(argv):
+    """Exit code when argv is `[--db PATH] statusline ...`, else None; decided before the full parser (and the heavy imports) is built."""
+    db,rest=None,list(argv)
+    if rest[:1]==['--db'] and len(rest)>1:db,rest=Path(rest[1]),rest[2:]
+    elif rest[:1] and rest[0].startswith('--db='):db,rest=Path(rest[0][5:]),rest[1:]
+    return statusline.run(rest[1:],db) if rest[:1]==['statusline'] else None
+
+
 def main(argv=None):
     # Windows pipes default to a legacy code page without '≥' or '→'; replace such characters rather than crash.
     for stream in (sys.stdout,sys.stderr):
         if hasattr(stream,'reconfigure'):stream.reconfigure(errors='replace')
+    done=_statusline_dispatch(sys.argv[1:] if argv is None else argv)
+    if done is not None:return done
+    from tokenatlas import insights, pricing, prompt_store, prompts, sessions, why
+    from tokenatlas.history import History, summarize
+    from tokenatlas.report import build_report, coverage_key, read_report_state, render_report, report_state, write_report
     if Path(sys.argv[0]).name.lower() in ('energy-monitor','energy-monitor.exe','energy-monitor-script.py'):
         print('energy-monitor is deprecated; use tokenatlas',file=sys.stderr)
     parser=argparse.ArgumentParser(prog='tokenatlas',description='Local observed token history; no network or LLM calls.')
@@ -251,6 +265,7 @@ def main(argv=None):
     collect.add_argument('--sync-timeout',type=int,default=600,help='Seconds for the whole remote sync before its process group is killed (default 600).')
     collect.add_argument('--no-report',action='store_true',help='Do not build the report.')
     collect.add_argument('--lang',choices=('auto','sv','en'),default='auto',help='Report language.')
+    commands.add_parser('statusline',help='Claude Code statusline: one line from the stdin payload and the totals cache refresh writes (no network); --setup prints the settings snippet.').add_argument('--setup',action='store_true')
     commands.add_parser('doctor',help='Show source availability, import errors and known coverage limits.')
     args=parser.parse_args(argv)
     if args.db is None:args.db=default_db()
@@ -348,6 +363,7 @@ def main(argv=None):
                     cowork,problems=why.cowork_scan()
                     results=[history.refresh('claude',root) for root in [roots['claude'],*cowork]]
                     result=_with_problems(results[0] if len(results)==1 else aggregate(results),problems)
+                statusline.refresh_cache(history)
             elif args.command=='top':
                 history.connection.execute('BEGIN')
                 store=prompt_store.store_path(args.db)
