@@ -97,14 +97,14 @@ there is no background service, and already-deleted logs cannot be recovered.
 `refresh` exits 2 for missing sources or partial imports and records diagnostics.
 
 Logs are read from each harness's default location unless the harness itself has been moved with its own
-variable, which TokenAtlas reads at every run (an unset or empty variable means the default):
+variable, which TokenAtlas reads at every run (an unset, empty or relative value means the default):
 
 | Harness | Variable | Read from | Default |
 | --- | --- | --- | --- |
 | Claude Code | `CLAUDE_CONFIG_DIR` | `$CLAUDE_CONFIG_DIR/projects` | `~/.claude/projects` |
 | Codex | `CODEX_HOME` | `$CODEX_HOME/sessions` and `session_index.jsonl` | `~/.codex/sessions` |
 | Pi | `PI_CODING_AGENT_DIR` (leading `~` expanded) | `$PI_CODING_AGENT_DIR/sessions` | `~/.pi/agent/sessions` |
-| OpenCode | `XDG_DATA_HOME` (must be absolute, else ignored) | `$XDG_DATA_HOME/opencode/opencode.db` | `~/.local/share/opencode/opencode.db` |
+| OpenCode | `XDG_DATA_HOME` | `$XDG_DATA_HOME/opencode/opencode.db` | `~/.local/share/opencode/opencode.db` |
 
 An explicit command-line root (`--root`, `--claude-root`, ...) beats the variable, which beats the default.
 The Claude desktop Cowork location is not affected by `CLAUDE_CONFIG_DIR`. `tokenatlas doctor` lists the
