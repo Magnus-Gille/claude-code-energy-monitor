@@ -8,6 +8,10 @@ All notable changes to this project are documented in this file. The project fol
 
 - Harness logs moved with the harness's own variable are found: `CLAUDE_CONFIG_DIR`, `CODEX_HOME` (sessions and `session_index.jsonl`), `PI_CODING_AGENT_DIR` and an absolute `XDG_DATA_HOME` (OpenCode); an explicit root still wins, and `doctor` reports each resolved root and its source (#52).
 
+### Changed
+
+- README: a quick start at the top (install with pipx or uv, `tokenatlas open`, why and how to schedule `tokenatlas collect`, what is read, what is opt-in, and that no skills, `AGENTS.md`, plugins or harness configuration are needed); the original energy monitor is its own section, and its "no cron jobs" sentence is limited to the statusline (#53).
+
 ## [1.6.1] - 2026-10-01
 
 ### Fixed

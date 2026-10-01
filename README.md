@@ -17,6 +17,46 @@ Use the vendor tools for:
 - Actual billing and invoices.
 - Organization admin dashboards.
 
+## Quick start
+
+TokenAtlas is one command. It only reads the logs the agents already write, so there is nothing to set up in
+Claude Code, Codex, OpenCode or Pi: no skills, `AGENTS.md`, plugins, hooks or MCP servers.
+
+```bash
+pipx install tokenatlas      # or: uv tool install tokenatlas
+tokenatlas open              # read the logs, build the private report, open it in the browser
+```
+
+Python 3.10 or newer is needed. macOS ships Python 3.9; `uv tool install tokenatlas` (or a one-off
+`uvx tokenatlas open`) downloads a suitable Python by itself, so nothing else has to be installed.
+
+Installing only adds the command: nothing runs in the background. `tokenatlas open` is enough to look now and
+then. For a history that outlasts the agents' own log cleanup (Claude Code deletes transcripts after 30 days by
+default, its `cleanupPeriodDays` setting), run `tokenatlas collect` on a schedule; see
+[Keeping the report fresh](#keeping-the-report-fresh). Only what was stored before a log was deleted survives.
+
+What is read, from each harness's default location (or where its own variable moved it, see
+[Durable local usage history](#durable-local-usage-history)):
+
+| Harness | Logs |
+|---|---|
+| Claude Code | `~/.claude/projects` |
+| Codex | `~/.codex/sessions` |
+| OpenCode | `~/.local/share/opencode/opencode.db` |
+| Pi | `~/.pi/agent/sessions` |
+
+Off until you opt in:
+
+- the text and context of the costliest turns: `tokenatlas top --keep-text` (see [Top turns](#top-turns));
+- other machines: `tokenatlas collect --remote tag:host`, which needs ssh access and TokenAtlas on that machine
+  (see [Other machines](docs/remote-machines.md)).
+
+## The original energy monitor
+
+The statusline and companion scripts below predate TokenAtlas. They run from a checkout, are not part of the PyPI
+package, and the Claude Code statusline is the only part that needs harness configuration (a `statusLine` entry in
+Claude Code's settings).
+
 A statusline script for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that shows real-time token usage and order-of-magnitude energy estimates. It tracks daily, weekly, and monthly totals, distinguishes cheap cached tokens from expensive fresh tokens, and logs history automatically.
 
 The repo also includes companion monitors for Codex CLI (`codex_status.py`) and the Pi coding harness (`pi_status.py`). Both read their harness's session JSONL and print the same style of one-line summary for a prompt, tmux status, or sidecar terminal.
@@ -304,6 +344,14 @@ pipx install tokenatlas
 tokenatlas --version
 ```
 
+Without a Python 3.10+ (macOS ships 3.9), use [uv](https://docs.astral.sh/uv/), which downloads a suitable Python
+itself:
+
+```bash
+uv tool install tokenatlas   # installs the tokenatlas command
+uvx tokenatlas open          # or run it once without installing
+```
+
 TokenAtlas is published on [PyPI](https://pypi.org/project/tokenatlas/). For the latest unreleased code use
 `pipx install git+https://github.com/Magnus-Gille/tokenatlas`, and for a checkout `pipx install /path/to/tokenatlas`. On systems with an externally managed Python (for example Raspberry Pi OS), use the venv recipe in [docs/remote-machines.md](docs/remote-machines.md). The old `energy-monitor` command remains as a deprecated alias that prints a one-line notice.
 
@@ -489,7 +537,7 @@ set -g status-right "#(python3 /path/to/pi_status.py 2>/dev/null)"
 3. **Daily totals persist** across sessions in `~/.claude/statusline_daily.json`. Multiple concurrent sessions are handled safely with file locking.
 4. **At midnight** (or rather, on the first prompt of a new day), the previous day's totals are archived to `~/.claude/statusline_history.jsonl` and the daily counter resets.
 
-No cron jobs, no daemons, no manual intervention. You just use Claude Code and the data accumulates.
+The statusline needs no cron job or daemon: Claude Code runs it on every status update and its daily totals accumulate. (TokenAtlas's own history is different: it needs a scheduled `tokenatlas collect`, see [Quick start](#quick-start).)
 
 ### Data files
 
