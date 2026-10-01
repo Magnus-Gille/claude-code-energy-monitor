@@ -156,8 +156,9 @@ async function ready(page, errors, what = 'report') {
         assert.ok(e.proxy.includes('README'),'proxy note: '+e.proxy);
         assert.equal(await p2.locator('#cost-facts article[data-fact="energy"]').count(),0,'energy is not shown as a cost fact');
         // parity: the page's computation over all rows equals the Python energy fact for all history (same rows, constants and factors)
-        const par=await p2.evaluate(()=>{const e=UsageReport.energyOf(UsageReport.all),f=UsageReport.data.insights.windows.find(w=>w.id==='all').facts.find(x=>x.id==='energy').values;return {page:e.mid,py:f.mid_mwh,rows:[e.rows,f.requests],unw:[e.unweighted,f.unweighted_requests]}});
+        const par=await p2.evaluate(()=>{const e=UsageReport.energyOf(UsageReport.all),f=UsageReport.data.insights.windows.find(w=>w.id==='all').facts.find(x=>x.id==='energy').values;return {page:e.mid,py:f.mid_mwh,rows:[e.rows,f.requests],unw:[e.unweighted,f.unweighted_requests],inc:[e.incomplete,f.lower_bound_requests],parts:f.parts.map(x=>[x.part,e.parts[x.part],x.mwh])}});
         assert.ok(Math.abs(par.page-par.py)<=1e-9*Math.max(1,par.py),'page '+par.page+' vs python '+par.py);assert.deepEqual(par.rows[0],par.rows[1]);assert.deepEqual(par.unw[0],par.unw[1]);
+        assert.deepEqual(par.inc[0],par.inc[1]);assert.ok(par.inc[0]>0,'the fixture has an incomplete row');for(const [k,pg,py] of par.parts)assert.ok(Math.abs(pg-py)<=1e-9*Math.max(1,py),k+': page '+pg+' vs python '+py);
       }
       {
         const I=INS[T.lang],money=async()=>{const f=(await facts(p2)).find(x=>x.id==='model_share');return {ids:(await facts(p2)).map(x=>x.id),total:norm(f.rows.find(r=>r[0]===(T.lang==='sv'?'Prissatt kostnad':'Priced cost'))[1]),unpriced:norm(f.rows.at(-1)[1])}};
