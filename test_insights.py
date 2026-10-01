@@ -453,6 +453,17 @@ class PricingAssumptions(unittest.TestCase):
         self.assertIn('odd thing (requests: 1)', fact['assumptions'])
 
 
+    def test_counts_in_texts_are_thousands_separated(self):
+        fact = insights._finish(insights._fact('x', {}, 'ins_big_turns_c', ('ins_a_list',), used=[(ob('a'), {'assumptions': ['odd thing']}, 1.0, {})], big_turn=50.0),
+                                dict(ambiguous=12345, incomplete=4726, retrieved='2026-09-01'))
+        text = ' '.join(fact['assumptions'])
+        self.assertIn('12,345', text)
+        self.assertIn('4,726', text)
+        self.assertNotIn('4726', text)
+        self.assertIn('$50', fact['computation'])
+        self.assertNotIn('50.0', fact['computation'])
+        self.assertEqual([insights._num(x) for x in (323100, 1080.0, 1080.5, 0, '2026-09-01')], ['323,100', '1,080', '1,080.5', '0', '2026-09-01'])
+
 class PriceTableWording(unittest.TestCase):
     def test_selected_table_with_its_date(self):
         f = by_id(cost_facts(D, TABLE))['model_share']

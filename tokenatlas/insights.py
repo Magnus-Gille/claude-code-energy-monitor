@@ -30,8 +30,15 @@ def _texts():
     return json.loads(I18N.read_text(encoding='utf-8'))['en']
 
 
+def _num(x):
+    """A count or amount in a text: thousands separated, a whole float without decimals (as the page's own number format)."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return str(x)
+    return f'{int(x):,}' if float(x).is_integer() else f'{x:,.2f}'.rstrip('0')
+
+
 def say(key, params):
-    return re.sub(r'\{(\w+)\}', lambda m: f'{params[m[1]]:g}' if isinstance(params[m[1]], float) else str(params[m[1]]), _texts()[key])
+    return re.sub(r'\{(\w+)\}', lambda m: _num(params[m[1]]), _texts()[key])
 
 
 def _fact(id, values, computation, assumptions, provenance='computed', used=(), **params):
@@ -58,7 +65,7 @@ def _finish(f, ctx):
     f['assumption_keys'] = keys
     f['params'] = dict(f['params'], retrieved=ctx['retrieved'] or '', ambiguous=ctx['ambiguous'], incomplete=ctx['incomplete'], lower=lower)
     f['computation'] = say(f['computation_key'], f['params'])
-    f['assumptions'] = [say(k, f['params']) for k in keys] + [say(a['key'], dict(n=a['requests'])) if a['key'] else f"{a['text']} (requests: {a['requests']})" for a in f['price_assumptions']]
+    f['assumptions'] = [say(k, f['params']) for k in keys] + [say(a['key'], dict(n=a['requests'])) if a['key'] else f"{a['text']} (requests: {a['requests']:,})" for a in f['price_assumptions']]
     return f
 
 
@@ -329,7 +336,7 @@ def _lines(f):
                 f"same requests at the standard tier: {u(v['standard'])}", f"premium: {_usd_text(v['premium'])}"]
     if i == 'big_turns':
         return [f"turns costing >= {_usd_text(v['threshold'])}: {v['count']:,} of {v['turns']:,} turns with a priced request",
-                f"their cost: {u(v['cost'])} of {u(v['attributed_cost'])} ({_pct(v['share'])})", f"median requests per such turn: {v['median_requests']:g}"]
+                f"their cost: {u(v['cost'])} of {u(v['attributed_cost'])} ({_pct(v['share'])})", f"median requests per such turn: {_num(v['median_requests'])}"]
     if i == 'subagent_share':
         return [f"cost from subagents: {u(v['subagent_cost'])} of {u(v['total_cost'])} ({_pct(v['share'])})", f"requests from subagents: {v['subagent_requests']:,} of {v['priced_requests']:,} priced"]
     return [f"requests at a fast or priority tier: {v['requests']:,} ({', '.join(f'{k} {n:,}' for k, n in v['tiers'].items())})", f"cost at the tier applied: {u(v['actual'])}",
