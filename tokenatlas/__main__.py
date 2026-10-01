@@ -7,7 +7,7 @@ import re
 import sys
 import time
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -15,7 +15,7 @@ from tokenatlas import why
 from tokenatlas import __version__
 from tokenatlas import sessions
 from tokenatlas.history import History, summarize
-from tokenatlas import pricing, prompt_store, prompts
+from tokenatlas import insights, pricing, prompt_store, prompts
 from tokenatlas.report import build_report, coverage_key, read_report_state, render_report, report_state, write_report
 
 DEFAULT_TIMEZONE='Europe/Stockholm'
@@ -234,6 +234,12 @@ def main(argv=None):
     top.add_argument('--keep-text',action='store_true',help='Store the text and context of the current global top -n turns in top-prompts.json next to the history (0600).')
     top.add_argument('--forget-text',action='store_true',help='Delete the stored prompt text.')
     top.add_argument('--with-text',action='store_true',help='With --json: include stored text and turn context.')
+    facts=commands.add_parser('insights',help='Cost facts: deterministic list-price statements computed from the saved observations (no language model, no interpretation).')
+    facts.add_argument('--days',type=int,help='Only the last N days (default: all history).')
+    facts.add_argument('--start',help='Inclusive ISO timestamp; offset required.')
+    facts.add_argument('--end',help='Exclusive ISO timestamp; offset required.')
+    facts.add_argument('--prices',type=Path,help='Override the price table.')
+    facts.add_argument('--json',action='store_true')
     overhead=commands.add_parser('overhead',help='Fixed context overhead: floor tokens, instruction and skill sizes.')
     overhead.add_argument('--refresh',action='store_true',help='Rescan the default session roots first.')
     overhead.add_argument('--harness',choices=('claude','codex','pi','opencode'))
@@ -253,7 +259,9 @@ def main(argv=None):
         if args.command=='refresh' and args.all and args.root:raise ValueError('--root cannot be used with --all')
         if args.command=='top' and args.limit<1:raise ValueError('--limit must be at least 1')
         if args.command=='top' and args.keep_text and args.forget_text:raise ValueError('--keep-text and --forget-text cannot be combined')
-        if args.command in ('report','top'):
+        if args.command=='insights':
+            if args.days is not None and (args.days<1 or args.start or args.end):raise ValueError('--days must be at least 1 and cannot be combined with --start or --end')
+        if args.command in ('report','top','insights'):
             if args.command=='report':
                 max_age=parse_duration(args.max_age) if args.max_age is not None else None
                 if (args.if_changed or max_age is not None) and not args.html:raise ValueError('--if-changed and --max-age need --html')
@@ -267,6 +275,7 @@ def main(argv=None):
                     if name=='start':start=parsed
                     else:end=parsed
             if start and end and start>=end:raise ValueError('--start must precede --end')
+            if args.command=='insights' and args.days:end=datetime.now(ZoneInfo('UTC'));start=end-timedelta(days=args.days)  # one captured now: the exclusive end
             if args.command=='report' and args.html:_output_path(args.html,args.db)
         if args.command=='open':path=_output_path(args.html or args.db.parent/'report.html',args.db)
         if args.command=='collect':
@@ -318,7 +327,7 @@ def main(argv=None):
                 source_status=history.doctor()
                 spec=_spec('redacted' if args.shared else 'local',DEFAULT_TIMEZONE,'day',{},args.lang)
                 texts,ctx=(None,None) if args.shared else _visible(history,args.db)  # shared reports never read the side file
-                state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts,ctx))
+                state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts,ctx),datetime.now(ZoneInfo('UTC')).date().isoformat())
                 if path.exists() and read_report_state(path)==state:
                     result={'html':str(path.resolve()),'skipped':True,'reason':'unchanged'}
                 else:
@@ -361,6 +370,11 @@ def main(argv=None):
                 if args.with_text:
                     for p in result['prompts']:
                         key=(p['harness'],p['session'],p['turn_id']);p['text']=texts.get(key);p['context']=ctx.get(key)
+            elif args.command=='insights':
+                history.connection.execute('BEGIN')
+                result=insights.cost_facts(history.records(),pricing.load_prices(args.prices),start,end)
+                if not args.json:
+                    print(insights.render_text(result));return 0
             elif args.command=='snapshot':
                 result=history.snapshot(args.out)
             elif args.command=='import':
@@ -376,7 +390,7 @@ def main(argv=None):
                     path=_output_path(args.html,args.db)
                     spec=_spec('local' if args.private else 'redacted',args.timezone,args.granularity,vars(args),args.lang)
                     texts,ctx=_visible(history,args.db) if args.private else (None,None)
-                    state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts,ctx))
+                    state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts,ctx),datetime.now(ZoneInfo('UTC')).date().isoformat())
                     if path.exists() and (args.if_changed or max_age is not None):
                         found=read_report_state(path)
                         age=time.time()-path.stat().st_mtime

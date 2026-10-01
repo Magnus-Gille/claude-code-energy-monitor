@@ -82,9 +82,10 @@ def _times(count, price):
     return None if price is None else count * price / 1e6
 
 
-def _rates(obs, table):
+def _rates(obs, table, long_context=True, modifiers=True):
     """(early result, None) when the observation is decided before any token maths, else (None, rates) with the selected
-    prices, multiplier, assumptions and reasons; shared by price_observation and unit_prices."""
+    prices, multiplier, assumptions and reasons; shared by price_observation and unit_prices. long_context=False never switches to the
+    long-context prices (long_context='always' forces them, for pricing a group whose members all exceed the threshold) and modifiers=False never switches to a fast/priority/flex tier's (what-if costs for cost facts; the rest is unchanged)."""
     provider, model = obs.get('provider') or 'unknown', obs.get('model')
     provider = (table.get('provider_aliases') or {}).get(provider, provider)
     if provider in (table.get('local_providers') or ()):
@@ -110,6 +111,7 @@ def _rates(obs, table):
     # Long context replaces the whole price set once the request's total input exceeds the threshold.
     long = entry.get('long_context')
     context_unknown = long_applies = False
+    modifier = None  # the speed/service-tier price set in effect, for cost facts
     if long:
         # fresh + cache read + cache write is the request's whole input in every harness (Codex's inclusive
         # input_tokens equals it); fall back to the raw inclusive count when a class is unknown.
@@ -118,10 +120,10 @@ def _rates(obs, table):
         if total is None:
             context_unknown = True
             reasons.append('context size unknown')
-        elif total > long['above_input_tokens']:
+        elif long_context == 'always' or (long_context and total > long['above_input_tokens']):
             long_applies = True
             prices = {k: long.get(k) for k in PRICE_KEYS}
-    modifiers = entry.get('modifiers') or {}
+    modifiers, modifiers_on = entry.get('modifiers') or {}, modifiers
     if claude:
         tariff = obs.get('tariff') or {}
         speed = tariff.get('speed')
@@ -130,7 +132,9 @@ def _rates(obs, table):
                 return unpriced('fast mode price missing')
             if long_applies:
                 return unpriced('fast mode with long context is not priced')
-            prices = {k: modifiers['speed=fast'].get(k) for k in PRICE_KEYS}
+            modifier = 'speed=fast'
+            if modifiers_on:
+                prices = {k: modifiers['speed=fast'].get(k) for k in PRICE_KEYS}
         elif speed is None:
             assumptions.append(_STANDARD_CLAUDE)
         elif speed != 'standard':
@@ -150,14 +154,16 @@ def _rates(obs, table):
                 return unpriced(f'unknown service_tier {tier}')
             if (claude and tariff.get('speed') == 'fast') or long_applies:
                 return unpriced(f'service_tier {tier} with fast mode or long context is not priced')
-            prices = {k: modifiers[f'service_tier={tier}'].get(k) for k in PRICE_KEYS}
+            modifier = f'service_tier={tier}'
+            if modifiers_on:
+                prices = {k: modifiers[f'service_tier={tier}'].get(k) for k in PRICE_KEYS}
     elif not claude:
         assumptions.append(_STANDARD_OTHER)
     if context_unknown:
         prices = dict.fromkeys(PRICE_KEYS)
 
     return None, dict(prices=prices, multiplier=multiplier, assumptions=assumptions, reasons=reasons, claude=claude,
-                      currency=currency, ref=ref, tokens=tokens, raw=raw)
+                      currency=currency, ref=ref, tokens=tokens, raw=raw, long=long_applies, has_long=bool(long), modifier=modifier)
 
 
 def _parts(r):
@@ -184,10 +190,14 @@ def _parts(r):
     return parts, hour
 
 
-def price_observation(obs, table):
-    early, r = _rates(obs, table)
+def price_observation(obs, table, long_context=True, modifiers=True, tier=None):
+    """tier, when a dict, receives {'long': bool, 'has_long': bool, 'modifier': label or None}: the long-context / speed / service-tier price
+    set used, and whether the model has a long-context tier at all."""
+    early, r = _rates(obs, table, long_context, modifiers)
     if early:
         return early
+    if tier is not None:
+        tier.update(long=r['long'], has_long=r['has_long'], modifier=r['modifier'])
     parts, _ = _parts(r)
     reasons, assumptions = r['reasons'], r['assumptions']
     missing = [k for k, v in parts.items() if v is None]

@@ -7,6 +7,13 @@ All notable changes to this project are documented in this file. The project fol
 ### Added
 
 - `tokenatlas collect` replaces the reference shell collector `scripts/collect.sh`: one scheduled command that refreshes, stores top-turn text if opted in, builds the conditional private report, runs the remote sync and rebuilds the report after every attempted sync. It takes a kernel lock (`flock`, `msvcrt.locking` on Windows) on `collect.lock`, so runs never overlap and a crashed run leaves nothing stale; a busy lock prints `collect: already running` and exits 0. `--remote tag:host`, `--remote-sync`, `--sync-timeout`, `--no-report`, `--lang`. The remote sync script now ships in the package as `tokenatlas/remote_sync.sh`; the repository-root `remote_sync.sh` is a shim.
+- Cost facts: `tokenatlas insights [--days N | --start/--end] [--json]` prints deterministic, rule-based list-price facts (cost by model, a neutral price ladder of the same tokens at every model of the same provider (the model used is marked; no recommendation), cost by token class, input size per request, long-context premium, big turns, subagent share, fast/priority tier extra) with the computation and assumptions of each; no model, no interpretation, aggregate only. The report gets a "Kostnadsfakta" / "Cost facts" card for the last 30 days and all history, computed when the report is built, with measured/computed badges; shared reports apply the usual model-name redaction.
+- Cost facts follow the report's reliability rules: ambiguous-identity observations are left out of every fact, incomplete ones make amounts lower bounds (`≥`) (the long-context premium and premium-tier extra cost, which are differences between price tiers, use complete requests only and state how many were left out), both counts and the pricing assumptions (with request counts) are stated per fact, the 30-day window ends at one captured `now`, and the price table used is named with its `retrieved_on` date.
+- README: what TokenAtlas adds beyond the vendors' own tools, and what to use the vendor tools for.
+
+### Changed
+
+- `report_state` takes the UTC day of the rolling 30-day window, so a report is rebuilt once per day even when the history is unchanged.
 
 ### Fixed
 
