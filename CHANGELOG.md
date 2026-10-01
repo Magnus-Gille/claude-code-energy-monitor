@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-01
+
 ### Added
 
 - `tokenatlas collect` replaces the reference shell collector `scripts/collect.sh`: one scheduled command that refreshes, stores top-turn text if opted in, builds the conditional private report, runs the remote sync and rebuilds the report after every attempted sync. It takes a kernel lock (`flock`, `msvcrt.locking` on Windows) on `collect.lock`, so runs never overlap and a crashed run leaves nothing stale; a busy lock prints `collect: already running` and exits 0. `--remote tag:host`, `--remote-sync`, `--sync-timeout`, `--no-report`, `--lang`. The remote sync script now ships in the package as `tokenatlas/remote_sync.sh`; the repository-root `remote_sync.sh` is a shim.
