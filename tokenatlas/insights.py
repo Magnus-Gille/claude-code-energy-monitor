@@ -21,6 +21,8 @@ TOP_MODELS, ALTERNATIVES, MIN_SHARE = 5, 3, 0.10
 PARTS = ('input', 'cache_write', 'cache_read', 'output')
 PREMIUM = ('speed=fast', 'service_tier=fast', 'service_tier=priority')  # flex is a discount, not a premium
 COMMON = ('ins_a_list', 'ins_a_scope')
+# pricing.py's own assumption texts, mapped to the page's i18n keys (an unknown text is shown as it is)
+PRICE_ASSUMPTIONS = {pricing._STANDARD_CLAUDE: 'ins_pa_speed', pricing._STANDARD_OTHER: 'ins_pa_tier'}
 
 
 @functools.lru_cache(maxsize=None)
@@ -32,10 +34,32 @@ def say(key, params):
     return re.sub(r'\{(\w+)\}', lambda m: f'{params[m[1]]:g}' if isinstance(params[m[1]], float) else str(params[m[1]]), _texts()[key])
 
 
-def _fact(id, values, computation, assumptions, provenance='computed', **params):
+def _fact(id, values, computation, assumptions, provenance='computed', used=(), **params):
+    """`used`: the (record, result, cost, tier) rows the numbers come from; _finish adds their lower-bound flag and pricing assumptions."""
     return {'id': id, 'title_key': f'ins_{id}', 'values': values, 'params': params, 'provenance': provenance,
-            'computation_key': computation, 'computation': say(computation, params),
-            'assumption_keys': list(assumptions), 'assumptions': [say(k, params) for k in assumptions]}
+            'computation_key': computation, 'assumption_keys': list(assumptions), '_used': list(used)}
+
+
+def _finish(f, ctx):
+    """Add the reliability disclosures every fact carries: requests left out (ambiguous identity) and lower-bound requests (incomplete counters),
+    both as the report classifies them, the pricing assumptions with the number of requests each applies to, and the rendered English texts."""
+    used = f.pop('_used')
+    lower = sum(1 for x in used if not x[0].get('complete', True))
+    assumed = {}
+    if f['provenance'] == 'computed':
+        for x in used:
+            for text in x[1]['assumptions']:
+                assumed[text] = assumed.get(text, 0) + 1
+    f['values'].update(lower_bound=lower > 0, lower_bound_requests=lower, ambiguous_requests=ctx['ambiguous'], incomplete_requests=ctx['incomplete'])
+    f['price_assumptions'] = [dict(key=PRICE_ASSUMPTIONS.get(t), text=t, requests=n) for t, n in sorted(assumed.items())]
+    keys = [('ins_a_list' if ctx['retrieved'] else 'ins_a_list_nodate') if k == 'ins_a_list' else k for k in f['assumption_keys']] + ['ins_a_excluded']
+    if lower:
+        keys.append('ins_a_lower')
+    f['assumption_keys'] = keys
+    f['params'] = dict(f['params'], retrieved=ctx['retrieved'] or '', ambiguous=ctx['ambiguous'], incomplete=ctx['incomplete'], lower=lower)
+    f['computation'] = say(f['computation_key'], f['params'])
+    f['assumptions'] = [say(k, f['params']) for k in keys] + [say(a['key'], dict(n=a['requests'])) if a['key'] else f"{a['text']} (requests: {a['requests']})" for a in f['price_assumptions']]
+    return f
 
 
 def _usd(res):
@@ -59,7 +83,13 @@ def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=Non
     memo = {} if memo is None else memo
     name = name or (lambda provider, model: model)
     start, end = _when(start), _when(end)
-    inside = [r for r in records if (start is None or prompts._t(r['ts']) >= start) and (end is None or prompts._t(r['ts']) < end)]
+    # The report's own classification (template aggregate): an observation with a synthetic (ambiguous) identity is not counted in any total;
+    # an incomplete one is counted and its totals are lower bounds.
+    clean = [r for r in records if not r.get('id_synthetic')]
+    window = [r for r in records if (start is None or prompts._t(r['ts']) >= start) and (end is None or prompts._t(r['ts']) < end)]
+    inside = [r for r in window if not r.get('id_synthetic')]
+    ctx = dict(ambiguous=len(window) - len(inside), incomplete=sum(1 for r in inside if not r.get('complete', True)),
+               retrieved=table.get('retrieved_on'))
     rows = []  # one per request: (record, result, cost or None, tier)
     for r in inside:
         if id(r) not in memo:
@@ -71,34 +101,36 @@ def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=Non
     total = sum(x[2] for x in priced)
     n, k = len(rows), len(priced)
     scope = dict(requests=n, priced_requests=k, unpriced_requests=n - k, unpriced_share=_share(n - k, n))
+    ctx['scope'] = scope
     facts = []
     if k and total > 0:
         # canonical (provider, model): aliases and the provider alias table collapse into the price table's own entry
         groups = {}
         for r, res, cost, _ in priced:
             ref = res['price_ref']
-            g = groups.setdefault((ref['provider'], ref['model']), {'cost': 0.0, 'requests': 0, 'rows': []})
+            g = groups.setdefault((ref['provider'], ref['model']), {'cost': 0.0, 'requests': 0, 'rows': [], 'x': []})
             g['cost'] += cost
             g['requests'] += 1
             g['rows'].append(r)
+            g['x'].append(memo[id(r)])
         ranked = sorted(groups.items(), key=lambda kv: (-kv[1]['cost'], kv[0]))
-        shown = [dict(name=name(p, m), cost=g['cost'], share=g['cost'] / total, requests=g['requests']) for (p, m), g in ranked[:TOP_MODELS]]
+        shown = [dict(name=name(p, m), cost=g['cost'], share=g['cost'] / total, priced_requests=g['requests']) for (p, m), g in ranked[:TOP_MODELS]]
         rest = ranked[TOP_MODELS:]
         other = dict(models=len(rest), cost=sum(g['cost'] for _, g in rest), share=sum(g['cost'] for _, g in rest) / total,
-                     requests=sum(g['requests'] for _, g in rest)) if rest else None
+                     priced_requests=sum(g['requests'] for _, g in rest)) if rest else None
         facts.append(_fact('model_share', dict(models=shown, other=other, priced_cost=total, **scope), 'ins_model_share_c',
-                           (*COMMON, 'ins_a_alias')))
+                           (*COMMON, 'ins_a_alias'), used=priced))
         facts += _comparison(ranked, total, table, name)
         parts = {p: sum(x[1]['parts'][p] for x in priced) for p in PARTS}
         facts.append(_fact('cost_parts', dict(parts=[dict(part=p, cost=parts[p], share=parts[p] / total) for p in PARTS], priced_cost=total, **scope),
-                           'ins_cost_parts_c', (*COMMON, 'ins_a_reasoning')))
+                           'ins_cost_parts_c', (*COMMON, 'ins_a_reasoning'), used=priced))
     facts += _context(rows)
     if k and total > 0:
-        facts += _long(priced, table, k) + _turns(records, inside, start, end, big_turn, scope, memo) + _subagents(priced, total, k) + _tiers(priced, table, k)
+        facts += _long(priced, table, k) + _turns(clean, inside, big_turn, scope, memo) + _subagents(priced, total, k) + _tiers(priced, table, k)
     order = ('model_share', 'price_comparison', 'cost_parts', 'context_size', 'long_context_premium', 'big_turns', 'subagent_share', 'premium_tiers')
-    facts.sort(key=lambda f: order.index(f['id']))
+    facts = [_finish(f, ctx) for f in sorted(facts, key=lambda f: order.index(f['id']))]
     return {'window': {'start': start and start.isoformat(), 'end': end and end.isoformat()}, **{k_: scope[k_] for k_ in ('requests', 'priced_requests', 'unpriced_requests')},
-            'big_turn': big_turn, 'facts': facts}
+            'ambiguous_requests': ctx['ambiguous'], 'incomplete_requests': ctx['incomplete'], 'price_table': {'retrieved_on': ctx['retrieved']}, 'big_turn': big_turn, 'facts': facts}
 
 
 LADDER = 8
@@ -152,28 +184,33 @@ def _ladder(ranked_entry, total, table, name):
     entries = sorted([(c, m, False) for m, c in others.items()] + [(g['cost'], model, True)], key=lambda x: (-x[0], x[1]))
     at = next(i for i, e in enumerate(entries) if e[2])
     first = min(max(at - LADDER // 2, 0), max(len(entries) - LADDER, 0))  # more than LADDER models: the LADDER around the actual one
-    return dict(name=name(provider, model), cost=g['cost'], share=g['cost'] / total, requests=g['requests'], ladder_models=len(entries),
+    return dict(_x=g['x'], name=name(provider, model), cost=g['cost'], share=g['cost'] / total, priced_requests=g['requests'], ladder_models=len(entries),
                 ladder=[dict(name=name(provider, m), cost=c, actual=a) for c, m, a in entries[first:first + LADDER]])
 
 
 def _comparison(ranked, total, table, name):
     out = [x for x in (_ladder(e, total, table, name) for e in ranked if e[1]['cost'] / total >= MIN_SHARE) if x]
-    return [_fact('price_comparison', dict(models=out), 'ins_price_comparison_c', (*COMMON, 'ins_a_samecounts', 'ins_a_alternatives'))] if out else []
+    used = [x for m in out for x in m['_x']]
+    for m in out:
+        del m['_x']
+    return [_fact('price_comparison', dict(models=out), 'ins_price_comparison_c', (*COMMON, 'ins_a_samecounts', 'ins_a_alternatives'), used=used)] if out else []
 
 
 def _context(rows):
-    by, excluded = {}, 0
-    for r, *_ in rows:
+    by, excluded, used = {}, 0, []
+    for row in rows:
+        r = row[0]
         t = r.get('tokens') or {}
         known = [t.get(c) for c in ('fresh_input', 'cache_read', 'cache_write')]
         if None in known:
             excluded += 1
         else:
             by.setdefault(r['harness'], []).append(sum(known))
+            used.append(row)
     if not by:
         return []
     harnesses = [dict(harness=h, requests=len(v), median=float(statistics.median(v)), p90=sorted(v)[math.ceil(0.9 * len(v)) - 1]) for h, v in sorted(by.items())]
-    return [_fact('context_size', dict(harnesses=harnesses, excluded_requests=excluded), 'ins_context_size_c', ('ins_a_known', 'ins_a_logs'), 'measured')]
+    return [_fact('context_size', dict(harnesses=harnesses, excluded_requests=excluded), 'ins_context_size_c', ('ins_a_known', 'ins_a_logs'), 'measured', used=used)]
 
 
 def _long(priced, table, k):
@@ -185,7 +222,7 @@ def _long(priced, table, k):
         return []  # the standard-tier cost is not computable: no premium is stated
     actual, standard = sum(x[2] for x in longs), sum(std)
     return [_fact('long_context_premium', dict(requests=len(longs), actual=actual, standard=standard, premium=actual - standard, priced_requests=k),
-                  'ins_long_context_premium_c', (*COMMON, 'ins_a_othertiers'))]
+                  'ins_long_context_premium_c', (*COMMON, 'ins_a_othertiers'), used=longs)]
 
 
 def _tiers(priced, table, k):
@@ -200,7 +237,7 @@ def _tiers(priced, table, k):
     for x in prem:
         tiers[x[3]['modifier']] = tiers.get(x[3]['modifier'], 0) + 1
     return [_fact('premium_tiers', dict(requests=len(prem), actual=actual, standard=standard, extra=actual - standard, tiers=dict(sorted(tiers.items())), priced_requests=k),
-                  'ins_premium_tiers_c', (*COMMON, 'ins_a_tier_recorded', 'ins_a_flex'))]
+                  'ins_premium_tiers_c', (*COMMON, 'ins_a_tier_recorded', 'ins_a_flex'), used=prem)]
 
 
 def _subagents(priced, total, k):
@@ -209,15 +246,15 @@ def _subagents(priced, total, k):
         return []
     cost = sum(x[2] for x in subs)
     return [_fact('subagent_share', dict(subagent_cost=cost, total_cost=total, share=cost / total, subagent_requests=len(subs), priced_requests=k),
-                  'ins_subagent_share_c', (*COMMON, 'ins_a_subagent'))]
+                  'ins_subagent_share_c', (*COMMON, 'ins_a_subagent'), used=priced)]
 
 
-def _turns(records, inside, start, end, big_turn, scope, memo):
+def _turns(records, inside, big_turn, scope, memo):
     """Turn costs as prompts.top_prompts defines them (assign_prompts over all records; a turn's cost is the sum of its priced requests inside the
     window, a turn without a priced request has none), without building its per-turn detail: that is what makes 200k observations affordable."""
     if 'assigned' not in memo:
         memo['assigned'] = {id(r): a for r, a in zip(records, prompts.assign_prompts(records))}  # the same for every window over these records
-    turns, unattributed = {}, 0
+    turns, unattributed, used = {}, 0, []
     for r in inside:
         found = memo['assigned'][id(r)]
         if not found:
@@ -229,6 +266,7 @@ def _turns(records, inside, start, end, big_turn, scope, memo):
         if cost is not None:
             t[0] += cost
             t[2] += 1
+            used.append(memo[id(r)])
     costed = [(t[0], t[1]) for t in turns.values() if t[2]]
     big = [x for x in costed if x[0] >= big_turn]
     if not big:
@@ -236,7 +274,7 @@ def _turns(records, inside, start, end, big_turn, scope, memo):
     attributed, cost = sum(x[0] for x in costed), sum(x[0] for x in big)
     return [_fact('big_turns', dict(threshold=big_turn, count=len(big), turns=len(costed), cost=cost, attributed_cost=attributed, share=cost / attributed,
                                     median_requests=float(statistics.median(x[1] for x in big)), unattributed_requests=unattributed, **scope),
-                  'ins_big_turns_c', (*COMMON, 'ins_a_turn_window', 'ins_a_turn_lower', 'ins_a_unattributed'), big_turn=big_turn)]
+                  'ins_big_turns_c', (*COMMON, 'ins_a_turn_window', 'ins_a_turn_lower', 'ins_a_unattributed'), used=used, big_turn=big_turn)]
 
 
 def public(result):
@@ -256,40 +294,46 @@ def _signed(x):
     return ('+' if x >= 0 else '-') + _usd_text(abs(x))
 
 
+def _prq(n):
+    return f"{n:,} priced request" + ('' if n == 1 else 's')
+
+
 def _rq(n):
     return f"{n:,} request" + ('' if n == 1 else 's')
 
 
 def _lines(f):
     v, i = f['values'], f['id']
+    lb = '≥' if v['lower_bound'] else ''
+    u = lambda x: lb + _usd_text(x)
     if i == 'model_share':
-        out = [f"{m['name']}: {_usd_text(m['cost'])} ({_pct(m['share'])}), {_rq(m['requests'])}" for m in v['models']]
+        out = [f"{m['name']}: {u(m['cost'])} ({_pct(m['share'])}), {_prq(m['priced_requests'])}" for m in v['models']]
         if v['other']:
             o = v['other']
-            out.append(f"other ({o['models']} models): {_usd_text(o['cost'])} ({_pct(o['share'])}), {_rq(o['requests'])}")
-        return out + [f"priced cost: {_usd_text(v['priced_cost'])} over {_rq(v['priced_requests'])}",
+            out.append(f"other ({o['models']} models): {u(o['cost'])} ({_pct(o['share'])}), {_prq(o['priced_requests'])}")
+        return out + [f"priced cost: {u(v['priced_cost'])} over {_prq(v['priced_requests'])}",
                       f"without a complete USD list price: {v['unpriced_requests']:,} of {_rq(v['requests'])} ({_pct(v['unpriced_share'])})"]
     if i == 'price_comparison':
         out = []
         for m in v['models']:
-            out.append(f"{m['name']}: {_usd_text(m['cost'])} ({_pct(m['share'])} of priced cost); the same tokens at list prices of {len(m['ladder'])} of {m['ladder_models']} models from the same provider, highest first:")
-            out += [f"  {x['name']}: {_usd_text(x['cost'])}" + ('  <- model used' if x['actual'] else '') for x in m['ladder']]
+            out.append(f"{m['name']}: {u(m['cost'])} ({_pct(m['share'])} of priced cost, {_prq(m['priced_requests'])}); the same tokens at list prices of {len(m['ladder'])} of {m['ladder_models']} models from the same provider, highest first:")
+            out += [f"  {x['name']}: {u(x['cost'])}" + ('  <- model used' if x['actual'] else '') for x in m['ladder']]
         return out
     if i == 'cost_parts':
-        return [f"{p['part'].replace('_', ' ')}: {_usd_text(p['cost'])} ({_pct(p['share'])})" for p in v['parts']] + [f"priced cost: {_usd_text(v['priced_cost'])}"]
+        return [f"{p['part'].replace('_', ' ')}: {u(p['cost'])} ({_pct(p['share'])})" for p in v['parts']] + [f"priced cost: {u(v['priced_cost'])}"]
     if i == 'context_size':
-        out = [f"{h['harness']}: median {h['median']:,.0f} tokens, p90 {h['p90']:,} tokens, {_rq(h['requests'])}" for h in v['harnesses']]
+        out = [f"{h['harness']}: median {lb}{h['median']:,.0f} tokens, p90 {lb}{h['p90']:,} tokens, {_rq(h['requests'])}" for h in v['harnesses']]
         return out + ([f"not counted (an input class is unknown): {_rq(v['excluded_requests'])}"] if v['excluded_requests'] else [])
     if i == 'long_context_premium':
-        return [f"requests at the long-context tier: {v['requests']:,} of {v['priced_requests']:,} priced", f"cost at the tier applied: {_usd_text(v['actual'])}",
-                f"same requests at the standard tier: {_usd_text(v['standard'])}", f"premium: {_usd_text(v['premium'])}"]
+        return [f"requests at the long-context tier: {v['requests']:,} of {v['priced_requests']:,} priced", f"cost at the tier applied: {u(v['actual'])}",
+                f"same requests at the standard tier: {u(v['standard'])}", f"premium: {_usd_text(v['premium'])}"]
     if i == 'big_turns':
-        return [f"turns costing >= {_usd_text(v['threshold'])}: {v['count']:,} of {v['turns']:,} turns with a known turn",
-                f"their cost: {_usd_text(v['cost'])} of {_usd_text(v['attributed_cost'])} ({_pct(v['share'])})", f"median requests per such turn: {v['median_requests']:g}"]
+        return [f"turns costing >= {_usd_text(v['threshold'])}: {v['count']:,} of {v['turns']:,} turns with a priced request",
+                f"their cost: {u(v['cost'])} of {u(v['attributed_cost'])} ({_pct(v['share'])})", f"median requests per such turn: {v['median_requests']:g}"]
     if i == 'subagent_share':
-        return [f"cost from subagents: {_usd_text(v['subagent_cost'])} of {_usd_text(v['total_cost'])} ({_pct(v['share'])})", f"requests from subagents: {v['subagent_requests']:,} of {v['priced_requests']:,} priced"]
-    return [f"requests at a fast or priority tier: {v['requests']:,} ({', '.join(f'{k} {n:,}' for k, n in v['tiers'].items())})", f"cost at the tier applied: {_usd_text(v['actual'])}",
-            f"same requests at the standard tier: {_usd_text(v['standard'])}", f"extra cost: {_usd_text(v['extra'])}"]
+        return [f"cost from subagents: {u(v['subagent_cost'])} of {u(v['total_cost'])} ({_pct(v['share'])})", f"requests from subagents: {v['subagent_requests']:,} of {v['priced_requests']:,} priced"]
+    return [f"requests at a fast or priority tier: {v['requests']:,} ({', '.join(f'{k} {n:,}' for k, n in v['tiers'].items())})", f"cost at the tier applied: {u(v['actual'])}",
+            f"same requests at the standard tier: {u(v['standard'])}", f"extra cost: {_usd_text(v['extra'])}"]
 
 
 def render_text(result):
@@ -297,7 +341,7 @@ def render_text(result):
     w = result['window']
     span = f"{w['start'] or 'the first request'} to {w['end'] or 'now'}" if w['start'] or w['end'] else 'all history'
     out = ['Cost facts: list-price USD, computed locally from saved observations (no language model, no interpretation)',
-           f"Window: {span}", f"Requests: {result['requests']:,} ({result['priced_requests']:,} with a complete USD list price, {result['unpriced_requests']:,} without)"]
+           f"Window: {span}", f"Requests: {result['requests']:,} ({result['priced_requests']:,} with a complete USD list price, {result['unpriced_requests']:,} without); left out as ambiguous: {result['ambiguous_requests']:,}; incomplete (lower bounds): {result['incomplete_requests']:,}"]
     if not result['facts']:
         out.append('No cost facts can be computed for this window.')
     for n, f in enumerate(result['facts'], 1):

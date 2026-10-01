@@ -9,12 +9,12 @@ from tokenatlas.report import build_report, render_report, write_report  # noqa:
 
 
 def obs(i, minute, turn, kind='main', agent='main', model='claude-sonnet-4-5', fresh=1000000, session='s1',
-        harness='claude', provider='anthropic', write=0, split=None, out=0, day='2026-09-03'):
+        harness='claude', provider='anthropic', write=0, split=None, out=0, day='2026-09-03', complete=True, synthetic=False):
     return dict(id=f'o{i}', harness=harness, session=session, agent=agent, thread_kind=kind, parent_session=session if kind == 'subagent' else None,
                 turn_id=turn, turn_confidence='derived', ts=f'{day}T10:{minute:02d}:00+00:00', model=model, provider=provider,
                 machine='m', project_id='/w/app', project_label='app', effort=None, origin='cli', raw_usage={'cache_creation': split} if split else {}, tariff=None,
-                tokens=dict(fresh_input=fresh, cache_write=write, cache_read=0, output=out, reasoning=0), complete=True,
-                id_synthetic=False, warnings=[], sources=[])
+                tokens=dict(fresh_input=fresh, cache_write=write, cache_read=0, output=out, reasoning=0), complete=complete,
+                id_synthetic=synthetic, warnings=[], sources=[])
 
 
 NOW = datetime(2026, 9, 20, tzinfo=timezone.utc)  # fixed so that the 30-day cost-fact window is the same on every run
@@ -33,8 +33,9 @@ CONTEXT = {
 def main(out, shared=None):
     records = [obs(1, 0, 't1'), obs(2, 5, None, 'subagent', 'a1', model='mystery-model'), obs(3, 10, 't2', write=1300000, split=dict(ephemeral_5m_input_tokens=800000, ephemeral_1h_input_tokens=500000)),
                obs(4, 20, 't3', model='mystery-model'), obs(5, 30, 't4', fresh=0, out=500000, harness='codex', provider='openai', model='gpt-5.6-luna'),
-               obs(6, 0, None, fresh=2000000, day='2026-06-01'), obs(7, 1, None, 'subagent', 'a2', session='s9', fresh=1000000, day='2026-06-01'),
-               obs(8, 2, None, session='s8', fresh=300000, harness='codex', provider='openai', model='gpt-5.6-luna', day='2026-06-01')]  # older than 30 days and without a turn: only the all-history cost facts see it
+               obs(6, 0, None, fresh=2000000, day='2026-06-01', complete=False), obs(7, 1, None, 'subagent', 'a2', session='s9', fresh=1000000, day='2026-06-01'),
+               obs(8, 2, None, session='s8', fresh=300000, harness='codex', provider='openai', model='gpt-5.6-luna', day='2026-06-01'),
+               obs(9, 3, None, session='s7', fresh=9000000, day='2026-06-01', synthetic=True)]  # ambiguous identity: in no fact  # older than 30 days and without a turn: only the all-history cost facts see it
     # t2: Claude with a 5m/1h cache-write split ($9.00); t4: a non-Claude harness priced from output tokens ($0.60)
     texts = {('claude', 's1', 't1'): 'Fix the <b>failing</b> build', ('claude', 's1', 't2'): 'Refactor the importer'}
     counts = {k: c['inputs']['count'] for k, c in CONTEXT.items()}

@@ -176,8 +176,9 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
     now = now or datetime.now(timezone.utc)
     display = lambda provider, model: metadata('model', model, {'provider': provider})
     memo = {}
-    windows = [dict(id=wid, **insights.public(insights.cost_facts(records, table, start, None, name=display, memo=memo)))
-               for wid, start in (('30d', now - timedelta(days=INSIGHT_DAYS)), ('all', None))]
+    # one captured `now` is the exclusive end of the 30-day window: later-dated observations are not 'the last 30 days'
+    windows = [dict(id=wid, **insights.public(insights.cost_facts(records, table, start, end, name=display, memo=memo)))
+               for wid, start, end in (('30d', now - timedelta(days=INSIGHT_DAYS), now), ('all', None, None))]
     report = dict(version=2, generated_at=now.isoformat(),
                   timezone=timezone_name, lang=lang, privacy='redacted' if redact else 'local',
                   columns=encode_columns(rows), coverage=coverage, insights=dict(days=INSIGHT_DAYS, big_turn=insights.BIG_TURN, windows=windows))

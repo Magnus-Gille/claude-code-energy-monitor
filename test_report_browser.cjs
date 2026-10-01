@@ -15,8 +15,8 @@ const L = {
 };
 // Cost facts card (fixed fixture clock 2026-09-20): window texts, provenance badges and the figures of both windows.
 const INS = {
-  sv: {title:'Kostnadsfakta', w:['Senaste 30 dagarna','Hela historiken'], prov:['Beräknad','Uppmätt'], total:'$12,60', totalAll:'$21,72', unpriced:'2 av 5 (40,0 %)', how:'Så räknas det', assume:'Antaganden', note:'följer inte filtren'},
-  en: {title:'Cost facts', w:['Last 30 days','All history'], prov:['Computed','Measured'], total:'$12.60', totalAll:'$21.72', unpriced:'2 of 5 (40.0%)', how:'How it is computed', assume:'Assumptions', note:'do not follow the filters'},
+  sv: {title:'Kostnadsfakta', w:['Senaste 30 dagarna','Hela historiken'], prov:['Beräknad','Uppmätt'], total:'$12,60', totalAll:'≥$21,72', spd:'Hastighet inte loggad, prissatt som standard (anrop: 2).', tier:'Servicenivå inte loggad, prissatt som standard (anrop: 1).', table:'ur den valda pristabellen (hämtad ', lower:'1 av anropen bakom det här faktat har ofullständiga tokenräknare', left:'Utelämnade: 1 anrop med osäker identitet', unpriced:'2 av 5 (40,0 %)', how:'Så räknas det', assume:'Antaganden', note:'följer inte filtren'},
+  en: {title:'Cost facts', w:['Last 30 days','All history'], prov:['Computed','Measured'], total:'$12.60', totalAll:'≥$21.72', spd:'Speed not recorded, priced as standard (requests: 2).', tier:'Service tier not recorded, priced as standard (requests: 1).', table:'from the selected price table (retrieved on ', lower:'1 of the requests behind this fact have incomplete token counters', left:'Left out: 1 requests with an uncertain identity', unpriced:'2 of 5 (40.0%)', how:'How it is computed', assume:'Assumptions', note:'do not follow the filters'},
 };
 const norm = x => x.replace(/[\s\u00a0\u202f]+/g, ' ');
 const facts = page => page.evaluate(() => [...document.querySelectorAll('#ins-body .ins-fact')].map(a => ({id:a.dataset.fact, prov:a.querySelector('.ins-prov').textContent, rows:[...a.querySelectorAll('.ins-row')].map(r => [...r.children].map(c => c.textContent)),
@@ -148,10 +148,14 @@ async function ready(page, errors, what = 'report') {
       await p2.locator('#prompts').screenshot({path:path.join(screenshotDir,'energy-report-context-'+T.lang+'.png')});
       {
         const I=INS[T.lang],money=async()=>{const f=(await facts(p2)).find(x=>x.id==='model_share');return {ids:(await facts(p2)).map(x=>x.id),total:norm(f.rows.find(r=>r[0]===(T.lang==='sv'?'Prissatt kostnad':'Priced cost'))[1]),unpriced:norm(f.rows.at(-1)[1])}};
+        const first=(await facts(p2)).find(x=>x.id==='model_share').assumptions.join(' | ');
+        assert.ok(first.includes(I.spd)&&first.includes(I.tier)&&first.includes(I.table),'pricing assumptions with counts and the table date: '+first);assert.ok(!first.includes(I.lower),'the 30-day window has no incomplete request');
         const a=await money();assert.deepEqual(a.ids,['model_share','price_comparison','cost_parts','context_size']);assert.equal(a.total,I.total);assert.equal(a.unpriced,I.unpriced);
         assert.ok(norm(await p2.locator('#ins-period').innerText()).includes('2026-08-21 – 2026-09-20'));
         await p2.click('#cost-facts [data-win="all"]');
         const b=await money();assert.deepEqual(b.ids,['model_share','price_comparison','cost_parts','context_size','long_context_premium','subagent_share']);assert.equal(b.total,I.totalAll,'the window toggle switches the values');
+        {const ms=(await facts(p2)).find(x=>x.id==='model_share'),txt=ms.assumptions.join(' | ');assert.ok(txt.includes(I.lower)&&txt.includes(I.left),'lower bound and left-out disclosures: '+txt);assert.ok(ms.rows.some(r=>r[1].startsWith('≥')),'amounts marked as lower bounds');
+         const ctx=(await facts(p2)).find(x=>x.id==='context_size');assert.ok(ctx.rows[0][1].includes('≥'))}
         assert.equal(await p2.locator('#cost-facts [data-win="all"]').getAttribute('aria-pressed'),'true');assert.equal(await p2.locator('#cost-facts [data-win="30d"]').getAttribute('aria-pressed'),'false');
         assert.ok(norm(await p2.locator('#ins-period').innerText()).includes(T.lang==='sv'?'första anropet – 2026-09-20':'the first request – 2026-09-20'));
         const all=await facts(p2);assert.deepEqual(all.map(f=>f.prov),all.map(f=>f.id==='context_size'?I.prov[1]:I.prov[0]));assert.ok(all.every(f=>f.markup===0));

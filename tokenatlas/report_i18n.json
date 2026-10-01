@@ -210,10 +210,11 @@
 "ins_cost_parts_c": "Summan av delkostnaderna input (ocachad), cache write, cache read och output för varje prissatt anrop; andel = delen / total prissatt kostnad.",
 "ins_context_size_c": "Per harness: inputtokens per anrop = ny input + cache read + cache write. Median = mittenvärdet (medelvärdet av de två mittersta vid jämnt antal); p90 = nearest-rank, värdet på plats ceil(0,9 × n) i stigande ordning.",
 "ins_long_context_premium_c": "Anrop vars totala input (ny + cache read + cache write) överstiger modellens långkontextgräns prissätts med dess långkontextpriser. Påslag = deras kostnad med de priserna − deras kostnad med standardpriserna (samma tokens).",
-"ins_big_turns_c": "En tur är en initierande inmatning plus allt den orsakade, även underagenters arbete. Turkostnad = summan av turens prissatta anrop i fönstret. Räknar turer med kostnad ≥ ${big_turn}; andel = deras kostnad / kostnaden för alla turer med känd tur; median = medianen av antal anrop per sådan tur.",
+"ins_big_turns_c": "En tur är en initierande inmatning plus allt den orsakade, även underagenters arbete. Turkostnad = summan av turens prissatta anrop i fönstret. Räknar turer med kostnad ≥ ${big_turn}; andel = deras kostnad / kostnaden för alla turer med minst ett prissatt anrop i fönstret; median = medianen av antal anrop per sådan tur.",
 "ins_subagent_share_c": "Andel = listpriskostnaden för anrop från underagenttrådar / listpriskostnaden för alla prissatta anrop.",
 "ins_premium_tiers_c": "För anrop som prissatts med snabb (speed eller service tier) eller prioritetsnivå: extra = deras kostnad med nivåns priser − deras kostnad med standardpriserna (samma tokens).",
-"ins_a_list": "Kostnader är listpriser (API-ekvivalenta) ur den medföljande pristabellen, inte betalt eller fakturerat belopp.",
+"ins_a_list": "Kostnader är listpriser (API-ekvivalenta) ur den valda pristabellen (hämtad {retrieved}), inte betalt eller fakturerat belopp.",
+"ins_a_list_nodate": "Kostnader är listpriser (API-ekvivalenta) ur den valda pristabellen, inte betalt eller fakturerat belopp.",
 "ins_a_scope": "Bara anrop med komplett USD-listpris ingår; anrop med okänt, saknat eller icke-USD-pris och lokala modeller räknas som utan pris och ingår inte i någon kostnad.",
 "ins_a_alias": "Modellnamn som pristabellen listar som alias räknas som en modell.",
 "ins_a_samecounts": "Samma tokenantal: kvalitet på svaret och hur många tokens en annan modell skulle ha gett är inte uppmätt.",
@@ -227,7 +228,11 @@
 "ins_a_unattributed": "Anrop som inte kan knytas till en tur ingår inte.",
 "ins_a_subagent": "Ett anrop räknas som underagent när loggarna markerar dess tråd som underagent.",
 "ins_a_tier_recorded": "Anropen prissätts med den nivå loggarna anger; där ingen nivå är loggad antas standard.",
-"ins_a_flex": "Flex-nivåer (rabatterade) ingår inte."
+"ins_a_flex": "Flex-nivåer (rabatterade) ingår inte.",
+"ins_a_excluded": "Utelämnade: {ambiguous} anrop med osäker identitet (räknas inte i några totaler, som i rapporten). Medräknade som ofullständiga: {incomplete} anrop med ofullständiga tokenräknare.",
+"ins_a_lower": "{lower} av anropen bakom det här faktat har ofullständiga tokenräknare: belopp och tal markerade ≥ är nedre gränser, och andelar och skillnader är räknade på de nedre gränserna.",
+"ins_pa_speed": "Hastighet inte loggad, prissatt som standard (anrop: {n}).",
+"ins_pa_tier": "Servicenivå inte loggad, prissatt som standard (anrop: {n})."
 },
 "en": {
 "title": "TokenAtlas · Local token usage",
@@ -448,10 +453,11 @@
 "ins_cost_parts_c": "The sum of the input (uncached), cache write, cache read and output parts of each priced request's cost; share = part / total priced cost.",
 "ins_context_size_c": "Per harness: input tokens per request = fresh input + cache read + cache write. Median = the middle value (the mean of the two middle values for an even count); p90 = nearest rank, the value at position ceil(0.9 x n) in ascending order.",
 "ins_long_context_premium_c": "Requests whose total input (fresh + cache read + cache write) exceeds the model's long-context threshold are priced at its long-context rates. Premium = their cost at those rates - their cost at the standard rates (same tokens).",
-"ins_big_turns_c": "A turn is an initiating input plus everything it caused, including subagent work. Turn cost = the sum of its priced requests in the window. Counts turns costing ≥ ${big_turn}; share = their cost / the cost of all turns with a known turn; median = the median number of requests per such turn.",
+"ins_big_turns_c": "A turn is an initiating input plus everything it caused, including subagent work. Turn cost = the sum of its priced requests in the window. Counts turns costing ≥ ${big_turn}; share = their cost / the cost of all turns with at least one priced request in the window; median = the median number of requests per such turn.",
 "ins_subagent_share_c": "Share = the list-price cost of requests from subagent threads / the list-price cost of all priced requests.",
 "ins_premium_tiers_c": "For requests priced with a fast (speed or service tier) or priority tier: extra = their cost at the tier's prices - their cost at the standard prices (same tokens).",
-"ins_a_list": "Costs are list prices (API equivalent) from the packaged price table, not what was paid or billed.",
+"ins_a_list": "Costs are list prices (API equivalent) from the selected price table (retrieved on {retrieved}), not what was paid or billed.",
+"ins_a_list_nodate": "Costs are list prices (API equivalent) from the selected price table, not what was paid or billed.",
 "ins_a_scope": "Only requests with a complete USD list price are included; requests with an unknown, missing or non-USD price, and local models, are counted as unpriced and excluded from every cost.",
 "ins_a_alias": "Model names that the price table lists as aliases are counted as one model.",
 "ins_a_samecounts": "same token counts; output quality and token counts of another model are not measured",
@@ -465,6 +471,10 @@
 "ins_a_unattributed": "Requests that cannot be attributed to a turn are not included.",
 "ins_a_subagent": "A request counts as subagent when the logs mark its thread as a subagent.",
 "ins_a_tier_recorded": "Requests are priced at the tier recorded in the logs; where no tier is recorded, standard is assumed.",
-"ins_a_flex": "Flex (discounted) tiers are not included."
+"ins_a_flex": "Flex (discounted) tiers are not included.",
+"ins_a_excluded": "Left out: {ambiguous} requests with an uncertain identity (not counted in any total, as in the report). Included as incomplete: {incomplete} requests with incomplete token counters.",
+"ins_a_lower": "{lower} of the requests behind this fact have incomplete token counters: amounts and figures marked ≥ are lower bounds, and shares and differences are computed on those lower bounds.",
+"ins_pa_speed": "Speed not recorded, priced as standard (requests: {n}).",
+"ins_pa_tier": "Service tier not recorded, priced as standard (requests: {n})."
 }
 }

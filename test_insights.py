@@ -67,7 +67,7 @@ class Shape(unittest.TestCase):
     def test_fact_fields_and_provenance(self):
         facts = cost_facts(D, TABLE)['facts']
         for f in facts:
-            self.assertEqual(sorted(f), ['assumption_keys', 'assumptions', 'computation', 'computation_key', 'id', 'params', 'provenance', 'title_key', 'values'])
+            self.assertEqual(sorted(f), ['assumption_keys', 'assumptions', 'computation', 'computation_key', 'id', 'params', 'price_assumptions', 'provenance', 'title_key', 'values'])
             self.assertTrue(f['computation'] and f['assumptions'] and all(isinstance(a, str) for a in f['assumptions']))
             self.assertNotIn('{', f['computation'] + ''.join(f['assumptions']), 'every placeholder is filled')
         self.assertEqual({f['id']: f['provenance'] for f in facts}['context_size'], 'measured')
@@ -99,7 +99,7 @@ class F1ModelShare(unittest.TestCase):
         self.assertEqual([m['name'] for m in v['models']], ['gpt-a', 'gpt-c', 'gpt-b'])
         self.assertAlmostEqual(v['models'][0]['cost'], 2.3, 9)
         self.assertAlmostEqual(v['models'][0]['share'], 2.3 / 2.61, 9)
-        self.assertEqual(v['models'][0]['requests'], 2)
+        self.assertEqual(v['models'][0]['priced_requests'], 2)
         self.assertIsNone(v['other'])
         self.assertAlmostEqual(v['priced_cost'], 2.61, 9)
         self.assertEqual((v['requests'], v['priced_requests'], v['unpriced_requests'], v['unpriced_share']), (5, 4, 1, 0.2))
@@ -108,7 +108,7 @@ class F1ModelShare(unittest.TestCase):
         rows = [ob(f'r{n}', model=f'm{n}', out=n * 100000) for n in range(1, 8)]  # m<n> costs exactly $n
         v = by_id(cost_facts(rows, TABLE))['model_share']['values']
         self.assertEqual([(m['name'], m['cost']) for m in v['models']], [('m7', 7.0), ('m6', 6.0), ('m5', 5.0), ('m4', 4.0), ('m3', 3.0)])
-        self.assertEqual((v['other']['models'], v['other']['cost'], v['other']['share'], v['other']['requests']), (2, 3.0, 3 / 28, 2))
+        self.assertEqual((v['other']['models'], v['other']['cost'], v['other']['share'], v['other']['priced_requests']), (2, 3.0, 3 / 28, 2))
         self.assertEqual(v['priced_cost'], 28.0)
 
     def test_non_usd_and_local_are_unpriced(self):
@@ -370,6 +370,134 @@ class F8PremiumTiers(unittest.TestCase):
         self.assertNotIn('premium_tiers', by_id(cost_facts(rows, TABLE)))
 
 
+class Reliability(unittest.TestCase):
+    """The report's own rule (template aggregate): id_synthetic = ambiguous identity, counted in no total; complete=False = lower bound, still counted."""
+    def rows(self):
+        bad = ob('amb', model='m1', out=10 * M, turn='tx')
+        bad['id_synthetic'] = True
+        low = ob('low', '2026-09-03T10:01:00+00:00', model='m1', out=200000)
+        low['complete'] = False
+        return [ob('ok', model='m1', out=600000), low, bad, ob('unp', '2026-09-03T10:02:00+00:00', model='mystery', fresh=7)]
+
+    def test_ambiguous_rows_are_excluded_from_every_fact(self):
+        res = cost_facts(self.rows(), TABLE)
+        v = by_id(res)['model_share']['values']
+        self.assertEqual((v['priced_cost'], v['requests'], v['priced_requests'], v['unpriced_requests']), (8.0, 3, 2, 1))
+        self.assertEqual((res['requests'], res['ambiguous_requests'], res['incomplete_requests']), (3, 1, 1))
+        self.assertEqual(by_id(res)['context_size']['values']['harnesses'][0]['requests'], 3)  # 'amb' (10M output, no input) is not among them
+        for f in res['facts']:
+            self.assertEqual((f['values']['ambiguous_requests'], f['values']['incomplete_requests']), (1, 1), f['id'])
+            self.assertIn('Left out: 1 requests with an uncertain identity', ' '.join(f['assumptions']))
+            self.assertIn('Included as incomplete: 1 requests', ' '.join(f['assumptions']))
+
+    def test_ambiguous_row_does_not_make_a_big_turn_or_a_subagent_share(self):
+        bad = ob('amb', model='m1', out=10 * M, turn='tx', harness='claude', provider='openai', kind='subagent')
+        bad['id_synthetic'] = True
+        res = by_id(cost_facts([bad, ob('ok', model='m1', out=M, harness='claude', provider='openai', turn='t1')], TABLE))
+        self.assertNotIn('big_turns', res)
+        self.assertNotIn('subagent_share', res)
+        self.assertEqual(res['model_share']['values']['priced_cost'], 10.0)
+
+    def test_incomplete_rows_are_kept_and_make_the_facts_lower_bounds(self):
+        f = by_id(cost_facts(self.rows(), TABLE))
+        v = f['model_share']['values']
+        self.assertEqual((v['lower_bound'], v['lower_bound_requests']), (True, 1))
+        self.assertIn('1 of the requests behind this fact have incomplete token counters: amounts and figures marked ≥ are lower bounds', ' '.join(f['model_share']['assumptions']))
+        self.assertIn('≥$8.00', insights.render_text(cost_facts(self.rows(), TABLE)))
+        self.assertTrue(f['cost_parts']['values']['lower_bound'])
+        self.assertTrue(f['context_size']['values']['lower_bound'])
+
+    def test_complete_data_is_not_marked(self):
+        f = by_id(cost_facts([ob('ok', model='m1', out=M)], TABLE))
+        for fact in f.values():
+            self.assertFalse(fact['values']['lower_bound'])
+            self.assertNotIn('lower bounds', ' '.join(fact['assumptions']))
+        self.assertNotIn('≥', insights.render_text(cost_facts([ob('ok', model='m1', out=M)], TABLE)))
+
+    def test_incomplete_but_unpriced_row_only_bounds_the_token_fact(self):
+        low = ob('low', model='mystery', fresh=100)
+        low['complete'] = False
+        f = by_id(cost_facts([ob('ok', model='m1', out=M), low], TABLE))
+        self.assertFalse(f['model_share']['values']['lower_bound'])
+        self.assertTrue(f['context_size']['values']['lower_bound'])
+        self.assertEqual(f['model_share']['values']['incomplete_requests'], 1)
+
+
+class PricingAssumptions(unittest.TestCase):
+    TIER = 'Service tier not recorded, priced as standard (requests: {n}).'
+
+    def test_assumed_rows_propagate_with_counts_to_every_cost_fact(self):
+        std = {'service_tier': 'standard'}
+        rows = [ob('a1', model='gpt-l', fresh=M, out=500000), ob('a2', model='gpt-l', fresh=10), ob('a3', model='gpt-l', fresh=10, tariff=std)]  # first two assumed
+        f = by_id(cost_facts(rows, dict(TABLE, models=[e for e in TABLE['models'] if e['model'] in ('gpt-l', 'gpt-e')])))
+        for fid, n in (('model_share', 2), ('cost_parts', 2), ('price_comparison', 2), ('long_context_premium', 1)):
+            self.assertEqual([(a['key'], a['requests']) for a in f[fid]['price_assumptions']], [('ins_pa_tier', n)], fid)
+            self.assertIn(self.TIER.format(n=n), f[fid]['assumptions'], fid)
+        self.assertNotIn('service tier not recorded', ' '.join(f['context_size']['assumptions']).lower())
+
+    def test_subagent_turn_and_tier_facts(self):
+        rows = [ob('m', model='m1', out=600000, harness='claude', provider='openai', turn='t1', tariff={'speed': 'standard'}),
+                ob('s', '2026-09-03T10:01:00+00:00', model='m1', out=M, harness='claude', provider='openai', kind='subagent'),
+                ob('x', '2026-09-03T10:02:00+00:00', model='m2', out=5 * M, harness='claude', provider='openai', turn='t2')]
+        f = by_id(cost_facts(rows, TABLE, big_turn=5.0))
+        claude = 'Speed not recorded, priced as standard (requests: {n}).'
+        self.assertIn(claude.format(n=2), f['subagent_share']['assumptions'])  # priced requests: s and x are assumed; m has a recorded speed ... and s is
+        self.assertEqual([(a['key'], a['requests']) for a in f['subagent_share']['price_assumptions']], [('ins_pa_speed', 2)])
+        self.assertEqual([(a['key'], a['requests']) for a in f['big_turns']['price_assumptions']], [('ins_pa_speed', 2)])  # t1 (m) and t2 (x) both attributed; s rolls up into t1
+        fast = [ob('f', model='gpt-t', fresh=M, tariff={'service_tier': 'fast'})]
+        self.assertEqual(by_id(cost_facts(fast, TABLE))['premium_tiers']['price_assumptions'], [])
+
+    def test_unknown_assumption_text_is_shown_as_it_is(self):
+        fact = insights._finish(insights._fact('x', {}, 'ins_subagent_share_c', (), used=[(ob('a'), {'assumptions': ['odd thing']}, 1.0, {})]),
+                                dict(ambiguous=0, incomplete=0, retrieved=None))
+        self.assertIn('odd thing (requests: 1)', fact['assumptions'])
+
+
+class PriceTableWording(unittest.TestCase):
+    def test_selected_table_with_its_date(self):
+        f = by_id(cost_facts(D, TABLE))['model_share']
+        text = ' '.join(f['assumptions'])
+        self.assertIn('from the selected price table (retrieved on 2026-09-01)', text)
+        self.assertNotIn('packaged', text + json.dumps(insights._texts()))
+        self.assertEqual(cost_facts(D, TABLE)['price_table'], {'retrieved_on': '2026-09-01'})
+
+    def test_no_date_when_the_table_has_none(self):
+        table = {k: v for k, v in TABLE.items() if k != 'retrieved_on'}
+        f = by_id(cost_facts(D, table))['model_share']
+        self.assertIn('from the selected price table, not what was paid', ' '.join(f['assumptions']))
+        self.assertNotIn('retrieved', ' '.join(f['assumptions']))
+        self.assertTrue(all('{' not in a for a in f['assumptions']))
+
+
+class WindowEnd(unittest.TestCase):
+    def test_end_is_exclusive_and_later_rows_are_out(self):
+        now = datetime(2026, 9, 20, tzinfo=timezone.utc)
+        rows = [ob('before', '2026-09-19T23:59:59+00:00', model='m1', out=M), ob('at', '2026-09-20T00:00:00+00:00', model='m2', out=M),
+                ob('after', '2026-09-21T00:00:00+00:00', model='m3', out=M), ob('old', '2026-08-10T00:00:00+00:00', model='m4', out=M)]
+        rep = build_report(rows, {}, redact=False, table=TABLE, now=now)
+        thirty, everything = rep['insights']['windows']
+        self.assertEqual(thirty['window'], {'start': '2026-08-21T00:00:00+00:00', 'end': '2026-09-20T00:00:00+00:00'})
+        self.assertEqual([m['name'] for m in by_id(thirty)['model_share']['values']['models']], ['m1'])
+        self.assertEqual(sorted(m['name'] for m in by_id(everything)['model_share']['values']['models']), ['m1', 'm2', 'm3', 'm4'])
+
+
+class PricedRequestsLabel(unittest.TestCase):
+    def test_json_key_and_cli_text_say_priced(self):
+        res = cost_facts(D, TABLE)
+        m = by_id(res)['model_share']['values']['models'][0]
+        self.assertIn('priced_requests', m)
+        self.assertNotIn('requests', m)
+        text = insights.render_text(res)
+        self.assertIn('gpt-a: $2.30 (88.1%), 2 priced requests', text)
+
+    def test_big_turn_denominator_wording_and_value(self):
+        for lang, text in (('en', 'the cost of all turns with at least one priced request in the window'), ('sv', 'alla turer med minst ett prissatt anrop i fönstret')):
+            self.assertIn(text, json.loads(insights.I18N.read_text(encoding='utf-8'))[lang]['ins_big_turns_c'])
+        rows = F6BigTurns().rows() + [ob('z', '2026-09-03T10:20:00+00:00', model='mystery', harness='claude', provider='openai', session='s', turn='tZ', out=M)]
+        v = by_id(cost_facts(rows, TABLE))['big_turns']['values']
+        self.assertEqual(v['turns'], 3)  # tZ has no priced request: not in the denominator
+
+
 class Report(unittest.TestCase):
     NOW = datetime(2026, 9, 20, tzinfo=timezone.utc)
 
@@ -451,6 +579,14 @@ class Cli(Base):
         self.assertIn('[measured]', out)
         for private in ('secret', '/work/app', 'sess.jsonl', 'r-r1'):
             self.assertNotIn(private, out)
+
+    def test_days_end_at_the_captured_now(self):
+        jl(why.CLAUDE_PROJECTS / 'proj' / 'future.jsonl', [claude_row('2099-01-01T00:00:00Z', 'rf', 5, session='fut')])
+        self.assertEqual(self.run_cli('refresh', '--harness', 'claude')[0], 0)
+        self.assertEqual(json.loads(self.insights('--json')[1])['requests'], 4)
+        res = json.loads(self.insights('--json', '--days', '36500')[1])
+        self.assertEqual(res['requests'], 3)  # the 2099 row is after now
+        self.assertTrue(res['window']['end'])
 
     def test_window_options(self):
         res = json.loads(self.insights('--json', '--start', '2026-09-03T10:30:00+00:00')[1])
