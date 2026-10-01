@@ -147,6 +147,16 @@ async function ready(page, errors, what = 'report') {
       assert.ok(sparseText.includes('Refactor the importer'));for(const x of [T.labels[0],T.labels[2],T.labels[3],T.labels[4]])assert.ok(!sparseText.includes(x),'unknown parts are omitted: '+x);
       await p2.locator('#prompts').screenshot({path:path.join(screenshotDir,'energy-report-context-'+T.lang+'.png')});
       {
+        // Energy card (#61): an order-of-magnitude estimate that follows the filters, with its range, the unweighted count and the proxy note
+        const e=await p2.evaluate(()=>({title:document.querySelector('#energy h2').textContent,value:document.getElementById('energy-value').textContent,range:document.getElementById('energy-range').textContent,unw:document.getElementById('energy-unweighted').textContent,proxy:document.getElementById('energy-proxy').textContent,calc:UsageReport.energyOf(UsageReport.getSelected())}));
+        assert.equal(norm(e.title),T.lang==='sv'?'Energi (uppskattning)':'Energy (estimate)');
+        assert.ok(e.value.includes('~')&&e.value!=='—','energy value: '+e.value);
+        assert.ok(e.range.includes('÷3')&&e.range.includes('×3'),'energy range: '+e.range);
+        assert.ok(e.calc.mid>0&&e.calc.unweighted>0&&norm(e.unw).length>0,'unweighted requests are counted and shown: '+e.unw);
+        assert.ok(e.proxy.includes('README'),'proxy note: '+e.proxy);
+        assert.equal(await p2.locator('#cost-facts article[data-fact="energy"]').count(),0,'energy is not shown as a cost fact');
+      }
+      {
         const I=INS[T.lang],money=async()=>{const f=(await facts(p2)).find(x=>x.id==='model_share');return {ids:(await facts(p2)).map(x=>x.id),total:norm(f.rows.find(r=>r[0]===(T.lang==='sv'?'Prissatt kostnad':'Priced cost'))[1]),unpriced:norm(f.rows.at(-1)[1])}};
         const first=(await facts(p2)).find(x=>x.id==='model_share').assumptions.join(' | ');
         assert.ok(first.includes(I.spd)&&first.includes(I.tier)&&first.includes(I.table),'pricing assumptions with counts and the table date: '+first);assert.ok(!first.includes(I.lower),'the 30-day window has no incomplete request');
