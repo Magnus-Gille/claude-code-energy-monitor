@@ -114,8 +114,11 @@ class Fact(unittest.TestCase):
         self.assertAlmostEqual(v['mid_mwh'], 390, 9)
         self.assertEqual(v['unweighted_requests'], 1)
 
-    def test_no_fact_without_tokens(self):
-        self.assertNotIn('energy', by_id(cost_facts([ob('z', model='gpt-a')], TABLE)))
+    def test_zero_tokens_still_state_the_requests_and_unweighted_count(self):
+        v = by_id(cost_facts([ob('z', model='gpt-a')], TABLE))['energy']['values']  # as on the page: 0 mWh, but the counts are shown
+        self.assertEqual((v['mid_mwh'], v['requests'], v['unweighted_requests']), (0, 1, 1))
+        self.assertEqual([p['share'] for p in v['parts']], [0, 0, 0, 0])
+        self.assertIn('0 mWh', insights.render_text(cost_facts([ob('z', model='gpt-a')], TABLE)))
         self.assertNotIn('energy', by_id(cost_facts([], TABLE)))
 
     def test_incomplete_observation_makes_it_a_lower_bound(self):

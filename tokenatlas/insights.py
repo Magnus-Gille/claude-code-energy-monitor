@@ -287,11 +287,11 @@ def _energy(inside):
         else:
             unweighted += 1
     mid = sum(by.values())
-    if not mid:
-        return []
+    if not inside:
+        return []  # no request in scope; with requests the fact is shown even at 0 mWh, so the unweighted count is always stated (as on the page)
     low, high = energy.bounds(mid)
     e, m = energy.PER_1K, energy.TIERS
-    return [_fact('energy', dict(mid_mwh=mid, low_mwh=low, high_mwh=high, parts=[dict(part=p, mwh=by[p], share=by[p] / mid) for p in ('fresh_input', 'cache_write', 'cache_read', 'output')],
+    return [_fact('energy', dict(mid_mwh=mid, low_mwh=low, high_mwh=high, parts=[dict(part=p, mwh=by[p], share=by[p] / mid if mid else 0.0) for p in ('fresh_input', 'cache_write', 'cache_read', 'output')],
                                  requests=len(inside), unweighted_requests=unweighted, tiers=dict(sorted(tiers.items()))),
                   'ins_energy_c', ('ins_a_energy_proxy', 'ins_a_energy_constants', 'ins_a_energy_range', 'ins_a_energy_unweighted', 'ins_a_energy_reasoning'),
                   used=[(r, {'assumptions': []}, None, {}) for r in inside], e_in=e['fresh_input'], e_out=e['output'], e_cr=e['cache_read'], e_cw=e['cache_write'],
