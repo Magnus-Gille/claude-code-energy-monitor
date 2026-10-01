@@ -36,10 +36,12 @@ COWORK_SESSIONS = Path.home() / "Library" / "Application Support" / "Claude" / "
 def _env_dir(var, tilde=False):
     """Absolute directory named by `var`, else None; unset, empty and (per the XDG spec) relative values mean the default."""
     value = os.environ.get(var, '')
-    if tilde and value.startswith('~'):
+    # Only "~" and "~/..." mean the home directory (as Pi expands them); "~user/..." stays relative, so the default,
+    # on every platform (Windows' expanduser would guess a sibling of the current home).
+    if tilde and (value == '~' or value.startswith(('~/', '~\\'))):
         try:
-            value = str(Path(value).expanduser())
-        except (RuntimeError, KeyError):  # unknown ~user (RuntimeError) or no home to expand (KeyError): default
+            value = str(Path.home() / value[2:])
+        except (RuntimeError, KeyError):  # no home directory to expand: default
             return None
     return Path(value) if value and Path(value).is_absolute() else None
 
