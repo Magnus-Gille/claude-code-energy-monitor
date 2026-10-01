@@ -30,8 +30,8 @@ tokenatlas open              # read the logs, build the private report, open it 
 Python 3.10 or newer is needed. macOS ships Python 3.9; `uv tool install tokenatlas` (or a one-off
 `uvx tokenatlas open`) downloads a suitable Python by itself, so nothing else has to be installed.
 
-Installing only adds the command: nothing runs in the background. `tokenatlas open` is enough to look now and
-then. For a history that outlasts the agents' own log cleanup (Claude Code deletes transcripts after 30 days by
+Installing only adds the command: nothing runs in the background. Every `tokenatlas open` stores what the logs hold
+at that moment, which is enough to look now and then. For a history that outlasts the agents' own log cleanup (Claude Code deletes transcripts after 30 days by
 default, its `cleanupPeriodDays` setting), run `tokenatlas collect` on a schedule; see
 [Keeping the report fresh](#keeping-the-report-fresh). Only what was stored before a log was deleted survives.
 
@@ -41,6 +41,7 @@ What is read, from each harness's default location (or where its own variable mo
 | Harness | Logs |
 |---|---|
 | Claude Code | `~/.claude/projects` |
+| Claude desktop Cowork (macOS) | `~/Library/Application Support/Claude/local-agent-mode-sessions/…/.claude/projects` |
 | Codex | `~/.codex/sessions` |
 | OpenCode | `~/.local/share/opencode/opencode.db` |
 | Pi | `~/.pi/agent/sessions` |
@@ -537,7 +538,7 @@ set -g status-right "#(python3 /path/to/pi_status.py 2>/dev/null)"
 3. **Daily totals persist** across sessions in `~/.claude/statusline_daily.json`. Multiple concurrent sessions are handled safely with file locking.
 4. **At midnight** (or rather, on the first prompt of a new day), the previous day's totals are archived to `~/.claude/statusline_history.jsonl` and the daily counter resets.
 
-The statusline needs no cron job or daemon: Claude Code runs it on every status update and its daily totals accumulate. (TokenAtlas's own history is different: it needs a scheduled `tokenatlas collect`, see [Quick start](#quick-start).)
+The statusline needs no cron job or daemon: Claude Code runs it on every status update and its daily totals accumulate. (TokenAtlas's own history grows whenever you run `tokenatlas open` or `tokenatlas collect`; schedule `collect` so nothing is lost to the agents' log cleanup between runs, see [Quick start](#quick-start).)
 
 ### Data files
 
