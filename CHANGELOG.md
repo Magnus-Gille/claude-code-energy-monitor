@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The project fol
 
 ### Added
 
+- Turn context: `top --keep-text` also stores, for the current top turns only and in the same 0600 `top-prompts.json` (now version 2; version 1 is still read and upgraded), the title (Claude `custom-title`, Codex `session_index` thread name, OpenCode session title, Pi `session_info` name), working directory, branch, repository, input count, initiating and follow-up inputs, final message, shell/edit/web/subagent counts, PR numbers and up to 5 commit subjects from local `git log --all` over the turn window. No network, no model calls. `top` prints up to four context lines per turn and `--json --with-text` adds `context`. Private reports get an "Inputs" column and an expandable context block per stored turn; shared reports carry only the input count and never any context text. See README "Top turns".
+- Prompts are now called turns: `top` ranks the costliest turns (an initiating input plus everything it caused, including follow-up inputs and subagent work) and the report card is "Dyraste turerna" / "Costliest turns". The command name and JSON keys are unchanged.
 - English report UI: `report --html` and `open` take `--lang auto|sv|en` (default `auto`: Swedish when the browser language starts with `sv`, otherwise English), and the report header has an SV/EN toggle that switches live and is remembered in `localStorage` (when available). Pseudonym labels in the payload are now language-neutral codes; the UI texts ship as a second compressed block (`report_i18n.json`).
 - Release workflow `.github/workflows/publish.yml` publishes to PyPI with trusted publishing (no stored token) when a GitHub release is published, or on demand for an existing tag.
 

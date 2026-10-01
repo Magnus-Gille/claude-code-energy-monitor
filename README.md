@@ -161,29 +161,46 @@ tokenatlas rate <session-id> --unit review --thread claude:agent:<id> --outcome 
 Costs are API-equivalent list prices, not what was paid; unknown cost prints `n/a`. Once outcomes exist,
 `session` also shows cost per passed result per model. Details and limits: [docs/sessions.md](docs/sessions.md).
 
-## Top prompts
+## Top turns
 
 ```bash
 tokenatlas top [-n 5] [--by cost|tokens] [--harness H] [--project P] [--start ISO] [--end ISO] [--json]
-tokenatlas top --keep-text -n 5     # opt in: remember the text of the current top 5 prompts
-tokenatlas top --forget-text        # delete the stored text
-tokenatlas top --json --with-text   # include stored text in JSON
+tokenatlas top --keep-text -n 5     # opt in: remember the text and context of the current top 5 turns
+tokenatlas top --forget-text        # delete the stored text and context
+tokenatlas top --json --with-text   # include stored text and context in JSON
 ```
 
-A prompt is one user turn plus every request it caused, including subagent work (rolled up by time and
-parent session). Prompts are ranked by list-price cost (unpriced last, and any non-USD price counts as unpriced) or by tokens; cost is API-equivalent,
-`n/a` when unpriced and `≥` when only partly priced. The HTML report has a matching "Dyraste prompterna" card
-that follows the report filters.
+A turn is your initiating input plus everything it caused, including follow-up inputs and subagent work (rolled up by
+time and parent session). Turns are ranked by list-price cost (unpriced last, and any non-USD price counts as unpriced) or by tokens; cost is API-equivalent,
+`n/a` when unpriced and `≥` when only partly priced. The HTML report has a matching "Dyraste turerna" / "Costliest turns" card
+that follows the report filters and has an "Inputs" column (the number of inputs in the turn, `–` when unknown).
 
 Prompt text is never stored in the history database and never in snapshots or imports. Only if you run
 `top --keep-text` does TokenAtlas write `top-prompts.json` next to the history (mode 0600, written atomically).
-It holds, for the current global top prompts only, the harness, session, turn id, capture time and a sanitized
-preview (whitespace collapsed, secret-like strings masked, at most about 200 characters) read from this
-machine's own logs; prompts from other machines get no text. A prompt that falls out of the top is removed
-from the file on the next `--keep-text`. Shared (pseudonymized, default) reports never contain prompt text;
-private reports (`report --html --private`, `open` without `--shared`) show the previews of the prompts that are in the
-current global top (by the recorded `-n` and ranking) when the file exists. Previews whose prompt has fallen out of the top
-are kept only until the next `--keep-text`. Prompts whose text could not be read are retried on each `--keep-text`.
+It holds, for the current global top turns only, the harness, session, turn id, capture time, a sanitized
+preview (whitespace collapsed, secret-like strings masked, at most about 200 characters) and the turn context below,
+all read from this machine's own logs; turns from other machines get neither. A turn that falls out of the top is removed
+from the file on the next `--keep-text`. Turns whose text or context could not be read are retried on each `--keep-text`,
+which also fills the context of entries kept by an older version (the file format is version 2; version 1 files are still read).
+
+### Turn context
+
+With `--keep-text`, each stored turn also gets best-effort, local-only context, sanitized the same way:
+
+- **title**: Claude `custom-title`, Codex `session_index.jsonl` thread name, OpenCode session title, Pi `session_info` name;
+- **place**: working directory, git branch and repository (credentials, query and fragment stripped) as recorded by the harness;
+- **inputs**: the number of inputs, the initiating input and up to 5 short follow-up inputs;
+- **final message**: the last assistant text of the turn, at most about 400 characters;
+- **activity**: counts of shell, edit, web and subagent tool calls (command text is scanned for PRs, never stored);
+- **outcomes**: PR numbers seen in `gh pr` commands or the final message, and up to 5 commit subjects from local `git log --all`
+  over the turn's time window in the turn's working directory.
+
+Nothing is fetched from the network and no model is called. `top` prints up to four indented lines per stored turn
+(title or initiating input; `repo/branch · directory`; counts and outcomes; `final: …`); `--json --with-text` adds a `context` object.
+Private reports (`report --html --private`, `open` without `--shared`) show the stored previews and an expandable context block for
+the turns in the current global top (by the recorded `-n` and ranking) when the file exists. Shared (pseudonymized, default)
+reports never contain any text, title, path, branch, repository, final message, PR number or commit subject; the only
+context they carry is the number of inputs per turn.
 
 On POSIX the store is only read when it is a regular file owned by you with mode 0600 and no other hard links; a symlink,
 a foreign owner, group/other access or extra links are refused with a warning, and `--keep-text` replaces such a file
