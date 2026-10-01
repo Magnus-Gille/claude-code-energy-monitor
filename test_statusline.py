@@ -201,7 +201,9 @@ class StatuslineTests(Base):
         self.assertEqual(self.line(raw=''), 'TokenAtlas')
 
     def test_a_bad_value_falls_back_to_the_model_name(self):
-        self.assertEqual(self.line({'model': {'display_name': 'Opus 4.8'}, 'context_window': {'used_percentage': 'x'}}), 'Opus 4.8')
+        line = self.line({'model': {'display_name': 'Opus 4.8'}, 'context_window': {'used_percentage': 'x'}})
+        self.assertTrue(line.startswith('Opus 4.8 | D:'), line)  # a non-numeric value is left out; the rest of the line stays
+        self.assertNotIn('Ctx', line)
 
     def test_it_writes_nothing(self):
         self.line()
@@ -229,6 +231,26 @@ class LightImportTests(unittest.TestCase):
         self.assertTrue(done.stdout.rstrip().endswith('HEAVY []'), done.stdout)
 
 
+class RobustnessTests(unittest.TestCase):
+    def test_a_bad_option_prints_the_fallback_and_exits_zero(self):
+        done = subprocess.run([sys.executable, '-m', 'tokenatlas', 'statusline', '--bogus'], capture_output=True, text=True, cwd=ROOT,
+                              env=dict(os.environ, PYTHONPATH=str(ROOT)), input='{}')
+        self.assertEqual((done.returncode, done.stdout.strip()), (0, 'TokenAtlas'))
+
+    def test_help_still_works(self):
+        done = subprocess.run([sys.executable, '-m', 'tokenatlas', 'statusline', '--help'], capture_output=True, text=True, cwd=ROOT,
+                              env=dict(os.environ, PYTHONPATH=str(ROOT)))
+        self.assertEqual(done.returncode, 0)
+        self.assertIn('--setup', done.stdout)
+
+    def test_non_finite_percentages_are_left_out(self):
+        out = io.StringIO()
+        raw = '{"model":{"display_name":"Opus"},"context_window":{"used_percentage":NaN},"rate_limits":{"five_hour":{"used_percentage":Infinity},"seven_day":{"used_percentage":12}}}'
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(statusline.run([], db=Path(tempfile.gettempdir()) / 'none' / 'h.sqlite3', stdin=io.StringIO(raw)), 0)
+        self.assertEqual(out.getvalue().strip(), 'Opus | 7d:12%')
+
+
 class SetupTests(unittest.TestCase):
     def test_setup_prints_the_snippet_and_never_edits_the_settings_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -247,13 +269,18 @@ class SetupTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True):
             text = statusline.setup_text('/data/h.sqlite3', '/opt/my bin/tokenatlas')
         self.assertIn(str(Path.home() / '.claude' / 'settings.json'), text)
-        self.assertIn("'/opt/my bin/tokenatlas' --db /data/h.sqlite3 statusline", text)
+        db = str(Path('/data/h.sqlite3').absolute())
+        self.assertIn(json.dumps(f"{statusline._quote('/opt/my bin/tokenatlas')} --db {statusline._quote(db)} statusline")[1:-1], text)
+        if os.name != 'nt':
+            self.assertIn("'/opt/my bin/tokenatlas' --db /data/h.sqlite3 statusline", text)
+        else:
+            self.assertIn('\\"/opt/my bin/tokenatlas\\"', text)  # double quotes, escaped inside the JSON snippet
 
     def test_setup_through_the_cli(self):
         done = subprocess.run([sys.executable, '-m', 'tokenatlas', 'statusline', '--setup'], capture_output=True, text=True, cwd=ROOT,
                               env=dict(os.environ, PYTHONPATH=str(ROOT), CLAUDE_CONFIG_DIR='/nonexistent/claude'))
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn('/nonexistent/claude/settings.json', done.stdout)
+        self.assertIn(str(Path('/nonexistent/claude') / 'settings.json'), done.stdout)
         self.assertIn('"statusLine"', done.stdout)
 
 

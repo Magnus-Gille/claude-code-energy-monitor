@@ -6,9 +6,11 @@ quota are live from the payload on stdin. No network, no credentials, nothing is
 """
 import argparse
 import json
+import math
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 from datetime import date, datetime, timedelta, timezone
@@ -115,15 +117,20 @@ def totals_segments(cache, now):
     return parts
 
 
+def _percent(value):
+    """A finite number as a whole percent, else None (a missing, non-numeric, NaN or infinite value is left out)."""
+    return f'{value:.0f}%' if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+
+
 def render(payload, cache, now):
     """The one status line; a missing context or quota is omitted, a missing or unreadable cache omits the totals."""
     model = (payload.get('model') or {}).get('display_name') or '?'
     parts = [model]
-    ctx = (payload.get('context_window') or {}).get('used_percentage')
-    if ctx is not None:parts.append(f'Ctx:{ctx:.0f}%')
+    ctx = _percent((payload.get('context_window') or {}).get('used_percentage'))
+    if ctx:parts.append(f'Ctx:{ctx}')
     limits = payload.get('rate_limits') or {}
-    q5, q7 = ((limits.get(k) or {}).get('used_percentage') for k in ('five_hour', 'seven_day'))
-    quota = [f'{label}:{q:.0f}%' for label, q in (('5h', q5), ('7d', q7)) if q is not None]
+    q5, q7 = (_percent((limits.get(k) or {}).get('used_percentage')) for k in ('five_hour', 'seven_day'))
+    quota = [f'{label}:{q}' for label, q in (('5h', q5), ('7d', q7)) if q]
     if quota:parts.append(' '.join(quota))
     try:
         parts += totals_segments(cache, now)
@@ -149,13 +156,20 @@ def executable():
     return str(Path(found).resolve()) if found else f'{sys.executable} -m tokenatlas'
 
 
+def _quote(arg):
+    """One argument quoted for the shell that runs the statusLine command: POSIX quoting, or double quotes on Windows (valid in cmd.exe and bash)."""
+    if os.name != 'nt':
+        return shlex.quote(arg)
+    return subprocess.list2cmdline([arg])
+
+
 def setup_text(db=None, command=None):
     """The statusLine snippet for Claude Code's settings.json and where that file is; the file itself is never touched."""
     config = os.environ.get('CLAUDE_CONFIG_DIR')
     settings = (Path(config).expanduser() if config else Path.home() / '.claude') / 'settings.json'
     command = command or executable()
-    if ' -m ' not in command:command = shlex.quote(command)
-    if db is not None:command += f' --db {shlex.quote(str(Path(db).expanduser().absolute()))}'
+    if ' -m ' not in command:command = _quote(command)
+    if db is not None:command += f' --db {_quote(str(Path(db).expanduser().absolute()))}'
     snippet = json.dumps({'statusLine': {'type': 'command', 'command': f'{command} statusline'}}, indent=2)
     return (f'Add this to {settings} (merge it into the existing JSON; this command never edits the file):\n\n{snippet}\n\n'
             'Totals refresh whenever tokenatlas refresh, open or collect runs; context and quota are live.')
@@ -165,13 +179,17 @@ def run(argv, db=None, stdin=None, now=None):
     """Entry point: print one line and return 0, whatever happens; it writes nothing."""
     parser = argparse.ArgumentParser(prog='tokenatlas statusline', description='Claude Code statusline: reads its JSON payload on stdin and the cache refresh writes; no network.')
     parser.add_argument('--setup', action='store_true', help="Print the statusLine snippet for Claude Code's settings and its location, without editing it.")
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:  # --help exits 0 after printing; a bad option must not break the status bar: fallback line, exit 0
+        if exc.code not in (0, None):print('TokenAtlas')
+        return 0
     if args.setup:
         print(setup_text(db))
         return 0
     model = None
     try:
-        payload = json.loads((stdin or sys.stdin).read())
+        payload = json.loads((stdin or sys.stdin).read(), parse_constant=lambda name: None)  # NaN/Infinity are missing values
         model = (payload.get('model') or {}).get('display_name') if isinstance(payload, dict) else None
         cache = read_cache(cache_path(db if db is not None else state_dir() / 'history.sqlite3'))
         print(render(payload, cache, now or datetime.now(timezone.utc)))
