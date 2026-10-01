@@ -333,14 +333,14 @@ def _lines(f):
         return out + ([f"not counted (an input class is unknown): {_rq(v['excluded_requests'])}"] if v['excluded_requests'] else [])
     if i == 'long_context_premium':
         return [f"requests at the long-context tier: {v['requests']:,} of {v['priced_requests']:,} priced", f"cost at the tier applied: {u(v['actual'])}",
-                f"same requests at the standard tier: {u(v['standard'])}", f"premium: {_usd_text(v['premium'])}"]
+                f"same requests at the standard tier: {u(v['standard'])}", f"premium: {u(v['premium'])}"]
     if i == 'big_turns':
         return [f"turns costing >= {_usd_text(v['threshold'])}: {v['count']:,} of {v['turns']:,} turns with a priced request",
                 f"their cost: {u(v['cost'])} of {u(v['attributed_cost'])} ({_pct(v['share'])})", f"median requests per such turn: {_num(v['median_requests'])}"]
     if i == 'subagent_share':
         return [f"cost from subagents: {u(v['subagent_cost'])} of {u(v['total_cost'])} ({_pct(v['share'])})", f"requests from subagents: {v['subagent_requests']:,} of {v['priced_requests']:,} priced"]
     return [f"requests at a fast or priority tier: {v['requests']:,} ({', '.join(f'{k} {n:,}' for k, n in v['tiers'].items())})", f"cost at the tier applied: {u(v['actual'])}",
-            f"same requests at the standard tier: {u(v['standard'])}", f"extra cost: {_usd_text(v['extra'])}"]
+            f"same requests at the standard tier: {u(v['standard'])}", f"extra cost: {u(v['extra'])}"]
 
 
 def render_text(result):

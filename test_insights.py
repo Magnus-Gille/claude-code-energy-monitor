@@ -407,6 +407,16 @@ class Reliability(unittest.TestCase):
         self.assertTrue(f['cost_parts']['values']['lower_bound'])
         self.assertTrue(f['context_size']['values']['lower_bound'])
 
+    def test_cli_marks_premium_and_extra_as_lower_bounds_like_the_page(self):
+        big, fast = ob('big', model='gpt-l', fresh=M, out=500000), ob('f', model='gpt-t', fresh=M, tariff={'service_tier': 'fast'})
+        big['complete'] = fast['complete'] = False
+        text = insights.render_text(cost_facts([big, fast], TABLE))
+        self.assertRegex(text, r'premium: ≥\$')
+        self.assertRegex(text, r'extra cost: ≥\$')
+        whole = insights.render_text(cost_facts([ob('big', model='gpt-l', fresh=M, out=500000), ob('f', model='gpt-t', fresh=M, tariff={'service_tier': 'fast'})], TABLE))
+        self.assertRegex(whole, r'premium: \$')
+        self.assertRegex(whole, r'extra cost: \$')
+
     def test_complete_data_is_not_marked(self):
         f = by_id(cost_facts([ob('ok', model='m1', out=M)], TABLE))
         for fact in f.values():
