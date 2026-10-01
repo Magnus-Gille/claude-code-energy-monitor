@@ -6,6 +6,8 @@ import sqlite3
 import re
 import sys
 import time
+import shlex
+import subprocess
 import webbrowser
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -140,9 +142,33 @@ def render_top(result,texts=None,contexts=None):
     return '\n'.join(lines)
 
 
+def _state_base():
+    return Path(os.environ.get('XDG_STATE_HOME',Path.home()/'.local/state'))
+
+
+def _shell_command(cmd,windows=None):
+    """cmd quoted for the user's shell; on Windows None unless every argument is plain, since cmd.exe has no quoting that is safe for every
+    character (&, |, ^, %, !, ...), so only the path is shown there."""
+    if not (os.name=='nt' if windows is None else windows):return shlex.join(cmd)
+    return None if any(re.search(r'[^\w\-.:\\/ ]',a) for a in cmd) else subprocess.list2cmdline(cmd)
+
+
+def _reopen(path,db,always=False):
+    """The command that reopens exactly this report: `tokenatlas open` (with --db/--html when they are not the defaults). For a report
+    written by `report`, only when it is open's own default file (open reuses it); otherwise None: open would rebuild it with other options."""
+    home=_state_base()/'tokenatlas'
+    default_db_path,default_html=home/'history.sqlite3',Path(db).expanduser().absolute().parent/'report.html'
+    if not always and Path(path).absolute()!=default_html:return None
+    cmd=['tokenatlas']
+    if Path(db).expanduser().absolute()!=default_db_path.absolute():cmd+=['--db',str(Path(db).expanduser().absolute())]
+    cmd.append('open')
+    if Path(path).absolute()!=default_html:cmd+=['--html',str(Path(path).absolute())]
+    return _shell_command(cmd)
+
+
 def default_db():
     """Default history path; one-time move of the pre-rename agentmon directory (never used with --db)."""
-    base=Path(os.environ.get('XDG_STATE_HOME',Path.home()/'.local/state'))
+    base=_state_base()
     new,old=base/'tokenatlas',base/'agentmon'
     if old.is_dir():
         if new.exists():
@@ -196,7 +222,7 @@ def main(argv=None):
     which.add_argument('--all',action='store_true',help='Refresh every harness from its default roots; missing ones are reported as absent.')
     refresh.add_argument('--root',type=Path,help='Override the harness session directory (with --harness).')
     opener=commands.add_parser('open',help='Refresh, build the report (private by default) and open it in the browser.')
-    opener.add_argument('--html',type=Path,help='Report path; default $XDG_STATE_HOME/tokenatlas/report.html.')
+    opener.add_argument('--html',type=Path,help=f'Report path; default: report.html next to the database ({_state_base()/"tokenatlas"/"report.html"}).')  # no migration side effect
     opener.add_argument('--shared',action='store_true',help='Pseudonymize the report instead of keeping project labels.')
     opener.add_argument('--lang',choices=('auto','sv','en'),default='auto',help='Report language; auto follows the browser (Swedish for sv, otherwise English).')
     opener.add_argument('--no-refresh',action='store_true',help='Use the saved history as it is.')
@@ -341,6 +367,7 @@ def main(argv=None):
                 history.connection.execute('BEGIN')
                 source_status=history.doctor()
                 spec=_spec('redacted' if args.shared else 'local',DEFAULT_TIMEZONE,'day',{},args.lang)
+                if not args.shared:spec['dest']=str(path.absolute())  # a private report names its file: a moved copy is rebuilt, never reused
                 texts,ctx=(None,None) if args.shared else _visible(history,args.db)  # shared reports never read the side file
                 state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts,ctx),datetime.now(ZoneInfo('UTC')).date().isoformat())
                 if path.exists() and read_report_state(path)==state:
@@ -349,9 +376,11 @@ def main(argv=None):
                     records=history.records()
                     payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=None if args.shared else _counts(ctx))
                     payload['initial_granularity']='day'
+                    if not args.shared:payload.update(saved_at=str(path.absolute()),reopen=_reopen(path,args.db,always=True))  # private only: a shared report never carries a local path
                     write_report(path,render_report(payload,state=state))
                     result={'html':str(path.resolve()),'observations':len(records),'privacy':payload['privacy']}
                 _open_in_browser(path)
+                print(f'Report: {path.absolute()} (reopen any time with: {_reopen(path,args.db,always=True)})',file=sys.stderr)
             elif args.command=='refresh' and args.all:
                 result=refresh_all(history)
             elif args.command=='refresh':
@@ -406,6 +435,7 @@ def main(argv=None):
                 if args.html:
                     path=_output_path(args.html,args.db)
                     spec=_spec('local' if args.private else 'redacted',args.timezone,args.granularity,vars(args),args.lang)
+                    if args.private:spec['dest']=str(path.absolute())  # as in open: a private report names its file
                     texts,ctx=_visible(history,args.db) if args.private else (None,None)
                     state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts,ctx),datetime.now(ZoneInfo('UTC')).date().isoformat())
                     if path.exists() and (args.if_changed or max_age is not None):
@@ -416,6 +446,7 @@ def main(argv=None):
                                 'too recent' if max_age is not None and found is not None and found[0]==state[0] and 0<=age<max_age else None)
                         if reason:
                             print(json.dumps({'html':str(path.resolve()),'skipped':True,'reason':reason}))
+                            print(f'Report: {path.absolute()} (unchanged)',file=sys.stderr)
                             return 0
                 records=history.records(start,end,args.harness,args.project,args.session,args.turn)
                 records=[row for row in records if all(getattr(args,key) is None or row[key]==getattr(args,key)
@@ -430,7 +461,9 @@ def main(argv=None):
                     texts,ctx=_visible(history,args.db,history.records() if filtered else records) if args.private else (None,None)
                     payload=build_report(records,source_status,args.timezone,redact=not args.private,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=_counts(ctx) if args.private else None)
                     payload['initial_granularity']=args.granularity
+                    if args.private:payload.update(saved_at=str(path.absolute()),reopen=_reopen(path,args.db))  # private only: a shared report never carries a local path
                     write_report(path,render_report(payload,state=state))
+                    print(f'Report: {path.absolute()}',file=sys.stderr)
                     result={'html':str(path.resolve()),'observations':len(records),
                             'privacy':payload['privacy'],'billing_verified':False,'coverage_complete':False}
         print(json.dumps(result,indent=2,sort_keys=True))

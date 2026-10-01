@@ -27,6 +27,11 @@ pipx install tokenatlas      # or: uv tool install tokenatlas
 tokenatlas open              # read the logs, build the private report, open it in the browser
 ```
 
+`tokenatlas open` saves the report as `report.html` next to the history, by default
+`~/.local/state/tokenatlas/report.html` (a folder Finder hides; it prints the path, and the private report's footer
+shows it). Run `tokenatlas open` again to reopen it, or add `--html ~/Desktop/tokenatlas.html` to keep it somewhere
+visible.
+
 Python 3.10 or newer is needed. macOS ships Python 3.9; `uv tool install tokenatlas` (or a one-off
 `uvx tokenatlas open`) downloads a suitable Python by itself, so nothing else has to be installed.
 
