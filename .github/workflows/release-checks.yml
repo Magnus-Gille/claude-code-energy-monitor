@@ -77,5 +77,5 @@ jobs:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/node_modules/@playwright/test
           SCREENSHOT_DIR: ${{ runner.temp }}
         run: |
-          python scripts/prompts_fixture.py "${{ runner.temp }}/tokenatlas-prompts.html"
-          node test_report_browser.cjs "${{ runner.temp }}/tokenatlas-smoke.html" "${{ runner.temp }}/tokenatlas-prompts.html"
+          python scripts/prompts_fixture.py "${{ runner.temp }}/tokenatlas-prompts.html" "${{ runner.temp }}/tokenatlas-shared.html"
+          node test_report_browser.cjs "${{ runner.temp }}/tokenatlas-smoke.html" "${{ runner.temp }}/tokenatlas-prompts.html" "${{ runner.temp }}/tokenatlas-shared.html"

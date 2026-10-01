@@ -18,12 +18,33 @@ def store_path(db_path):
     return Path(db_path).expanduser().with_name(FILE)
 
 
+def _str(v):return v if isinstance(v,str) else None
+
+
+def _count(v):return v if isinstance(v,int) and not isinstance(v,bool) and v>=0 else None
+
+
+def _strs(v,n):return [x for x in v if isinstance(x,str)][:n] if isinstance(v,list) else []
+
+
+def _norm_context(c):
+    """The full turn-context shape with every invalid part dropped to None or empty; a non-dict is no context (None)."""
+    if not isinstance(c,dict):return None
+    g=lambda k:c.get(k) if isinstance(c.get(k),dict) else {}
+    i,a,o=g('inputs'),g('activity'),g('outcomes')
+    return {**{k:_str(c.get(k)) for k in ('title','title_source','cwd','branch','repository','final')},
+            'inputs':{'count':_count(i.get('count')),'first':_str(i.get('first')),'followups':_strs(i.get('followups'),5)},
+            'activity':{k:_count(a.get(k)) for k in ('shell','edits','web','subagents')},
+            'outcomes':{'prs':_strs(o.get('prs'),5),'commits':_strs(o.get('commits'),5)}}
+
+
 def _entries(raw):
-    """Validated entry dicts from file bytes; ValueError when the file is not a well-formed store."""
+    """Validated entry dicts from file bytes, contexts normalized; ValueError when the file is not a well-formed store."""
     try:
         entries=json.loads(raw)['entries']
         for e in entries:
-            if not (isinstance(e['text'],(str,type(None))) and isinstance(e.get('context'),(dict,type(None))) and all(isinstance(e[k],str) for k in ('harness','session','turn_id'))):raise ValueError('bad entry')
+            if not (isinstance(e['text'],(str,type(None))) and all(isinstance(e[k],str) for k in ('harness','session','turn_id'))):raise ValueError('bad entry')
+            e['context']=_norm_context(e.get('context'))
         return entries
     except (ValueError,KeyError,TypeError) as exc:raise ValueError(f'{type(exc).__name__}: {exc}') from exc
 

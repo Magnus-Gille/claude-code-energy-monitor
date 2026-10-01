@@ -495,23 +495,50 @@ class Cli(Base):
         self.assertEqual(by['u2']['title'], 'TITLE-TOKEN')
         self.assertEqual((by['u2']['branch'], by['u2']['inputs']['count'], by['u2']['final']), ('feat/x', 1, 'FINAL-ANSWER shipped'))
 
-    def test_shared_report_has_only_input_counts_private_has_context(self):
+    def test_malformed_stored_context_is_normalized_not_fatal(self):
+        self.keep_rich()
+        self.set_store_context(title=123, cwd=['x'], branch={'a': 1}, repository=7, final=5, title_source=[],
+                               inputs={'count': -3, 'first': 5, 'followups': 'abc'},
+                               activity={'shell': -1, 'edits': 'x', 'web': True, 'subagents': 4},
+                               outcomes={'prs': '#1', 'commits': [1, 'ok']})
+        code, out, err = self.top()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn('TITLE-TOKEN', out)
+        self.assertEqual(self.run_cli('report', '--html', str(self.html), '--private')[0], 0)
+        data = payload(self.html.read_text())
+        for c in data.get('prompt_context', {}).values():
+            self.assertEqual((c['title'], c['cwd'], c['branch'], c['repository'], c['final'], c['title_source']), (None,) * 6)
+            self.assertEqual(c['inputs'], {'count': None, 'first': None, 'followups': []})
+            self.assertEqual(c['activity'], {'shell': None, 'edits': None, 'web': None, 'subagents': 4})
+            self.assertEqual(c['outcomes'], {'prs': [], 'commits': ['ok']})
+        self.set_store_context(inputs={'count': 2, 'followups': ['a'] * 9}, outcomes={'prs': ['#1'] * 9, 'commits': []})
+        meta = prompt_store.load_meta(self.store)[0]
+        for e in meta.values():
+            self.assertEqual((len(e['context']['inputs']['followups']), len(e['context']['outcomes']['prs'])), (5, 5))
+        data = json.loads(self.store.read_text())
+        for e in data['entries']:e['context'] = 'junk'
+        self.store.write_text(json.dumps(data))
+        code, out, err = self.top()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(prompt_store.load_context(self.store).popitem()[1], None)
+        self.assertEqual(self.run_cli('report', '--html', str(self.html), '--private')[0], 0)
+
+    def test_shared_report_never_reads_the_side_file_private_has_context(self):
         self.keep_rich('3')
         strings = ('TITLE-TOKEN', '/work/app', 'feat/x', 'FINAL-ANSWER', 'secret u2')
-        self.assertEqual(self.run_cli('report', '--html', str(self.html))[0], 0)
-        shared = self.html.read_text()
-        data = payload(shared)
-        for text in strings:
-            self.assertNotIn(text, json.dumps(data))
-            self.assertNotIn(text, shared)
-        self.assertNotIn('prompt_context', data)
-        self.assertNotIn('prompt_texts', data)
-        self.assertEqual(sorted(data['prompt_inputs'].values()), [1, 1, 1])
-        with patch.object(cli, '_open_in_browser'):
-            self.run_cli('open', '--html', str(self.html), '--no-refresh', '--shared')
-        data = payload(self.html.read_text())
-        self.assertNotIn('prompt_context', data)
-        self.assertEqual(len(data['prompt_inputs']), 3)
+        boom = patch.object(prompt_store, 'load_meta', side_effect=AssertionError('side file read'))
+        with boom, patch.object(prompt_store, 'load', side_effect=AssertionError('side file read')):
+            self.assertEqual(self.run_cli('report', '--html', str(self.html))[0], 0)
+            shared = self.html.read_text()
+            data = payload(shared)
+            for text in strings:
+                self.assertNotIn(text, json.dumps(data))
+                self.assertNotIn(text, shared)
+            for key in ('prompt_context', 'prompt_texts', 'prompt_inputs'):self.assertNotIn(key, data)
+            with patch.object(cli, '_open_in_browser'):
+                self.assertEqual(self.run_cli('open', '--html', str(self.html), '--no-refresh', '--shared')[0], 0)
+            data = payload(self.html.read_text())
+            for key in ('prompt_context', 'prompt_texts', 'prompt_inputs'):self.assertNotIn(key, data)
         self.assertEqual(self.run_cli('report', '--html', str(self.html), '--private')[0], 0)
         data = payload(self.html.read_text())
         found = [c for c in data['prompt_context'].values() if c['final']]
@@ -579,13 +606,10 @@ class ReportBuild(unittest.TestCase):
         self.assertEqual(got, {'o1': 0, 'o2': 1})
         self.assertEqual(report['prompt_texts'], {1: 'hello'})
 
-    def test_redacted_report_rejects_context_but_takes_counts(self):
-        with self.assertRaises(ValueError):
-            build_report(rows((1, 1)), {}, redact=True, prompt_context={})
-        report = build_report(rows((1, 1), (2, 5)), {}, redact=True, table=TABLE,
-                              prompt_inputs={('claude', 's', 't2'): 14, ('claude', 's', 't1'): None, ('claude', 's', 'gone'): 3})
-        self.assertEqual(report['prompt_inputs'], {1: 14})
-        self.assertNotIn('prompt_context', report)
+    def test_redacted_report_rejects_every_context_argument(self):
+        for kw in ({'prompt_context': {}}, {'prompt_texts': {}}, {'prompt_inputs': {}}, {'prompt_inputs': {('claude', 's', 't2'): 14}}):
+            with self.assertRaises(ValueError):build_report(rows((1, 1)), {}, redact=True, **kw)
+        self.assertNotIn('prompt_inputs', build_report(rows((1, 1), (2, 5)), {}, redact=True, table=TABLE))
 
     def test_private_context_keyed_by_ordinal(self):
         report = build_report(rows((1, 1), (2, 5)), {}, redact=False, table=TABLE,

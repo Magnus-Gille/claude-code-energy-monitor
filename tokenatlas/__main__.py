@@ -161,7 +161,7 @@ def _visible(history,db,records=None):
 
 
 def _counts(contexts):
-    """{key: input count}: the one structural fact of a context that a shared report may carry; None when there is none."""
+    """{key: input count}: input counts of private contexts (never given to a shared report); None when there are none."""
     found={k:c['inputs']['count'] for k,c in contexts.items() if isinstance(c.get('inputs'),dict) and isinstance(c['inputs'].get('count'),int)}
     return found or None
 
@@ -308,14 +308,13 @@ def main(argv=None):
                 history.connection.execute('BEGIN')
                 source_status=history.doctor()
                 spec=_spec('redacted' if args.shared else 'local',DEFAULT_TIMEZONE,'day',{},args.lang)
-                texts,ctx=(None,None) if args.shared else _visible(history,args.db)  # shared reports carry only input counts
+                texts,ctx=(None,None) if args.shared else _visible(history,args.db)  # shared reports never read the side file
                 state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts,ctx))
                 if path.exists() and read_report_state(path)==state:
                     result={'html':str(path.resolve()),'skipped':True,'reason':'unchanged'}
                 else:
                     records=history.records()
-                    counts=_counts(_visible(history,args.db)[1] if args.shared else ctx)
-                    payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=counts)
+                    payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=None if args.shared else _counts(ctx))
                     payload['initial_granularity']='day'
                     write_report(path,render_report(payload,state=state))
                     result={'html':str(path.resolve()),'observations':len(records),'privacy':payload['privacy']}
@@ -388,9 +387,8 @@ def main(argv=None):
                 if args.records:result['records']=records
                 if args.html:
                     filtered=any(getattr(args,key) is not None for key in ('start','end','harness','project','session','turn','model','effort','provider','agent'))
-                    found=_visible(history,args.db,history.records() if filtered else records)
-                    texts,ctx=found if args.private else (None,None)
-                    payload=build_report(records,source_status,args.timezone,redact=not args.private,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=_counts(found[1]))
+                    texts,ctx=_visible(history,args.db,history.records() if filtered else records) if args.private else (None,None)
+                    payload=build_report(records,source_status,args.timezone,redact=not args.private,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=_counts(ctx) if args.private else None)
                     payload['initial_granularity']=args.granularity
                     write_report(path,render_report(payload,state=state))
                     result={'html':str(path.resolve()),'observations':len(records),

@@ -5,6 +5,7 @@ import json
 import sqlite3
 import subprocess
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 
 from tokenatlas import why
@@ -216,6 +217,16 @@ class OpenCodeTests(TmpCase):
         self.assertEqual(turn_context("opencode", [str(db)], "ses1", "msgU2")["final"], "elsewhere")
         self.assertEqual(turn_context("opencode", [str(db)], "ses1", "nope"), UNKNOWN)
         self.assertEqual(turn_context("opencode", [str(db)], "other", "msgU"), UNKNOWN)
+        for n, bad in enumerate((1e20, -1e20, 1e300)):  # SQLite cannot hold 10**20 as an integer; as a REAL or inside the JSON it can
+            db2 = self.tmp / f"x{n}.db"
+            make_db(db2)
+            c = sqlite3.connect(db2)
+            c.execute("UPDATE message SET time_created=?, time_updated=?, data=json_set(data, '$.time.completed', json('100000000000000000000'))", (bad, bad))
+            c.commit()
+            c.close()
+            got = turn_context("opencode", [str(db2)], "ses1", "msgU")  # must not raise
+            self.assertEqual((got["title"], got["inputs"]["count"], got["activity"]["shell"]), ("My title [redacted]", 1, 2))
+            self.assertEqual(got["outcomes"]["prs"], ["created", "#77"])
         junk = self.tmp / "junk.db"
         junk.write_text("not sqlite")
         self.assertEqual(turn_context("opencode", [str(junk)], "ses1", "msgU"), UNKNOWN)
@@ -299,6 +310,48 @@ class GitTests(TmpCase):
             claude_row("u1", "user", "hi", cwd=str(self.repo)), claude_row("a1", "assistant", [{"type": "text", "text": "ok"}])])
         got = turn_context("claude", [str(path)], "s1", "u1", start="2026-09-03T08:59:00Z", end="2026-09-03T09:01:00Z")
         self.assertEqual(got["outcomes"]["commits"], ["made it"])
+
+    def test_commit_window_is_the_parent_turn_span_not_the_rollup(self):
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        self.git("init", "-q")
+        self.git("commit", "-q", "--allow-empty", "-m", "during", when="2026-09-03T09:00:30Z")
+        self.git("commit", "-q", "--allow-empty", "-m", "after parent", when="2026-09-03T09:30:00Z")
+        path = write_jsonl(self.tmp / "s1.jsonl", [
+            claude_row("u1", "user", "hi", cwd=str(self.repo), timestamp="2026-09-03T09:00:00Z"),
+            claude_row("a1", "assistant", [{"type": "text", "text": "ok"}], timestamp="2026-09-03T09:01:00Z")])
+        got = turn_context("claude", [str(path)], "s1", "u1", start="2026-09-03T08:59:00Z", end="2026-09-03T10:00:00Z")
+        self.assertEqual(got["outcomes"]["commits"], ["during"])
+        # no extracted span: the passed window is the fallback
+        with patch("tokenatlas.turn_context.git_commits", return_value=[]) as gc:
+            from tokenatlas import turn_context as tc
+            tc._finish({**tc._raw(), "cwd": str(self.repo)}, 400, "S", "E")
+            self.assertEqual(gc.call_args.args[1:], ("S", "E"))
+
+    def test_git_env_disables_lazy_fetch(self):
+        with patch("tokenatlas.turn_context.subprocess.run") as run:
+            run.return_value.returncode, run.return_value.stdout = 0, ""
+            git_commits(self.tmp, "2026-09-03T09:00:00Z", "2026-09-03T10:00:00Z")
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(env.get("GIT_NO_LAZY_FETCH"), "1")
+        self.assertEqual((env["GIT_TERMINAL_PROMPT"], env["GIT_OPTIONAL_LOCKS"]), ("0", "0"))
+
+    def test_location_fields_are_sanitized_but_git_uses_the_raw_cwd(self):
+        self.repo = self.tmp / f"{KEY}"
+        self.repo.mkdir()
+        self.git("init", "-q")
+        self.git("commit", "-q", "--allow-empty", "-m", "made it", when="2026-09-03T09:00:00Z")
+        path = write_jsonl(self.tmp / "s1.jsonl", [
+            claude_row("u1", "user", "hi", cwd=str(self.repo), gitBranch=f"feat/{KEY}"),
+            claude_row("a1", "assistant", [{"type": "text", "text": "ok"}])])
+        got = turn_context("claude", [str(path)], "s1", "u1", start="2026-09-03T08:59:00Z", end="2026-09-03T09:01:00Z")
+        self.assertEqual(got["outcomes"]["commits"], ["made it"])
+        for field in ("cwd", "branch"):
+            self.assertNotIn(KEY, got[field])
+            self.assertIn("[redacted]", got[field])
+        from tokenatlas import turn_context as tc
+        out = tc._finish({**tc._raw(), "repo": f"https://example.test/o/{KEY}.git"}, 400, None, None)
+        self.assertNotIn(KEY, out["repository"])
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 """Write a synthetic private report with stored prompt previews, for the browser test: python scripts/prompts_fixture.py OUT.html [SHARED.html]
-(the optional second file is the same data as a shared report: input counts only)"""
+(the optional second file is the same data as a shared report: no prompt text, context or input counts)"""
 import sys
 from pathlib import Path
 
@@ -35,7 +35,7 @@ def main(out, shared=None):
     texts = {('claude', 's1', 't1'): 'Fix the <b>failing</b> build', ('claude', 's1', 't2'): 'Refactor the importer'}
     counts = {k: c['inputs']['count'] for k, c in CONTEXT.items()}
     write_report(out, render_report(build_report(records, {}, redact=False, prompt_texts=texts, prompt_context=CONTEXT, prompt_inputs=counts)))
-    if shared:write_report(shared, render_report(build_report(records, {}, redact=True, prompt_inputs=counts)))
+    if shared:write_report(shared, render_report(build_report(records, {}, redact=True)))
 
 
 if __name__ == '__main__':

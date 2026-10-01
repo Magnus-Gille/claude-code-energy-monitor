@@ -97,14 +97,12 @@ def report_state(revision, machine, spec, coverage, token=None, texts_hash=None)
 def build_report(records, source_status, timezone_name='Europe/Stockholm', redact=True, prompt_texts=None, table=None, lang='auto',
                  prompt_context=None, prompt_inputs=None):
     """prompt_texts ({(harness, session, turn_id): text or None} from prompt_store) and prompt_context ({key: turn_context dict}) are for
-    private reports only; prompt_inputs ({key: input count or None}) is the one structural fact a shared report may carry;
+    prompt_inputs ({key: input count or None}) are for private reports only (any of them with redact=True raises);
     table is the price table behind the `price_classes` unit prices (None = packaged prices)."""
     if lang not in LANGS:
         raise ValueError(f'unknown report language {lang!r}; use one of {", ".join(LANGS)}')
-    if redact and prompt_texts is not None:
-        raise ValueError('prompt text cannot be included in a redacted report')
-    if redact and prompt_context is not None:
-        raise ValueError('turn context cannot be included in a redacted report')
+    if redact and (prompt_texts is not None or prompt_context is not None or prompt_inputs is not None):
+        raise ValueError('prompt text, turn context and input counts cannot be included in a redacted report')
     table = table or pricing.load_prices()
     zone = ZoneInfo(timezone_name)
     records = sorted(records, key=lambda r: (r['ts'], r['harness'], r['id']))

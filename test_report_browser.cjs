@@ -130,12 +130,12 @@ async function ready(page, errors, what = 'report') {
       assert.deepEqual(errors2,[]);await c2.close();
     }
     if(sharedFixture){
-      // Shared: only the structural input count; no details block, no context text of any kind.
+      // Shared: no side-file data at all (the Inputs column is all unknown); no details block, no context text of any kind.
       const {context:c3,page:p3,errors:errors3}=await newPage({locale:T.locale},sharedFixture);
       const shared=await p3.evaluate(()=>({rows:[...document.querySelectorAll('#top-prompts tr.prompt-row')].map(r=>[...r.children].map(c=>c.textContent)),details:document.querySelectorAll('#top-prompts details, #top-prompts tr.prompt-ctx, #top-prompts tr.prompt-text').length,page:document.body.innerText,data:Object.keys(window.UsageReport.data)}));
-      assert.deepEqual(shared.rows.map(r=>r[7]),['3','14','–','–']);assert.equal(shared.details,0);assert.equal(await p3.locator('#top-prompts th').nth(7).innerText(),T.inputs);
+      assert.deepEqual(shared.rows.map(r=>r[7]),['–','–','–','–']);assert.equal(shared.details,0);assert.equal(await p3.locator('#top-prompts th').nth(7).innerText(),T.inputs);
       for(const x of ['feat/x','Fix the','pipeline','all green','example.test','#16','Add lint'])assert.ok(!shared.page.includes(x),'shared page must not show '+x);
-      assert.ok(shared.data.includes('prompt_inputs')&&!shared.data.includes('prompt_context')&&!shared.data.includes('prompt_texts'));
+      assert.ok(!shared.data.includes('prompt_inputs')&&!shared.data.includes('prompt_context')&&!shared.data.includes('prompt_texts'));
       assert.deepEqual(errors3,[]);await c3.close();
     }
   }
@@ -192,6 +192,6 @@ async function ready(page, errors, what = 'report') {
       assert.equal(await page.evaluate(()=>document.documentElement.lang),'en');
       assert.deepEqual(errors,[]);await context.close();
     }
-    console.log(JSON.stringify({pass:true,browser:browserName,...summary,checks:'both languages (summary cards, legend, totals, K/M/B vs mdr/milj., money, cache comparisons, bucket conservation, filters, empty state, zoom, drilldown, export, mobile overflow, prompts card), live toggle, explicit payload language, remembered choice, throwing storage'}));
+    console.log(JSON.stringify({pass:true,browser:browserName,prompts_fixture:!!fixture,shared_fixture:!!sharedFixture,...summary,checks:'both languages (summary cards, legend, totals, K/M/B vs mdr/milj., money, cache comparisons, bucket conservation, filters, empty state, zoom, drilldown, export, mobile overflow, prompts card), live toggle, explicit payload language, remembered choice, throwing storage'}));
   } finally {await browser.close()}
 })().catch(e=>{console.error(e);process.exitCode=1});

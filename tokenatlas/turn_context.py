@@ -24,7 +24,7 @@ from .why import (
     _is_genuine_user_row, _mapping, _meta_text, parse_iso_timestamp,
 )
 
-_ERRORS = (OSError, ValueError, TypeError, AttributeError, KeyError, RuntimeError, sqlite3.Error)
+_ERRORS = (OSError, OverflowError, ValueError, TypeError, AttributeError, KeyError, RuntimeError, sqlite3.Error)
 _PR_CREATE = re.compile(r"\bgh\s+pr\s+create\b")
 _PR_MERGE = re.compile(r"\bgh\s+pr\s+merge\s+#?(\d+)")
 _SPAWN = re.compile(r"spawn_agent\s*\(")
@@ -379,8 +379,11 @@ def _opencode(sources: object, session: str, turn_id: str) -> dict | None:
                     raw["final"] = p["text"]
         _tools(raw, "opencode", calls)
         ms = [v for v in ms if isinstance(v, (int, float)) and not isinstance(v, bool)]
-        if ms:
-            raw["start"], raw["end"] = (datetime.fromtimestamp(f(ms) / 1000, tz=timezone.utc).isoformat() for f in (min, max))
+        try:
+            if ms:
+                raw["start"], raw["end"] = (datetime.fromtimestamp(f(ms) / 1000, tz=timezone.utc).isoformat() for f in (min, max))
+        except (OverflowError, OSError, ValueError):
+            raw["start"] = raw["end"] = None  # an extreme or invalid stamp only loses the commit window
         return raw
     return None
 
@@ -425,7 +428,7 @@ def git_commits(cwd: object, start: object, end: object) -> list[str]:
         if not (isinstance(cwd, (str, Path)) and Path(cwd).is_dir() and isinstance(since, str) and isinstance(until, str)):
             return []
         env = {k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ}
-        env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+        env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1")
         done = subprocess.run(
             ["git", "-c", "core.fsmonitor=false", "-C", str(cwd), "log", "--all", f"--since={since}", f"--until={until}",
              "--format=%s", "-n", "5"], capture_output=True, text=True, timeout=5, env=env, stdin=subprocess.DEVNULL)
@@ -440,16 +443,17 @@ def _finish(raw: dict, limit: int, start: object, end: object) -> dict:
     out = _empty()
     title = sanitize(raw["title"], 200)
     out["title"], out["title_source"] = title, raw["title_source"] if title else None
-    out["cwd"] = _meta_text(raw["cwd"], limit=4096)
-    out["branch"] = _meta_text(raw["branch"], limit=256)
-    out["repository"] = _repo_url(raw["repo"])
+    cwd = _meta_text(raw["cwd"], limit=4096)  # raw: only the local git lookup below uses it
+    out["cwd"] = sanitize(cwd, 4096)
+    out["branch"] = sanitize(_meta_text(raw["branch"], limit=256), 256)
+    out["repository"] = sanitize(_repo_url(raw["repo"]), 512)
     texts = [t for t in raw["inputs"] if isinstance(t, str)]
     out["inputs"] = {"count": raw["count"], "first": sanitize(texts[0], 200) if texts else None,
                      "followups": [s for s in (sanitize(t, 100) for t in texts[1:6]) if s]}
     out["final"] = sanitize(raw["final"], limit)
     out["activity"] = dict(raw["act"] or out["activity"])
     out["outcomes"]["prs"] = _prs(raw["cmds"], raw["final"])
-    out["outcomes"]["commits"] = git_commits(out["cwd"], start or raw["start"], end or raw["end"])
+    out["outcomes"]["commits"] = git_commits(cwd, raw["start"] or start, raw["end"] or end)
     return out
 
 
