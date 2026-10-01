@@ -224,7 +224,7 @@ all read from this machine's own logs; turns from other machines get neither. A 
 from the file on the next `--keep-text`. Turns whose text or context could not be read are retried on each `--keep-text`,
 which also fills the context of entries kept by an older version (the file format is version 2; version 1 files are still read).
 The default is the top 10 turns. A store created with a smaller k stays at that k, also under `collect`, which reuses the store's recorded `-n` and `--by`
-and never raises k on its own; move an existing store to 10 once with `tokenatlas top --keep-text -n 10`. Stored text outlives the harness's own
+and never raises k on its own. A store without a valid recorded `-n`/`--by` (corrupt, unsafe or hand-edited) makes `collect` skip the text step, log why and exit 1, leaving the file untouched; fix it with `tokenatlas top --keep-text -n N` or `--forget-text`; move an existing store to 10 once with `tokenatlas top --keep-text -n 10`. Stored text outlives the harness's own
 log cleanup (for example Claude Code's `cleanupPeriodDays`) while the turn stays in the top k; `top --forget-text` deletes it.
 
 ### Turn context

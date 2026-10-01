@@ -91,6 +91,9 @@ def _blank(v):
     return v is None or v==''
 
 
+def valid_choice(k,by):return isinstance(k,int) and not isinstance(k,bool) and k>=1 and by in ('cost','tokens')
+
+
 def load_meta(path):
     """({key: entry}, k, by) with key (harness, session, turn_id); a missing file is empty, a corrupt or unsafe one is empty plus a stderr warning.
     Version 1 files (no context) read as entries without one."""
@@ -118,7 +121,7 @@ def visible_all(path,records,table):
     """(texts, contexts) of the stored prompts in the current global top k (the store's recorded k and by): all a private report may embed.
     Contexts that are blank are left out."""
     entries,k,by=load_meta(path)
-    if not entries or not isinstance(k,int) or by not in ('cost','tokens'):return {},{}
+    if not entries or not valid_choice(k,by):return {},{}
     top={(p['harness'],p['session'],p['turn_id']) for p in prompts.top_prompts(records,table,k,by)['prompts']}
     return ({key:e['text'] for key,e in entries.items() if key in top},
             {key:e['context'] for key,e in entries.items() if key in top and not _blank(e.get('context'))})

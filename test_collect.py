@@ -107,13 +107,29 @@ class CollectTest(CollectBase):
             self.assertIn('top', self.steps(proc.stdout))
             self.assertEqual(prompt_store.load_meta(store)[1:], (k, by))
 
-    def test_top_falls_back_to_defaults_when_the_recorded_choice_is_invalid(self):
-        from tokenatlas import prompt_store
+    def test_top_is_skipped_and_the_store_untouched_without_a_valid_choice(self):
         store = self.state / 'top-prompts.json'
-        store.write_text('{"version":2,"k":"x","by":"nope","entries":[]}\n')
-        store.chmod(0o600)
-        self.assertEqual(self.collect().returncode, 0)
-        self.assertEqual(prompt_store.load_meta(store)[1:], (10, 'cost'))
+        for k, by in (('"x"', '"cost"'), ('true', '"cost"'), ('0', '"cost"'), ('-3', '"cost"'), ('5', '"nope"'), ('5', '7'), ('null', 'null')):
+            raw = ('{"version":2,"k":%s,"by":%s,"entries":[]}\n' % (k, by)).encode()
+            store.write_bytes(raw)
+            store.chmod(0o600)
+            proc = self.collect()
+            self.assertEqual(proc.returncode, 1, (k, by, proc.stdout + proc.stderr))
+            self.assertIn('top: skipped: %s has no valid recorded k/by' % store, proc.stdout)
+            self.assertNotIn('top', self.steps(proc.stdout))
+            self.assertEqual(store.read_bytes(), raw, (k, by))
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX permission bits')
+    def test_top_is_skipped_for_an_unsafe_store(self):
+        store = self.state / 'top-prompts.json'
+        raw = b'{"version":2,"k":3,"by":"cost","entries":[]}\n'
+        store.write_bytes(raw)
+        store.chmod(0o644)
+        proc = self.collect()
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn('top: skipped:', proc.stdout)
+        self.assertNotIn('top', self.steps(proc.stdout))
+        self.assertEqual(store.read_bytes(), raw)
 
     def test_top_only_when_opted_in(self):
         proc = self.collect()

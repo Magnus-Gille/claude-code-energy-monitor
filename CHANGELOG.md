@@ -7,7 +7,7 @@ All notable changes to this project are documented in this file. The project fol
 ### Changed
 
 - `tokenatlas top` shows and `top --keep-text` stores the top 10 turns by default (was 5), and the report's "Costliest turns" card shows 10. An existing store keeps its recorded k; move it to 10 once with `tokenatlas top --keep-text -n 10`.
-- `tokenatlas collect` runs its `top --keep-text` step with the store's recorded `-n` and `--by` instead of the defaults, so a chosen k is no longer reset and entries are no longer evicted; it never raises k on its own.
+- `tokenatlas collect` runs its `top --keep-text` step with the store's recorded `-n` and `--by` instead of the defaults, so a chosen k is no longer reset and entries are no longer evicted; it never raises k on its own. A store without a valid recorded k/by (corrupt, unsafe or hand-edited) makes `collect` skip the step, log why and exit 1 without touching the file; the report shows no stored text for such a store.
 - Stored prompt text and context outlive harness log cleanup (for example Claude Code's `cleanupPeriodDays`) while the turn stays in the top k; `top --forget-text` deletes it.
 
 ## [1.5.1] - 2026-10-01
