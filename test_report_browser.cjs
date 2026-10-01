@@ -13,6 +13,14 @@ const L = {
     note:/^[\d,]+ requests? · [\d,]+ sessions?$/, cache:/^(—|\d+\.\d% of all input)$/, selection:/ requests · /, reasoning:/^of which reasoning |^incl\. reasoning$/,
     unknown:'Unknown', short:['43.8B','136.5M','12.3K'], money:['$9.00','≥$3.00','$0.60','n/a'], toggleLabel:'Language'},
 };
+// Cost facts card (fixed fixture clock 2026-09-20): window texts, provenance badges and the figures of both windows.
+const INS = {
+  sv: {title:'Kostnadsfakta', w:['Senaste 30 dagarna','Hela historiken'], prov:['Beräknad','Uppmätt'], total:'$12,60', totalAll:'$21,72', unpriced:'2 av 5 (40,0 %)', how:'Så räknas det', assume:'Antaganden', note:'följer inte filtren'},
+  en: {title:'Cost facts', w:['Last 30 days','All history'], prov:['Computed','Measured'], total:'$12.60', totalAll:'$21.72', unpriced:'2 of 5 (40.0%)', how:'How it is computed', assume:'Assumptions', note:'do not follow the filters'},
+};
+const norm = x => x.replace(/[\s\u00a0\u202f]+/g, ' ');
+const facts = page => page.evaluate(() => [...document.querySelectorAll('#ins-body .ins-fact')].map(a => ({id:a.dataset.fact, prov:a.querySelector('.ins-prov').textContent, rows:[...a.querySelectorAll('.ins-row')].map(r => [...r.children].map(c => c.textContent)),
+  how:a.querySelector('.ins-how').textContent, assumptions:[...a.querySelectorAll('li')].map(l => l.textContent), markup:a.querySelectorAll('b,i,u,img,script').length})));
 // Re-encode a report with an explicit payload language (the page only reads it after decoding).
 function withLang(html, lang) {
   return html.replace(/(<script id="report-data" type="application\/octet-stream\+base64">)([A-Za-z0-9+\/=]+)(<\/script>)/, (_, a, b64, c) => {
@@ -75,6 +83,17 @@ async function ready(page, errors, what = 'report') {
     assert.equal(await page.locator('#cache-comparisons [data-cache-dimension]').count(),4);
     assert.equal(await page.locator('h1').innerText(),T.h1);
     assert.equal(await page.locator('#prompts h2').innerText(),T.prompts);
+    {
+      const I=INS[T.lang];assert.equal(await page.locator('#cost-facts h2').innerText(),I.title);
+      assert.ok(norm(await page.locator('#cost-facts > .panel-top p').first().innerText()).includes(I.note));
+      assert.deepEqual(await page.locator('#cost-facts [data-win]').allInnerTexts(),I.w);
+      const own=await facts(page);assert.ok(own.length>=3,'smoke report shows facts');
+      for(const f of own){assert.ok(I.prov.includes(f.prov),'provenance badge '+f.prov);assert.equal(f.markup,0);assert.ok(f.how.startsWith(I.how+': '));assert.ok(f.assumptions.length>=1)}
+      assert.equal(own.find(f=>f.id==='context_size').prov,I.prov[1]);assert.equal(own.find(f=>f.id==='model_share').prov,I.prov[0]);
+      // the card is computed server-side: the filters above do not touch it
+      const before=await page.locator('#ins-body').innerText();await page.selectOption('#harness',{index:1});assert.equal(await page.locator('#ins-body').innerText(),before);await page.selectOption('#harness',{index:0});
+      assert.equal(await page.locator('#cost-facts [data-win="30d"]').getAttribute('aria-pressed'),'true');
+    }
     assert.equal(await page.evaluate(()=>document.title.startsWith('TokenAtlas')),true);
      await page.screenshot({path:path.join(screenshotDir,'energy-report-desktop-'+T.lang+'.png'),fullPage:true});
      const harnessOptions=await page.locator('#harness option').count(),harness=await page.locator('#harness option').nth(1).getAttribute('value'),cacheBefore=await page.locator('#cache-comparisons').innerText();
@@ -127,6 +146,23 @@ async function ready(page, errors, what = 'report') {
       const sparse=det.nth(0);await sparse.locator('summary').click();const sparseText=await sparse.innerText();
       assert.ok(sparseText.includes('Refactor the importer'));for(const x of [T.labels[0],T.labels[2],T.labels[3],T.labels[4]])assert.ok(!sparseText.includes(x),'unknown parts are omitted: '+x);
       await p2.locator('#prompts').screenshot({path:path.join(screenshotDir,'energy-report-context-'+T.lang+'.png')});
+      {
+        const I=INS[T.lang],money=async()=>{const f=(await facts(p2)).find(x=>x.id==='model_share');return {ids:(await facts(p2)).map(x=>x.id),total:norm(f.rows.find(r=>r[0]===(T.lang==='sv'?'Prissatt kostnad':'Priced cost'))[1]),unpriced:norm(f.rows.at(-1)[1])}};
+        const a=await money();assert.deepEqual(a.ids,['model_share','price_comparison','cost_parts','context_size']);assert.equal(a.total,I.total);assert.equal(a.unpriced,I.unpriced);
+        assert.ok(norm(await p2.locator('#ins-period').innerText()).includes('2026-08-21 – 2026-09-20'));
+        await p2.click('#cost-facts [data-win="all"]');
+        const b=await money();assert.deepEqual(b.ids,['model_share','price_comparison','cost_parts','context_size','long_context_premium','subagent_share']);assert.equal(b.total,I.totalAll,'the window toggle switches the values');
+        assert.equal(await p2.locator('#cost-facts [data-win="all"]').getAttribute('aria-pressed'),'true');assert.equal(await p2.locator('#cost-facts [data-win="30d"]').getAttribute('aria-pressed'),'false');
+        assert.ok(norm(await p2.locator('#ins-period').innerText()).includes(T.lang==='sv'?'första anropet – 2026-09-20':'the first request – 2026-09-20'));
+        const all=await facts(p2);assert.deepEqual(all.map(f=>f.prov),all.map(f=>f.id==='context_size'?I.prov[1]:I.prov[0]));assert.ok(all.every(f=>f.markup===0));
+        // price ladder: the same tokens at every same-provider model, cost descending, the model used marked, no 'cheapest' framing
+        const cmp=all.find(f=>f.id==='price_comparison'),marker=T.lang==='sv'?'(använd modell)':'(model used)',costs=cmp.rows.map(r=>parseFloat(norm(r[1]).replace('$','').replace(/\s/g,'').replace(',','.')));
+        assert.ok(cmp.rows.length>=2);assert.equal(cmp.rows.filter(r=>r[0].endsWith(marker)).length,1);assert.deepEqual(costs,[...costs].sort((x,y)=>y-x),'cost descending');
+        assert.ok(!/cheap|saving|billig|besparing/i.test(await p2.locator('[data-fact="price_comparison"]').innerText()));
+        assert.equal(await p2.locator('[data-fact="price_comparison"] h3 span').first().innerText(),T.lang==='sv'?'Samma tokens till listpris för andra modeller från samma leverantör':"The same tokens at other models' list prices (same provider)");
+        await p2.locator('#cost-facts').screenshot({path:path.join(screenshotDir,'energy-report-costfacts-'+T.lang+'.png')});
+        await p2.click('[data-lang="'+(T.lang==='sv'?'en':'sv')+'"]');assert.equal(await p2.locator('#cost-facts h2').innerText(),INS[T.lang==='sv'?'en':'sv'].title);assert.equal(await p2.locator('#cost-facts [data-win="all"]').getAttribute('aria-pressed'),'true','the window survives a language switch');
+      }
       assert.deepEqual(errors2,[]);await c2.close();
     }
     if(sharedFixture){
@@ -136,6 +172,10 @@ async function ready(page, errors, what = 'report') {
       assert.deepEqual(shared.rows.map(r=>r[7]),['–','–','–','–']);assert.equal(shared.details,0);assert.equal(await p3.locator('#top-prompts th').nth(7).innerText(),T.inputs);
       for(const x of ['feat/x','Fix the','pipeline','all green','example.test','#16','Add lint'])assert.ok(!shared.page.includes(x),'shared page must not show '+x);
       assert.ok(!shared.data.includes('prompt_inputs')&&!shared.data.includes('prompt_context')&&!shared.data.includes('prompt_texts'));
+      {
+        const card=await p3.locator('#cost-facts').innerText();for(const x of ['mystery','/w/','secret','s1'])assert.ok(!card.includes(x),'shared cost facts must not show '+x);
+        await p3.click('#cost-facts [data-win="all"]');assert.ok((await facts(p3)).length>=5);
+      }
       assert.deepEqual(errors3,[]);await c3.close();
     }
   }

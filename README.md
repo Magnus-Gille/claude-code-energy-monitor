@@ -4,6 +4,19 @@
 
 TokenAtlas is a local, private token and cost atlas for AI coding agents (Claude Code, Codex, OpenCode, Pi): a durable history CLI (`tokenatlas`), an offline HTML report, list-price costing, session trees and fixed-context overhead. The statusline and companion scripts below are the original energy monitor and keep working from a checkout.
 
+### What TokenAtlas adds beyond the vendors' own tools
+
+- One local, private view across Claude Code, Codex, OpenCode and Pi, and across machines (snapshots merge into one history). Nothing leaves the machine and no model is called.
+- The costliest turns, each with its context: an initiating input plus everything it caused, including follow-up inputs and subagent work.
+- A list-price dollar valuation of usage, including subscription usage, so that very different plans and harnesses can be compared in one unit (API-equivalent, not what was paid).
+- Long history: observations are kept in a local database after the harnesses rotate or delete their logs.
+
+Use the vendor tools for:
+
+- Plan limits and resets (Claude Code `/usage`, Codex `/usage`).
+- Actual billing and invoices.
+- Organization admin dashboards.
+
 A statusline script for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that shows real-time token usage and order-of-magnitude energy estimates. It tracks daily, weekly, and monthly totals, distinguishes cheap cached tokens from expensive fresh tokens, and logs history automatically.
 
 The repo also includes companion monitors for Codex CLI (`codex_status.py`) and the Pi coding harness (`pi_status.py`). Both read their harness's session JSONL and print the same style of one-line summary for a prompt, tmux status, or sidecar terminal.
@@ -206,6 +219,23 @@ On POSIX the store is only read when it is a regular file owned by you with mode
 a foreign owner, group/other access or extra links are refused with a warning, and `--keep-text` replaces such a file
 with a fresh 0600 one (never following a symlink). `--forget-text` unlinks the file itself and warns if other hard links still
 hold the text. On Windows these owner and mode checks are unavailable: the file relies on the user profile's ACLs.
+
+## Cost facts
+
+`tokenatlas insights [--days N | --start ISO --end ISO] [--json] [--prices FILE]` prints deterministic, rule-based facts about list-price cost. There is no language model and no interpretation: each fact is a number computed from the saved observations and the packaged price table, with the computation and the assumptions printed next to it. A fact that has no data, or cannot be computed reliably, is omitted. Without a window the whole history is used; `--json` prints the same facts as data. The output is aggregate only: no project names, sessions, paths or prompt text. The report has the same facts in a "Kostnadsfakta" / "Cost facts" card for the last 30 days and for all history; they are computed when the report is built (the report is rebuilt when the UTC day changes) and do not follow the page filters. In a shared report model names go through the same redaction as the rest of the report.
+
+Each fact is marked **measured** (counted from the logs) or **computed** (arithmetic on measured values with the price table). Cost is the API-equivalent list price in USD: only requests with a complete USD price count; the others (unknown model, missing price, non-USD price, local models) are counted as unpriced and left out of every cost.
+
+| Fact | Exact definition |
+|------|------------------|
+| `model_share` (computed) | Per model (aliases in the price table count as one): sum of the list-price cost of its requests in the window / sum over all priced requests. The five largest are listed, the rest summed as other. Also `unpriced_requests` and `unpriced_share` = requests without a complete USD price / all requests. |
+| `price_comparison` (computed) | A neutral price ladder, not a recommendation. For each model with at least 10% of priced cost: the exact same requests (same token counts and cache classes) priced again at every model of the same provider in the price table that has complete USD prices and can price all of them, the model used included and marked (free models and non-USD prices are not listed). The long-context tier is evaluated per request with each model's own threshold and rates; the tier, cache and modifier rules are the ones used for the original price. Models are listed by cost, highest first, at most 8; when there are more, the 8 closest to the model used in that order are shown. Assumption: same token counts; output quality and token counts of another model are not measured. |
+| `cost_parts` (computed) | Priced cost split into input (uncached), cache write, cache read and output, summed over priced requests; share = part / total priced cost. Reasoning tokens are part of output. |
+| `context_size` (measured) | Per harness: input tokens per request = fresh input + cache read + cache write, over requests where all three are known. Median = middle value (mean of the two middle values for an even count); p90 = nearest rank, the value at position ceil(0.9 x n) in ascending order. |
+| `long_context_premium` (computed) | Requests whose total input exceeds the model's long-context threshold are priced at the long-context rates. Premium = their cost at those rates - their cost at the standard rates, same tokens. Omitted when no request is at a long-context tier. |
+| `big_turns` (computed) | Turns (as in `top`, subagent work rolled up) whose cost from priced requests in the window is >= $50: count, share = their cost / cost of all turns with a known turn, and the median number of requests per such turn. Requests that cannot be tied to a turn are excluded, a turn counts only the requests inside the window, and unpriced requests add nothing, so a turn's cost is a lower bound. Omitted when no turn reaches the threshold. |
+| `subagent_share` (computed) | List-price cost of requests from subagent threads / list-price cost of all priced requests. Omitted when no priced request is from a subagent. |
+| `premium_tiers` (computed) | For requests priced with a fast (Claude speed or service tier) or priority modifier: extra = their cost at the tier's prices - their cost at the standard prices, same tokens. Flex (discounted) tiers are not included. Omitted when no request uses such a tier. |
 
 ## Fixed context overhead
 

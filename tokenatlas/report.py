@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from tokenatlas import __version__
-from tokenatlas import pricing, prompts
+from tokenatlas import insights, pricing, prompts
 from tokenatlas.history import ALL_FIELDS
 
 PUBLIC_NAMES = dict(
@@ -32,6 +32,7 @@ PUBLIC_MODEL = re.compile(
     r'[A-Za-z0-9._-]{0,100}(?::free)?', re.IGNORECASE)
 
 
+INSIGHT_DAYS = 30
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 DICT_FIELDS = ('harness', 'provider', 'model', 'effort', 'thread_kind', 'origin', 'turn_confidence', 'session',
                'parent_session', 'turn_id', 'agent', 'project_id', 'project_label', 'warnings')
@@ -83,22 +84,24 @@ def coverage_key(source_status):
     return key
 
 
-def report_state(revision, machine, spec, coverage, token=None, texts_hash=None):
-    """(identity, data) 32-hex pair. Identity: version, options, database, template and, for private reports, the embedded prompt previews; data: revision token, counter and coverage."""
+def report_state(revision, machine, spec, coverage, token=None, texts_hash=None, day=None):
+    """(identity, data) 32-hex pair. Identity: version, options, database, template and, for private reports, the embedded prompt previews; data: revision token, counter, coverage and, when given, the UTC day the rolling 30-day cost facts were computed for."""
     dump = lambda body: json.dumps(body, sort_keys=True, separators=(',', ':'))
     template = hashlib.sha256(Path(__file__).with_name('report_template.html').read_bytes()
                               + Path(__file__).with_name('report_i18n.json').read_bytes()).hexdigest()
     identity = dump({'format': 2, 'version': __version__, 'spec': spec, 'machine': machine,
                      **({'prompt_texts': texts_hash} if texts_hash else {})})
-    data = dump({'token': token, 'revision': int(revision), 'coverage': coverage})
+    data = dump({'token': token, 'revision': int(revision), 'coverage': coverage, **({'insights_day': day} if day else {})})
     return tuple(hashlib.sha256(text.encode()).hexdigest()[:32] for text in (identity + template, data))
 
 
 def build_report(records, source_status, timezone_name='Europe/Stockholm', redact=True, prompt_texts=None, table=None, lang='auto',
-                 prompt_context=None, prompt_inputs=None):
+                 prompt_context=None, prompt_inputs=None, now=None):
     """prompt_texts ({(harness, session, turn_id): text or None} from prompt_store) and prompt_context ({key: turn_context dict}) are for
     prompt_inputs ({key: input count or None}) are for private reports only (any of them with redact=True raises);
-    table is the price table behind the `price_classes` unit prices (None = packaged prices)."""
+    table is the price table behind the `price_classes` unit prices (None = packaged prices). `insights` holds the cost facts (insights.py) for the
+    last 30 days before `now` (default: the current time) and for all given records, computed here and never following the page filters; model names
+    go through the same redaction as the rows."""
     if lang not in LANGS:
         raise ValueError(f'unknown report language {lang!r}; use one of {", ".join(LANGS)}')
     if redact and (prompt_texts is not None or prompt_context is not None or prompt_inputs is not None):
@@ -170,9 +173,14 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
         group = [r for r in rows if r['harness'] == harness]
         coverage['ranges'].append(dict(harness=harness, observations=len(group),
                                        first_event=group[0]['ts'], last_event=group[-1]['ts']))
-    report = dict(version=2, generated_at=datetime.now(timezone.utc).isoformat(),
+    now = now or datetime.now(timezone.utc)
+    display = lambda provider, model: metadata('model', model, {'provider': provider})
+    memo = {}
+    windows = [dict(id=wid, **insights.public(insights.cost_facts(records, table, start, None, name=display, memo=memo)))
+               for wid, start in (('30d', now - timedelta(days=INSIGHT_DAYS)), ('all', None))]
+    report = dict(version=2, generated_at=now.isoformat(),
                   timezone=timezone_name, lang=lang, privacy='redacted' if redact else 'local',
-                  columns=encode_columns(rows), coverage=coverage)
+                  columns=encode_columns(rows), coverage=coverage, insights=dict(days=INSIGHT_DAYS, big_turn=insights.BIG_TURN, windows=windows))
     if prompt_texts is not None:
         report['prompt_texts'] = {shown[':'.join(k)]: t for k, t in prompt_texts.items() if t and ':'.join(k) in shown}
     if prompt_context is not None:

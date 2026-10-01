@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+### Added
+
+- Cost facts: `tokenatlas insights [--days N | --start/--end] [--json]` prints deterministic, rule-based list-price facts (cost by model, a neutral price ladder of the same tokens at every model of the same provider (the model used is marked; no recommendation), cost by token class, input size per request, long-context premium, big turns, subagent share, fast/priority tier extra) with the computation and assumptions of each; no model, no interpretation, aggregate only. The report gets a "Kostnadsfakta" / "Cost facts" card for the last 30 days and all history, computed when the report is built, with measured/computed badges; shared reports apply the usual model-name redaction.
+- README: what TokenAtlas adds beyond the vendors' own tools, and what to use the vendor tools for.
+
+### Changed
+
+- `report_state` takes the UTC day of the rolling 30-day window, so a report is rebuilt once per day even when the history is unchanged.
+
 ## [1.4.0] - 2026-10-01
 
 ### Added
