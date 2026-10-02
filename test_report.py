@@ -320,7 +320,7 @@ class PayloadV2Tests(unittest.TestCase):
         self.assertLess(size, base * 1.08)
 
 
-PROMPT_CARD_COLUMNS = ('prompt', 'price', 'price_classes', 'cw1h')
+PROMPT_CARD_COLUMNS = ('prompt', 'price', 'price_classes', 'cw1h', 'credit', 'credit_classes')
 SIZE_LIMIT_20K = 700_000  # measured ~311 KB (was ~9 MB as v1 JSON); margin for dictionary growth
 
 if __name__ == '__main__':

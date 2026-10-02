@@ -8,10 +8,10 @@ const zlib = require('node:zlib');
 const L = {
   sv: {lang:'sv', locale:'sv-SE', h1:'Tokenanvändning', prompts:'Dyraste turerna', inputs:'Inmatningar', labels:['Titel','Första inmatningen','Plats','Slutrapport','Aktivitet','PR:er','Commits'], activity:'1 842 shell · 1 redigering · 21 webb', total:'Totalt', totalRe:/^Totalt( \(minst\))?$/, atLeast:/ \(minst\)$/,
     note:/^[\d\s\u00a0\u202f]+ anrop · [\d\s\u00a0\u202f]+ (?:sessioner|session)$/, cache:/^(—|\d+,\d % av all input)$/, selection:/ anrop · /, reasoning:/^varav reasoning |^inkl\. reasoning$/,
-    unknown:'Okänt', short:['43,8 mdr','136,5 milj.',(12345).toLocaleString('sv-SE')], money:['$9,00','≥$3,00','$0,60','n/a'], toggleLabel:'Språk'},
+    unknown:'Okänt', short:['43,8 mdr','136,5 milj.',(12345).toLocaleString('sv-SE')], money:['$9,00','≥$3,00','$0,60','n/a'], credit:'≈ 15,0 krediter', creditFact:'≈ 15,0 krediter', toggleLabel:'Språk'},
   en: {lang:'en', locale:'en-US', h1:'Token usage', prompts:'Costliest turns', inputs:'Inputs', labels:['Title','Initiating input','Place','Final message','Activity','PRs','Commits'], activity:'1,842 shell · 1 edit · 21 web', total:'Total', totalRe:/^Total( \(at least\))?$/, atLeast:/ \(at least\)$/,
     note:/^[\d,]+ requests? · [\d,]+ sessions?$/, cache:/^(—|\d+\.\d% of all input)$/, selection:/ requests · /, reasoning:/^of which reasoning |^incl\. reasoning$/,
-    unknown:'Unknown', short:['43.8B','136.5M','12.3K'], money:['$9.00','≥$3.00','$0.60','n/a'], toggleLabel:'Language'},
+    unknown:'Unknown', short:['43.8B','136.5M','12.3K'], money:['$9.00','≥$3.00','$0.60','n/a'], credit:'≈ 15.0 credits', creditFact:'≈ 15.0 credits', toggleLabel:'Language'},
 };
 // Cost facts card (fixed fixture clock 2026-09-20): window texts, provenance badges and the figures of both windows.
 const INS = {
@@ -130,10 +130,24 @@ async function ready(page, errors, what = 'report') {
     await context.close();
     if(fixture){
       const {context:c2,page:p2,errors:errors2}=await newPage({locale:T.locale},fixture);
-      const card=await p2.evaluate(()=>({rows:[...document.querySelectorAll('#top-prompts tr.prompt-row')].map(r=>[...r.children].map(c=>c.textContent)),texts:[...document.querySelectorAll('#top-prompts tr.prompt-text')].map(r=>r.textContent),markup:document.querySelectorAll('#top-prompts tr.prompt-text b').length}));
-      assert.equal(card.rows.length,4);assert.equal(card.rows[0][0],'1');
+      const card=await p2.evaluate(()=>({rows:[...document.querySelectorAll('#top-prompts tr.prompt-row')].map(r=>[...r.children].map(c=>c.firstChild.textContent)),credits:[...document.querySelectorAll('#top-prompts tr.prompt-row')].map(r=>{const x=r.children[9].querySelector('.cr');return x&&x.textContent}),texts:[...document.querySelectorAll('#top-prompts tr.prompt-text')].map(r=>r.textContent),markup:document.querySelectorAll('#top-prompts tr.prompt-text b').length}));
+      assert.equal(card.rows.length,4);assert.equal(card.rows[0][0],'1');assert.deepEqual(card.credits,[null,null,T.credit,null],'credits only for the Codex turn whose requests all have a rate');
       assert.deepEqual(card.rows.map(r=>r[9].replace(/ /g,' ')),T.money);assert.equal(card.rows[1][6],'1');assert.equal(card.rows[1][5],'2');assert.deepEqual(card.rows.map(r=>r[7]),['3','14','–','–'],'inputs column: stored counts, – when unknown');
       assert.equal(await p2.locator('#top-prompts th').nth(9).innerText(),T.lang==='sv'?'Kostnad':'Cost');assert.equal(await p2.locator('#top-prompts th').nth(7).innerText(),T.inputs);
+      {// the page rounds credits half away from zero on the shortest decimal form, like credits.fmt (1.25 -> 1.3, 100.5 -> 101, 0.125 -> 0.13, 1.15 -> 1.2, 0.615 -> 0.62, 9.95 -> 10.0)
+        const got=await p2.evaluate(()=>[1.25,100.5,0.125,1.15,0.615,9.95].map(x=>UsageReport.cr(x))),dp=T.lang==='sv'?',':'.';
+        assert.deepEqual(got,['1'+dp+'3','101','0'+dp+'13','1'+dp+'2','0'+dp+'62','10'+dp+'0'],'credit rounding: '+got);
+      }
+      {// credits in the costliest-turns card: desktop table, then the 390 px layout (the table scrolls inside its wrapper, the page must not)
+        const cr=p2.locator('#top-prompts tr.prompt-row .cr');assert.equal(await cr.count(),1);assert.equal((await cr.first().innerText()).trim(),T.credit);assert.equal(await cr.first().isVisible(),true);
+        await p2.locator('#prompts').screenshot({path:path.join(screenshotDir,'credits-turns-desktop-'+T.lang+'.png')});
+        const vp=p2.viewportSize();await p2.setViewportSize({width:390,height:844});
+        await cr.first().scrollIntoViewIfNeeded();assert.equal(await cr.first().isVisible(),true);assert.equal((await cr.first().innerText()).trim(),T.credit,'credits at 390 px');
+        const fits=await p2.evaluate(()=>{const c=document.querySelector('#top-prompts tr.prompt-row .cr').getBoundingClientRect(),w=document.querySelector('#top-prompts .table-wrap').getBoundingClientRect();return {inside:c.left>=w.left-1&&c.right<=w.right+1,page:document.documentElement.scrollWidth<=innerWidth+1}});
+        assert.ok(fits.page,'390 px: the page must not overflow');
+        await p2.locator('#prompts').screenshot({path:path.join(screenshotDir,'credits-turns-390-'+T.lang+'.png')});
+        await p2.setViewportSize(vp);
+      }
       assert.deepEqual(card.texts,['Refactor the importer','Fix the <b>failing</b> build']);assert.equal(card.markup,0,'preview must be text, not markup');
       await p2.screenshot({path:path.join(screenshotDir,'energy-report-prompts-'+T.lang+'.png'),fullPage:true});
       // Private context: a collapsed details block per stored turn; opening shows title, place, final message and activity, all as text.
@@ -168,10 +182,14 @@ async function ready(page, errors, what = 'report') {
         const I=INS[T.lang],money=async()=>{const f=(await facts(p2)).find(x=>x.id==='model_share');return {ids:(await facts(p2)).map(x=>x.id),total:norm(f.rows.find(r=>r[0]===(T.lang==='sv'?'Prissatt kostnad':'Priced cost'))[1]),unpriced:norm(f.rows.at(-1)[1])}};
         const first=(await facts(p2)).find(x=>x.id==='model_share').assumptions.join(' | ');
         assert.ok(first.includes(I.spd)&&first.includes(I.tier)&&first.includes(I.table),'pricing assumptions with counts and the table date: '+first);assert.ok(!first.includes(I.lower),'the 30-day window has no incomplete request');
-        const a=await money();assert.deepEqual(a.ids,['model_share','price_comparison','cost_parts','context_size']);assert.equal(a.total,I.total);assert.equal(a.unpriced,I.unpriced);
+        {const cf=(await facts(p2)).find(x=>x.id==='credits');assert.ok(cf,'credits fact');
+         assert.ok(cf.rows.some(r=>norm(r[1]).includes(T.creditFact)),'credit equivalent: '+JSON.stringify(cf.rows));
+         const at=cf.assumptions.join(' | ');for(const x of (T.lang==='sv'?['motsvarar','inte vad som dragits','standardhastighet','äldre kreditprislista','dollar']:['corresponds to','not what was drawn','standard speed','legacy rate card','not dollars']))assert.ok(at.includes(x),'credits assumption '+x+': '+at);
+         await p2.locator('#cost-facts article[data-fact="credits"]').screenshot({path:path.join(screenshotDir,'credits-fact-'+T.lang+'.png')})}
+        const a=await money();assert.deepEqual(a.ids,['model_share','price_comparison','cost_parts','context_size','credits']);assert.equal(a.total,I.total);assert.equal(a.unpriced,I.unpriced);
         {const per=norm(await p2.locator('#ins-period').innerText());assert.ok(per.includes('2026-08-21 – 2026-09-20'));assert.ok(!per.includes(I.left),'no exclusion note without excluded requests: '+per)}
         await p2.click('#cost-facts [data-win="all"]');
-        const b=await money();assert.deepEqual(b.ids,['model_share','price_comparison','cost_parts','context_size','long_context_premium','subagent_share']);assert.equal(b.total,I.totalAll,'the window toggle switches the values');
+        const b=await money();assert.deepEqual(b.ids,['model_share','price_comparison','cost_parts','context_size','long_context_premium','subagent_share','credits']);assert.equal(b.total,I.totalAll,'the window toggle switches the values');
         {const ms=(await facts(p2)).find(x=>x.id==='model_share'),txt=ms.assumptions.join(' | ');assert.ok(txt.includes(I.lower)&&txt.includes(I.left),'lower bound and left-out disclosures: '+txt);assert.ok(ms.rows.some(r=>r[1].startsWith('≥')),'amounts marked as lower bounds');
          const ctx=(await facts(p2)).find(x=>x.id==='context_size');assert.ok(ctx.rows[0][1].includes('≥'));
          const lc=(await facts(p2)).find(x=>x.id==='long_context_premium');assert.ok(!lc.assumptions.join(' | ').includes(I.cplt),'the incomplete request is of a model without a long-context tier: nothing to leave out: '+lc.assumptions.join(' | '));assert.ok(!lc.assumptions.join(' | ').includes(I.lower));assert.ok(lc.rows.every(r=>!r[1].includes('≥')),'exact, not a lower bound: '+JSON.stringify(lc.rows))}
