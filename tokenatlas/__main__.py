@@ -57,7 +57,7 @@ def _ago(seconds):
 def _show(path):
     """Open an existing report as it is: the history is not opened, nothing is refreshed or rebuilt."""
     if not path.is_file():raise ValueError(f'no report at {path.absolute()}; build one with: tokenatlas open')
-    age=time.time()-path.stat().st_mtime
+    age=max(0.0,time.time()-path.stat().st_mtime)  # a file dated in the future reads as just built
     _open_in_browser(path)
     print(f'Report: {path.absolute()} (built {_ago(age)} ago; tokenatlas open refreshes it)',file=sys.stderr)
     print(json.dumps({'html':str(path.absolute()),'shown':True,'age_seconds':int(age)},indent=2,sort_keys=True))
@@ -315,6 +315,9 @@ def main(argv=None):
     commands.add_parser('statusline',help='Claude Code statusline: one line from the stdin payload and the totals cache refresh writes (no network); --setup prints the settings snippet.').add_argument('--setup',action='store_true')
     commands.add_parser('doctor',help='Show source availability, import errors and known coverage limits.')
     args=parser.parse_args(argv)
+    if args.command=='show':  # before default_db(): show never touches the history, not even its one-time directory move
+        try:return _show(Path(args.html or (args.db.expanduser().parent if args.db else _state_base()/'tokenatlas')/'report.html').expanduser())
+        except (OSError,ValueError) as exc:parser.exit(2,f'usage: {exc}\n')
     if args.db is None:args.db=default_db()
     try:
         start=end=None
@@ -339,7 +342,6 @@ def main(argv=None):
             if start and end and start>=end:raise ValueError('--start must precede --end')
             if args.command=='insights' and args.days:end=datetime.now(ZoneInfo('UTC'));start=end-timedelta(days=args.days)  # one captured now: the exclusive end
             if args.command=='report' and args.html:_output_path(args.html,args.db)
-        if args.command=='show':return _show(Path(args.html or args.db.parent/'report.html').expanduser())
         if args.command=='open':path=_output_path(args.html or args.db.parent/'report.html',args.db)
         if args.command=='collect':
             from tokenatlas import collect as _collect
