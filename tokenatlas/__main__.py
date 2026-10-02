@@ -141,26 +141,25 @@ def render_top(result,texts=None,contexts=None):
     """Compact table of ranked turns; cost is list-price, '≥' when some requests could not be priced. Stored context or preview goes on indented lines."""
     from tokenatlas import credits as credit_rates
     zone=ZoneInfo(DEFAULT_TIMEZONE)
-    rows=[('#','when','harness','project','models','req','sub','Mtok','cost','resume')]  # a Codex/OpenAI turn with a credit rate adds its credit equivalent to the cost cell
+    rows=[('#','when','harness','project','models','req','sub','Mtok','cost')]  # a Codex/OpenAI turn with a credit rate adds its credit equivalent to the cost cell; the resume command goes on its own line
     for i,p in enumerate(result['prompts'],1):
         cost='n/a' if p['cost'] is None else ('' if p['cost_complete'] else '≥')+f"${p['cost']:.2f}"
         if p.get('credits') is not None:cost+=f" ({'≥' if p['credits_lower_bound'] else '≈'} {credit_rates.fmt(p['credits'])} credits)"
         when=datetime.fromisoformat(p['first_ts']).astimezone(zone).strftime('%Y-%m-%d %H:%M')
         rows.append((str(i),when,p['harness'],p['project_label'] or '-',','.join(p['models']) or '-',str(p['requests']),
-                     str(p['subagents']),f"{p['total_tokens']/1e6:.2f}",cost,p['resume'] or '-'))
+                     str(p['subagents']),f"{p['total_tokens']/1e6:.2f}",cost))
     widths=[max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
     lines=['  '.join(c.ljust(w) for c,w in zip(r,widths)).rstrip() for r in rows]
-    if texts or contexts:
-        shown=[]
-        for line,p in zip(lines[1:],result['prompts']):
-            key=(p['harness'],p['session'],p['turn_id']);shown.append(line)
-            text=(texts or {}).get(key)
-            if (contexts or {}).get(key):shown+=context_lines(contexts[key],text)
-            elif text:shown.append('    '+text)
-            if texts or contexts:
-                command=resume_command(p['harness'],p['session'],((contexts or {}).get(key) or {}).get('cwd'))
-                if command:shown.append('    resume: '+command)
-        lines=[lines[0],*shown]
+    shown=[]
+    for line,p in zip(lines[1:],result['prompts']):
+        key=(p['harness'],p['session'],p['turn_id']);shown.append(line)
+        text=(texts or {}).get(key)
+        if (contexts or {}).get(key):shown+=context_lines(contexts[key],text)
+        elif text:shown.append('    '+text)
+        # validated and quoted (resume.resume_command); the stored context's directory when the turn's own row has none
+        command=p.get('resume') or resume_command(p['harness'],p['session'],((contexts or {}).get(key) or {}).get('cwd'))
+        if command:shown.append('    resume: '+command)
+    lines=[lines[0],*shown]
     if len(result['prompts'])<result['total_prompts']:lines.append(f"showing {len(result['prompts'])} of {result['total_prompts']} turns")
     return '\n'.join(lines)
 

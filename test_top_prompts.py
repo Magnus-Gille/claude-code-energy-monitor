@@ -153,8 +153,8 @@ class Rank(unittest.TestCase):
         self.assertEqual(t1['requests'], 2)
         self.assertIsNone(t3['cost'])
         self.assertFalse(t3['cost_complete'])
-        self.assertEqual(t1['resume'], 'claude --resume s')
-        self.assertIsNone(t3['resume'])
+        self.assertIsNone(t1['resume'])  # no directory on the rows: a Claude session cannot be resumed from anywhere
+        self.assertEqual(t3['resume'], 'pi --session u')  # Pi resumes by id from any directory
         self.assertEqual((res['total_prompts'], res['unattributed_observations'], res['by']), (3, 0, 'cost'))
         self.assertEqual(len(top_prompts(rows, TABLE, k=1)['prompts']), 1)
 
@@ -221,7 +221,7 @@ class Cli(Base):
         self.assertEqual(res['total_prompts'], 2)
         u1 = res['prompts'][0]
         self.assertEqual((u1['requests'], u1['subagent_requests'], u1['subagents']), (2, 1, 1))
-        self.assertEqual(u1['resume'], 'claude --resume sess')
+        self.assertEqual(u1['resume'], 'cd /work/app && claude --resume sess')
         self.assertEqual(self.top('--json', '--by', 'tokens', '-n', '1')[1].count('"turn_id"'), 1)
 
     def test_default_limit_is_ten(self):
@@ -233,11 +233,11 @@ class Cli(Base):
         code, out, err = self.top()
         self.assertEqual(code, 0, err)
         lines = out.splitlines()
-        self.assertEqual(len(lines), 3, out)
+        self.assertEqual(len(lines), 5, out)  # header, then each turn with its resume line under it
         self.assertIn('claude', lines[1])
         self.assertIn('app', lines[1])
-        self.assertIn('claude --resume sess', lines[1])
         self.assertIn('$', lines[1])
+        self.assertEqual(lines[2], '    resume: cd /work/app && claude --resume sess')
         self.assertNotIn('secret', out)
 
     def test_table_na_and_lower_bound(self):

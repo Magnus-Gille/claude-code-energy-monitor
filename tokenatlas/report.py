@@ -158,7 +158,7 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
             row[key] = alias(kind, value) if redact else value
         unit, cw1h = pricing.price_vector(record, table)
         found = assigned[index]
-        key = found and ':'.join(found[:3])
+        key = found and tuple(found[:3])  # a tuple, never joined: ids may contain ':' and must not collide
         if key and key not in shown:
             shown[key] = len(shown)
         row.update(prompt=key and shown[key], unit_prices=unit, credit_rates=credit_rates.credit_vector(record, credit_table), cw1h=cw1h, ts=record['ts'], ms=(dt - EPOCH) // timedelta(milliseconds=1),
@@ -196,21 +196,21 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
                   columns=encode_columns(rows), coverage=coverage,
                   energy=dict(per_1k=energy.PER_1K, uncertainty=energy.UNCERTAINTY, tier_multipliers=energy.TIERS, multipliers=weights), insights=dict(days=INSIGHT_DAYS, big_turn=insights.BIG_TURN, windows=windows))
     if prompt_texts is not None:
-        report['prompt_texts'] = {shown[':'.join(k)]: t for k, t in prompt_texts.items() if t and ':'.join(k) in shown}
+        report['prompt_texts'] = {shown[tuple(k)]: t for k, t in prompt_texts.items() if t and tuple(k) in shown}
     if prompt_context is not None:
-        report['prompt_context'] = {shown[':'.join(k)]: c for k, c in prompt_context.items() if c and ':'.join(k) in shown}
+        report['prompt_context'] = {shown[tuple(k)]: c for k, c in prompt_context.items() if c and tuple(k) in shown}
     if prompt_texts is not None or prompt_context is not None:
         found = {}
         for k in {*(prompt_texts or {}), *(prompt_context or {})}:
-            info = resume_info(k[0], k[1], ((prompt_context or {}).get(k) or {}).get('cwd')) if ':'.join(k) in shown else None
+            info = resume_info(k[0], k[1], ((prompt_context or {}).get(k) or {}).get('cwd')) if tuple(k) in shown else None
             if info:
-                found[shown[':'.join(k)]] = info
+                found[shown[tuple(k)]] = info
         if found:
             report['prompt_resume'] = found
     if demo:
         report['demo'] = True
     if prompt_inputs is not None:
-        report['prompt_inputs'] = {shown[':'.join(k)]: n for k, n in prompt_inputs.items() if isinstance(n, int) and ':'.join(k) in shown}
+        report['prompt_inputs'] = {shown[tuple(k)]: n for k, n in prompt_inputs.items() if isinstance(n, int) and tuple(k) in shown}
     return report
 
 

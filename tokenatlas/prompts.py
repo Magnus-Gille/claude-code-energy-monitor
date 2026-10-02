@@ -4,9 +4,9 @@ from datetime import datetime
 
 from tokenatlas import credits as credit_rates
 from tokenatlas.pricing import price_observation
+from tokenatlas.resume import resume_command
 
 CLASSES = ('fresh_input', 'cache_write', 'cache_read', 'output', 'reasoning')
-RESUME = {'claude': 'claude --resume {}', 'codex': 'codex resume {}'}
 MAX_DEPTH = 8
 
 
@@ -109,7 +109,7 @@ def top_prompts(records, table, k=5, by='cost', keep=None, credit_table=None):
             'tokens': tokens, 'total_tokens': sum(tokens[c] for c in CLASSES if c != 'reasoning'),
             'cost': sum(priced) if priced else None, 'cost_complete': len(priced) == len(costs),
             'credits': sum(owed) if None not in owed else None, 'credits_lower_bound': any(not r.get('complete', True) for r in rows),
-            'resume': RESUME[harness].format(session) if harness in RESUME else None})
+            'resume': resume_command(harness, session, head.get('cwd'))})  # validated and quoted; Claude needs the directory
     if by == 'cost':
         prompts.sort(key=lambda p: (p['cost'] is None, -(p['cost'] or 0), -p['total_tokens']))
     else:

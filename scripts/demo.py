@@ -266,7 +266,8 @@ SKILL_BODY = '---\nname: {name}\ndescription: demo skill\n---\n# {name}\n{text}'
 
 
 def mark_demo(path):
-    """Set `demo: true` in the report payload: the page then explains instead of opening or copying (every id, path and command in it is fictional)."""
+    """Set `demo: true` in the report payload: "Open in Codex" and command copying then explain in a toast instead (every id, path and command
+    in it is fictional); "Copy prompt" still copies the fictional prompt."""
     sys.path.insert(0, str(ROOT))
     from tokenatlas.report import pack
     page = path.read_text(encoding='utf-8')

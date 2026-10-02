@@ -82,6 +82,16 @@ class ReportBoundaryTests(unittest.TestCase):
         report = build_report([record('codex', UUID)], {}, redact=False, prompt_texts={('codex', UUID, 't1'): 'x'}, now=self.now)
         self.assertEqual(list(report['prompt_resume'].values()), [{'command': f'codex resume {UUID}', 'codex_link': f'codex://threads/{UUID}'}])
 
+    def test_ids_with_colons_do_not_collide(self):
+        # ('opencode', 'a:b', 'c') and ('opencode', 'a', 'b:c') join to the same string; each turn must keep its own text and command
+        recs = [dict(record('opencode', 'a:b', 'c'), id='o1'), dict(record('opencode', 'a', 'b:c'), id='o2', ts='2026-09-03T11:00:00+00:00')]
+        texts = {('opencode', 'a:b', 'c'): 'first', ('opencode', 'a', 'b:c'): 'second'}
+        report = build_report(recs, {}, redact=False, prompt_texts=texts, now=self.now)
+        self.assertEqual(sorted(report['prompt_texts'].values()), ['first', 'second'])
+        self.assertEqual(len(set(report['prompt_texts'])), 2)
+        commands = {report['prompt_texts'][k]: report['prompt_resume'][k]['command'] for k in report['prompt_texts']}
+        self.assertEqual(commands, {'first': 'opencode --session a:b', 'second': 'opencode --session a'})
+
     def test_shared_report_has_no_ids_commands_links_or_paths(self):
         html = render_report(build_report([record('codex', UUID), record('claude', 'sess-1', 't9')], {}, redact=True, now=self.now))
         data = payload(html)
@@ -95,7 +105,7 @@ class ReportBoundaryTests(unittest.TestCase):
 
 
 class TopOutputTests(unittest.TestCase):
-    def test_top_prints_the_resume_command_when_text_or_context_is_kept(self):
+    def test_top_prints_a_validated_resume_command_under_each_turn(self):
         prompt = dict(harness='codex', session=UUID, turn_id='t1', cost=1.0, cost_complete=True, credits=None, credits_lower_bound=False,
                       first_ts='2026-09-03T10:00:00+00:00', project_label='app', models=['gpt-5'], requests=1, subagents=0,
                       total_tokens=1000, resume=None)
@@ -103,8 +113,10 @@ class TopOutputTests(unittest.TestCase):
         key = ('codex', UUID, 't1')
         out = cli.render_top(result, {key: 'hello'}, {key: {'cwd': '/w/app'}})
         self.assertIn(f'    resume: cd /w/app && codex resume {UUID}', out)
-        self.assertNotIn('resume: ', cli.render_top(result))  # no kept data, no extra lines
-        self.assertIn(f'    resume: codex resume {UUID}', cli.render_top(result, {key: 'hello'}))  # Codex needs no directory
+        self.assertIn(f'    resume: codex resume {UUID}', cli.render_top(result))  # always printed; Codex needs no directory
+        self.assertIn(f'    resume: codex resume {UUID}', cli.render_top(result, {key: 'hello'}))
+        hostile = dict(prompt, harness='claude', session='ok; touch /tmp/pwn', resume=None)
+        self.assertNotIn('pwn', cli.render_top({'prompts': [hostile], 'total_prompts': 1}, None, {('claude', 'ok; touch /tmp/pwn', 't1'): {'cwd': '/w'}}))
 
 
 if __name__ == '__main__':

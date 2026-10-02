@@ -239,10 +239,10 @@ log cleanup (for example Claude Code's `cleanupPeriodDays`) while the turn stays
 
 ### Back to the conversation
 
-For each stored turn, `top` also prints `resume: <command>`, and a private report shows the same command with a Copy button, a
-"Copy prompt" button and the turn's time:
+For each turn, `top` also prints `resume: <command>`, and a private report shows the same command for each stored turn with a Copy
+button, a "Copy prompt" button and the turn's time:
 
-| Harness | Command (always prefixed with `cd <cwd> &&`) |
+| Harness | Command (prefixed with `cd <cwd> &&` when the directory is known) |
 | --- | --- |
 | Claude Code | `claude --resume <session-id>` (needs the directory: sessions are stored per project) |
 | Codex | `codex resume <session-id>` |
@@ -252,8 +252,8 @@ For each stored turn, `top` also prints `resume: <command>`, and a private repor
 Codex turns also get an "Open in Codex" link, `codex://threads/<id>`, which opens the conversation in the ChatGPT desktop app (checked
 on macOS with a CLI session; only UUID-shaped ids get a link). Claude Code has no documented deep link, so it gets the command only.
 Both open the whole conversation, not the turn: scroll or search for the prompt (that is what "Copy prompt" is for). Shared reports contain
-none of this (no ids, commands, links or paths). In the demo report (`scripts/demo.py`) clicking explains what would happen in a small
-toast instead of opening or copying.
+none of this (no ids, commands, links or paths). In the demo report (`scripts/demo.py`) "Open in Codex" and the command's Copy button explain what
+would happen in a small toast instead of opening or copying; "Copy prompt" copies the fictional prompt.
 
 ### Turn context
 
