@@ -63,6 +63,28 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(h.refresh('claude',source.parent)['files_skipped'],0)
             self.assertEqual(h.refresh('claude',source.parent)['files_skipped'],1)
 
+    def test_codex_revision_changes_fingerprint_and_forces_one_reread(self):
+        import tokenatlas.history as history
+        from test_why_codex import _write_rollout,_meta,_context,_tokens,_tier
+        self.assertEqual(history.HARNESS_REVISION.get('codex'), 2)
+        source=self.root/'logs/rollout-one.jsonl'
+        counts={'input_tokens':10,'cached_input_tokens':0,'cache_write_input_tokens':0,'output_tokens':2}
+        _write_rollout(source,[_meta(),_context('2026-09-03T10:00:00Z','model','high','/work/project'),
+            _tier('2026-09-03T10:00:00Z','priority'),_tokens('2026-09-03T10:00:01Z',1,counts,counts)])
+        with patch.dict(history.HARNESS_REVISION,clear=False):
+            history.HARNESS_REVISION['codex']=1
+            old=History.fingerprint(source,harness='codex')
+        self.assertNotEqual(old,History.fingerprint(source,harness='codex'))
+        with patch.dict(history.HARNESS_REVISION,clear=False):
+            history.HARNESS_REVISION['codex']=1
+            with History(self.db) as h:
+                self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],0)
+                self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],1)
+        with History(self.db) as h:
+            self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],0)
+            self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],1)
+            self.assertEqual([r['tariff'] for r in h.records()],[{'service_tier':'fast'}])
+
     def test_zero_or_empty_partial_usage_is_retained_as_unknown(self):
         for usage in ({'output_tokens': 0}, {}):
             with self.subTest(usage=usage):

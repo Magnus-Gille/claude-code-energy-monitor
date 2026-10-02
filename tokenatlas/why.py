@@ -411,6 +411,16 @@ def _merge_tariff(existing: dict | None, incoming: dict | None, latest: bool) ->
     return {**(existing or {}), **incoming} if latest else {**incoming, **(existing or {})}
 
 
+_CODEX_TIERS = {"priority": "fast", "fast": "fast", "flex": "flex", "default": "standard"}
+
+
+def _codex_tariff(settings: object) -> dict | None:
+    """Tariff named by a thread_settings_applied row; Codex's "default" is explicit standard, a missing or unknown value says nothing."""
+    tier = _meta_text(_mapping(settings).get("service_tier"), limit=64)
+    mapped = _CODEX_TIERS.get(tier.lower()) if tier else None
+    return {"service_tier": mapped} if mapped else None
+
+
 def _explicit_turn_id(row: dict, message: dict) -> str | None:
     return _first_text(
         row,
@@ -691,6 +701,7 @@ def collect_codex(
         seen_explicit = False  # once a file carries explicit turn ids, derived user events never move the turn
         last_total_signature = None
         counter_segment = 0
+        tariff: dict | None = None  # latest thread_settings.service_tier in this file, until it changes
         harness_version = _first_text(meta_payload, "cli_version", "version")
         originator = _meta_text(meta_payload.get("originator"), source, thread_source, default=originator)
 
@@ -717,6 +728,9 @@ def collect_codex(
                     current_turn_id = pending_turn_id
                     turn_confidence = "derived" if pending_turn_id else "absent"
                 pending_turn_id = None
+                continue
+            if row_type == "event_msg" and payload.get("type") == "thread_settings_applied":
+                tariff = _codex_tariff(payload.get("thread_settings")) or tariff
                 continue
             explicit_turn = _meta_text(_codex_event_turn_id(row, payload))
             if explicit_turn:  # task_started, item_completed, token_usage_record, ... name their turn
@@ -812,6 +826,7 @@ def collect_codex(
                 "reasoning": reasoning,
                 "raw_usage": raw_usage,
                 "id_synthetic": id_synthetic,
+                "tariff": tariff,
             }
             existing = calls.get(key)
             if existing is None:
@@ -822,6 +837,7 @@ def collect_codex(
                 existing["raw_usage"] = _merge_sanitized_usage(
                     existing.get("raw_usage", {}), raw_usage
                 )
+                existing["tariff"] = _merge_tariff(existing.get("tariff"), tariff, timestamp >= existing["timestamp"])
                 if timestamp >= existing["timestamp"]:
                     existing.update({
                         field: candidate[field]
