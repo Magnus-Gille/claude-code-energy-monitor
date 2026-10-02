@@ -80,6 +80,43 @@ class ReportLocation(unittest.TestCase):
                          r'tokenatlas open --html "C:\my reports\r.html"')
         self.assertEqual(cli._shell_command(['tokenatlas', 'open', '--html', '/a&b/r.html'], windows=False), "tokenatlas open --html '/a&b/r.html'")
 
+    def run_raw(self, *args, **env):
+        return subprocess.run([sys.executable, '-m', 'tokenatlas', *args], cwd=ROOT, env=dict(self.env, **env), capture_output=True, text=True, encoding='utf-8')
+
+    def test_show_opens_the_report_as_it_is_without_the_history(self):
+        out = self.tmp / 'shown.html'
+        self.run_cli('report', '--html', str(out), '--private')
+        before = (out.read_bytes(), out.stat().st_mtime_ns)
+        missing_db = self.tmp / 'no-such-dir' / 'history.sqlite3'  # show never opens or creates the history
+        proc = self.run_raw('--db', str(missing_db), 'show', '--html', str(out))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)['html'], str(out))
+        self.assertIn(f'Report: {out} (built ', proc.stderr)
+        self.assertIn('tokenatlas open refreshes it', proc.stderr)
+        self.assertEqual((out.read_bytes(), out.stat().st_mtime_ns), before)
+        self.assertFalse(missing_db.parent.exists())
+
+    def test_show_defaults_to_the_report_next_to_the_database(self):
+        self.run_cli('report', '--html', str(self.db.parent / 'report.html'), '--private')
+        proc = self.run_raw('--db', str(self.db), 'show')
+        self.assertEqual(json.loads(proc.stdout)['html'], str(self.db.parent / 'report.html'))
+
+    def test_show_without_a_report_says_how_to_build_one(self):
+        proc = self.run_raw('--db', str(self.db), 'show', '--html', str(self.tmp / 'nothing.html'))
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('tokenatlas open', proc.stderr)
+
+    def test_show_reports_a_browser_that_cannot_open(self):
+        from unittest import mock
+        from tokenatlas import __main__ as cli
+        out = self.tmp / 'r.html'
+        out.write_text('<!doctype html>', encoding='utf-8')
+        with mock.patch.object(cli.webbrowser, 'open', return_value=False) as opened:  # in-process: no real browser is ever started
+            with self.assertRaises(ValueError) as cm:
+                cli._show(out)
+        opened.assert_called_once()
+        self.assertIn(str(out), str(cm.exception))
+
     def test_skipped_report_still_says_where_it_is(self):
         out = self.tmp / 'r.html'
         self.run_cli('report', '--html', str(out), '--private', '--if-changed')

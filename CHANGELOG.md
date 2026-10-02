@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+### Added
+
+- `tokenatlas show` (#69): opens the latest report in the browser at once, without refreshing or rebuilding and without opening the history; prints where it is and how old it is, and says to run `tokenatlas open` when there is no report yet.
+
 ## [1.8.0] - 2026-10-01
 
 ### Added

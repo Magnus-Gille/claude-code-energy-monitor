@@ -25,6 +25,7 @@ Claude Code, Codex, OpenCode or Pi: no skills, `AGENTS.md`, plugins, hooks or MC
 ```bash
 pipx install tokenatlas      # or: uv tool install tokenatlas
 tokenatlas open              # read the logs, build the private report, open it in the browser
+tokenatlas show              # open the latest report at once (no refresh, no rebuild)
 ```
 
 `tokenatlas open` saves the report as `report.html` next to the history, by default

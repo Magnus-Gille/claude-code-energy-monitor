@@ -45,6 +45,25 @@ def _open_in_browser(path):
     if not opened:raise ValueError(where)
 
 
+def _ago(seconds):
+    seconds=max(0,int(seconds))
+    for unit,size in (('day',86400),('h',3600),('min',60)):
+        if seconds>=size:
+            n=seconds//size
+            return f'{n} {unit}'+('s' if unit=='day' and n!=1 else '')
+    return f'{seconds} s'
+
+
+def _show(path):
+    """Open an existing report as it is: the history is not opened, nothing is refreshed or rebuilt."""
+    if not path.is_file():raise ValueError(f'no report at {path.absolute()}; build one with: tokenatlas open')
+    age=time.time()-path.stat().st_mtime
+    _open_in_browser(path)
+    print(f'Report: {path.absolute()} (built {_ago(age)} ago; tokenatlas open refreshes it)',file=sys.stderr)
+    print(json.dumps({'html':str(path.absolute()),'shown':True,'age_seconds':int(age)},indent=2,sort_keys=True))
+    return 0
+
+
 def _output_path(path,db):
     """Expanded HTML path; refuses the history database itself, also through a hard or symbolic link."""
     path,db=Path(path).expanduser(),Path(db).expanduser()
@@ -226,6 +245,8 @@ def main(argv=None):
     opener.add_argument('--shared',action='store_true',help='Pseudonymize the report instead of keeping project labels.')
     opener.add_argument('--lang',choices=('auto','sv','en'),default='auto',help='Report language; auto follows the browser (Swedish for sv, otherwise English).')
     opener.add_argument('--no-refresh',action='store_true',help='Use the saved history as it is.')
+    shower=commands.add_parser('show',help='Open the latest report in the browser at once: no refresh, no rebuild (tokenatlas open refreshes it).')
+    shower.add_argument('--html',type=Path,help=f'Report path; default: report.html next to the database ({_state_base()/"tokenatlas"/"report.html"}).')
     snapshot=commands.add_parser('snapshot',help='Write a consistent private copy of the history database.')
     snapshot.add_argument('out',type=Path)
     importer=commands.add_parser('import',help="Merge another machine's snapshot into this database.")
@@ -318,6 +339,7 @@ def main(argv=None):
             if start and end and start>=end:raise ValueError('--start must precede --end')
             if args.command=='insights' and args.days:end=datetime.now(ZoneInfo('UTC'));start=end-timedelta(days=args.days)  # one captured now: the exclusive end
             if args.command=='report' and args.html:_output_path(args.html,args.db)
+        if args.command=='show':return _show(Path(args.html or args.db.parent/'report.html').expanduser())
         if args.command=='open':path=_output_path(args.html or args.db.parent/'report.html',args.db)
         if args.command=='collect':
             from tokenatlas import collect as _collect
