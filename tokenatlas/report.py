@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from tokenatlas import __version__
-from tokenatlas import energy, insights, pricing, prompts
+from tokenatlas import credits as credit_rates, energy, insights, pricing, prompts
 from tokenatlas.history import ALL_FIELDS
 
 PUBLIC_NAMES = dict(
@@ -46,7 +46,7 @@ UNKNOWN_PROJECT, PROJECT = '\x01u', '\x01p'
 
 def encode_columns(rows):
     """Columnar payload: dictionaries plus integer index columns (`prompt` = prompt ordinal or null; `price` = index into
-    `price_classes`, null when unpriced; the page computes each cost from the tokens, `cw1h` and the class's unit prices); ts is delta-coded epoch ms and `off`
+    `price_classes`, null when unpriced; `credit` = index into `credit_classes` (credit rates per 1M tokens), null when the row has no credit rate; the page computes each cost from the tokens, `cw1h` and the class's unit prices); ts is delta-coded epoch ms and `off`
     (minutes east of UTC, dictionary-coded) lets the page derive local date/hour/minute exactly as Python did."""
     def dictionary(values):
         table, index = {}, []
@@ -61,12 +61,14 @@ def encode_columns(rows):
     dicts['off'], idx['off'] = dictionary(r['off'] for r in rows)
     ms = [r['ms'] for r in rows]
     ids = [r['id'] for r in rows]
+    credit_classes = {}  # [input, cached input, output] ChatGPT credits per 1M tokens -> class number (null `credit` = no rate)
+    credit = [None if r['credit_rates'] is None else credit_classes.setdefault(tuple(r['credit_rates']), len(credit_classes)) for r in rows]
     classes = {}  # unit-price vector -> class number, in order of first appearance
     price = [None if r['unit_prices'] is None else classes.setdefault(tuple(r['unit_prices']), len(classes)) for r in rows]
     return dict(n=len(rows), dict=dicts, idx=idx, ts=[b - a for a, b in zip([0] + ms, ms)],
                 id=ids, id_prefix='Observation ' if ids and all(isinstance(i, (int, type(None))) for i in ids) else None,
                 tokens={k: [r['tokens'][k] for r in rows] for k in ALL_FIELDS},
-                prompt=[r['prompt'] for r in rows], price=price, price_classes=[list(v) for v in classes],
+                prompt=[r['prompt'] for r in rows], price=price, price_classes=[list(v) for v in classes], credit=credit, credit_classes=[list(v) for v in credit_classes],
                 cw1h=[r['cw1h'] for r in rows], complete=[int(r['complete']) for r in rows], id_synthetic=[int(r['id_synthetic']) for r in rows])
 
 
@@ -96,10 +98,10 @@ def report_state(revision, machine, spec, coverage, token=None, texts_hash=None,
 
 
 def build_report(records, source_status, timezone_name='Europe/Stockholm', redact=True, prompt_texts=None, table=None, lang='auto',
-                 prompt_context=None, prompt_inputs=None, now=None):
+                 prompt_context=None, prompt_inputs=None, now=None, credit_table=None):
     """prompt_texts ({(harness, session, turn_id): text or None} from prompt_store) and prompt_context ({key: turn_context dict}) are for
     prompt_inputs ({key: input count or None}) are for private reports only (any of them with redact=True raises);
-    table is the price table behind the `price_classes` unit prices (None = packaged prices). `insights` holds the cost facts (insights.py) for the
+    credit_table is the ChatGPT credit rate card behind `credit_classes` and the credits fact (None = packaged credits.json); table is the price table behind the `price_classes` unit prices (None = packaged prices). `insights` holds the cost facts (insights.py) for the
     last 30 days before `now` (default: the current time) and for all given records, computed here and never following the page filters; model names
     go through the same redaction as the rows."""
     if lang not in LANGS:
@@ -107,6 +109,7 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
     if redact and (prompt_texts is not None or prompt_context is not None or prompt_inputs is not None):
         raise ValueError('prompt text, turn context and input counts cannot be included in a redacted report')
     table = table or pricing.load_prices()
+    credit_table = credit_table or credit_rates.packaged()
     zone = ZoneInfo(timezone_name)
     records = sorted(records, key=lambda r: (r['ts'], r['harness'], r['id']))
     aliases = {}
@@ -156,7 +159,7 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
         key = found and ':'.join(found[:3])
         if key and key not in shown:
             shown[key] = len(shown)
-        row.update(prompt=key and shown[key], unit_prices=unit, cw1h=cw1h, ts=record['ts'], ms=(dt - EPOCH) // timedelta(milliseconds=1),
+        row.update(prompt=key and shown[key], unit_prices=unit, credit_rates=credit_rates.credit_vector(record, credit_table), cw1h=cw1h, ts=record['ts'], ms=(dt - EPOCH) // timedelta(milliseconds=1),
                    off=int(dt.utcoffset().total_seconds() // 60),
                    project_id=alias('Projekt', record.get('project_id')),
                    project_label=(alias('Projekt', record.get('project_id')) if redact else
@@ -177,7 +180,7 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
     display = lambda provider, model: metadata('model', model, {'provider': provider})
     memo = {}
     # one captured `now` is the exclusive end of the 30-day window: later-dated observations are not 'the last 30 days'
-    windows = [dict(id=wid, **insights.public(insights.cost_facts(records, table, start, end, name=display, memo=memo)))
+    windows = [dict(id=wid, **insights.public(insights.cost_facts(records, table, start, end, name=display, memo=memo, credit_table=credit_table)))
                for wid, start, end in (('30d', now - timedelta(days=INSIGHT_DAYS), now), ('all', None, None))]
     # the page's energy card (filter-following) sums tokens x per-class constant x a multiplier per (provider, model); only Claude tiers have one
     # (the rest is unweighted, multiplier 1), keyed by the provider and model names as the rows carry them (after redaction)

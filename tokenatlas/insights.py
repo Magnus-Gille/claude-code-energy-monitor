@@ -13,7 +13,7 @@ import statistics
 from datetime import datetime
 from pathlib import Path
 
-from tokenatlas import energy, pricing, prompts
+from tokenatlas import credits as credit_rates, energy, pricing, prompts
 
 I18N = Path(__file__).with_name('report_i18n.json')
 BIG_TURN = 50.0
@@ -22,7 +22,7 @@ PARTS = ('input', 'cache_write', 'cache_read', 'output')
 PREMIUM = ('speed=fast', 'service_tier=fast', 'service_tier=priority')  # flex is a discount, not a premium
 COMMON = ('ins_a_list', 'ins_a_scope')
 # pricing.py's own assumption texts, mapped to the page's i18n keys (an unknown text is shown as it is)
-PRICE_ASSUMPTIONS = {pricing._STANDARD_CLAUDE: 'ins_pa_speed', pricing._STANDARD_OTHER: 'ins_pa_tier'}
+PRICE_ASSUMPTIONS = {pricing._STANDARD_CLAUDE: 'ins_pa_speed', pricing._STANDARD_OTHER: 'ins_pa_tier', credit_rates.ASSUMED_STANDARD: 'ins_pa_credit_speed', credit_rates.FAST: 'ins_pa_credit_fast'}
 
 
 @functools.lru_cache(maxsize=None)
@@ -83,10 +83,11 @@ def _share(part, whole):
     return part / whole if whole else None
 
 
-def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=None, memo=None):
+def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=None, memo=None, credit_table=None):
     """{'window', 'requests', 'priced_requests', 'unpriced_requests', 'facts': [...]} over observations with start <= ts < end.
     `name(provider, model)` maps a model to its displayed name (the shared report passes its redaction; default: the model itself).
-    `memo`, a dict reused across calls with the same records and table, only saves repeated price lookups; it never changes a result."""
+    `memo`, a dict reused across calls with the same records and table, only saves repeated price lookups; it never changes a result.
+    `credit_table` (default: the packaged credits.json) is the rate card behind the ChatGPT credit-equivalent fact."""
     memo = {} if memo is None else memo
     name = name or (lambda provider, model: model)
     start, end = _when(start), _when(end)
@@ -134,8 +135,9 @@ def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=Non
     facts += _context(rows)
     if k and total > 0:
         facts += _long(priced, table, k) + _turns(clean, inside, big_turn, scope, memo) + _subagents(priced, total, k) + _tiers(priced, table, k)
+    facts += _credits(inside, credit_table or credit_rates.packaged(), name)
     facts += _energy(inside)
-    order = ('model_share', 'price_comparison', 'cost_parts', 'context_size', 'long_context_premium', 'big_turns', 'subagent_share', 'premium_tiers', 'energy')
+    order = ('model_share', 'price_comparison', 'cost_parts', 'context_size', 'long_context_premium', 'big_turns', 'subagent_share', 'premium_tiers', 'credits', 'energy')
     facts = [_finish(f, ctx) for f in sorted(facts, key=lambda f: order.index(f['id']))]
     return {'window': {'start': start and start.isoformat(), 'end': end and end.isoformat()}, **{k_: scope[k_] for k_ in ('requests', 'priced_requests', 'unpriced_requests')},
             'ambiguous_requests': ctx['ambiguous'], 'incomplete_requests': ctx['incomplete'], 'price_table': {'retrieved_on': ctx['retrieved']}, 'big_turn': big_turn, 'facts': facts}
@@ -298,6 +300,43 @@ def _energy(inside):
                   m_haiku=m['haiku'], m_sonnet=m['sonnet'], m_opus=m['opus'], factor=energy.UNCERTAINTY, unweighted=unweighted)]
 
 
+def _credits(inside, ctable, name):
+    """ChatGPT credit equivalent of the OpenAI requests (credit_rates: standard-speed rate card). Requests of other providers are not part of it;
+    OpenAI requests without a rate (unknown model), at another speed or tier, or with unknown token counts are counted and named, never guessed.
+    Independent of the USD price table: a model can have a credit rate and no list price or the reverse."""
+    by, rated, unrated, nonstd, unknown, openai = {}, [], {}, {}, 0, 0
+    for r in inside:
+        res = credit_rates.credit_observation(r, ctable)
+        if res['status'] == 'other_provider':
+            continue
+        openai += 1
+        if res['status'] == 'credited':
+            g = by.setdefault(res['model'], {'credits': 0.0, 'requests': 0, 'provider': r.get('provider')})
+            g['credits'] += res['credits']
+            g['requests'] += 1
+            rated.append((r, {'assumptions': res['assumptions']}, None, {}))
+        elif res['status'] == 'nonstandard':
+            nonstd[res['label']] = nonstd.get(res['label'], 0) + 1
+        elif res['status'] == 'partial':
+            unknown += 1
+        else:  # a model without a rate, or cache-write tokens (no card rate)
+            label = name(r.get('provider'), res['model']) if res['model'] else 'unknown'
+            key = label if res['reason'].startswith('no credit rate for') else f'{label} (cache write)'
+            unrated[key] = unrated.get(key, 0) + 1
+    if not openai:
+        return []
+    total = sum(g['credits'] for g in by.values())
+    ranked = sorted(by.items(), key=lambda kv: (-kv[1]['credits'], kv[0]))
+    shown = [dict(name=name(g['provider'], m), credits=g['credits'], requests=g['requests']) for m, g in ranked[:TOP_MODELS]]
+    rest = ranked[TOP_MODELS:]
+    other = dict(models=len(rest), credits=sum(g['credits'] for _, g in rest), requests=sum(g['requests'] for _, g in rest)) if rest else None
+    return [_fact('credits', dict(credits=total, credited_requests=len(rated), openai_requests=openai, models=shown, other=other,
+                                  unrated=[dict(name=k, requests=v) for k, v in sorted(unrated.items())], unrated_requests=sum(unrated.values()),
+                                  nonstandard=dict(sorted(nonstd.items())), nonstandard_requests=sum(nonstd.values()), unknown_token_requests=unknown),
+                  'ins_credits_c', ('ins_a_credit_table', 'ins_a_credit_standard', 'ins_a_credit_notdrawn', 'ins_a_credit_money', 'ins_a_credit_plans', 'ins_a_credit_scope'), used=rated,
+                  credit_url=ctable['source_url'], credit_retrieved=ctable['retrieved_on'], credit_fast=ctable['fast_multiplier'])]
+
+
 def _turns(records, inside, big_turn, scope, memo):
     """Turn costs as prompts.top_prompts defines them (assign_prompts over all records; a turn's cost is the sum of its priced requests inside the
     window, a turn without a priced request has none), without building its per-turn detail: that is what makes 200k observations affordable."""
@@ -387,6 +426,19 @@ def _lines(f):
                 f"range (mid / {energy.UNCERTAINTY} to mid x {energy.UNCERTAINTY}): {lb}{energy.fmt(v['low_mwh'])} to {lb}{energy.fmt(v['high_mwh'])}"] + \
                [f"{parts[p['part']]}: {_pct(p['share'])} of the mid estimate" for p in v['parts']] + \
                [f"requests: {v['requests']:,}; without model weighting (counted with multiplier 1): {v['unweighted_requests']:,}"]
+    if i == 'credits':
+        out = [f"{m['name']}: {'≥ ' if lb else '≈ '}{credit_rates.fmt(m['credits'])} credits, {_rq(m['requests'])}" for m in v['models']]
+        if v['other']:
+            o = v['other']
+            out.append(f"other ({o['models']} models): {'≥ ' if lb else '≈ '}{credit_rates.fmt(o['credits'])} credits, {_rq(o['requests'])}")
+        out += [f"credit equivalent: {'≥ ' if lb else '≈ '}{credit_rates.fmt(v['credits'])} credits over {v['credited_requests']:,} of {_rq(v['openai_requests'])} from OpenAI"]
+        if v['unrated']:
+            out.append(f"left out, no credit rate for the model: {v['unrated_requests']:,} ({', '.join(x['name'] + ' ' + format(x['requests'], ',') for x in v['unrated'])})")
+        if v['nonstandard']:
+            out.append(f"left out, not standard speed: {v['nonstandard_requests']:,} ({', '.join(f'{k} {n:,}' for k, n in v['nonstandard'].items())})")
+        if v['unknown_token_requests']:
+            out.append(f"left out, unknown token counts: {v['unknown_token_requests']:,}")
+        return out
     return [f"requests at a fast or priority tier: {v['requests']:,} ({', '.join(f'{k} {n:,}' for k, n in v['tiers'].items())})", f"cost at the tier applied: {u(v['actual'])}",
             f"same requests at the standard tier: {u(v['standard'])}", f"extra cost: {u(v['extra'])}"]
 

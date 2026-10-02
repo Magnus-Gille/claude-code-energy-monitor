@@ -75,7 +75,7 @@ class Shape(unittest.TestCase):
 
     def test_only_unpriced_has_only_price_free_facts(self):
         res = cost_facts([ob('u', model='mystery', fresh=10, read=0)], TABLE)
-        self.assertEqual([f['id'] for f in res['facts']], ['context_size', 'energy'])  # energy needs no price
+        self.assertEqual([f['id'] for f in res['facts']], ['context_size', 'credits', 'energy'])  # energy and credits need no USD price (the credit fact only counts the unrated model)
         self.assertEqual((res['requests'], res['priced_requests'], res['unpriced_requests']), (1, 0, 1))
 
     def test_no_wording_of_advice(self):

@@ -64,6 +64,7 @@ class ReleaseArtifactTests(unittest.TestCase):
                 self.assertIn("tokenatlas/why.py", names)
                 self.assertIn("tokenatlas/report_template.html", names)
                 self.assertIn("tokenatlas/prices.json", names)
+                self.assertIn("tokenatlas/credits.json", names)
                 self.assertNotIn("why.py", names)
                 entry_points = archive.read(next(n for n in names if n.endswith("entry_points.txt"))).decode()
             self.assertIn("tokenatlas = tokenatlas.__main__:main", entry_points)

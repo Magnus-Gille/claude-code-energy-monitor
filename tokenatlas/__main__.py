@@ -140,10 +140,12 @@ def context_lines(ctx,text=None):
 
 def render_top(result,texts=None,contexts=None):
     """Compact table of ranked turns; cost is list-price, '≥' when some requests could not be priced. Stored context or preview goes on indented lines."""
+    from tokenatlas import credits as credit_rates
     zone=ZoneInfo(DEFAULT_TIMEZONE)
-    rows=[('#','when','harness','project','models','req','sub','Mtok','cost','resume')]
+    rows=[('#','when','harness','project','models','req','sub','Mtok','cost','resume')]  # a Codex/OpenAI turn with a credit rate adds its credit equivalent to the cost cell
     for i,p in enumerate(result['prompts'],1):
         cost='n/a' if p['cost'] is None else ('' if p['cost_complete'] else '≥')+f"${p['cost']:.2f}"
+        if p.get('credits') is not None:cost+=f" ({'≥' if p['credits_lower_bound'] else '≈'} {credit_rates.fmt(p['credits'])} credits)"
         when=datetime.fromisoformat(p['first_ts']).astimezone(zone).strftime('%Y-%m-%d %H:%M')
         rows.append((str(i),when,p['harness'],p['project_label'] or '-',','.join(p['models']) or '-',str(p['requests']),
                      str(p['subagents']),f"{p['total_tokens']/1e6:.2f}",cost,p['resume'] or '-'))
