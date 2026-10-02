@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-10-02
+
 ### Changed
 
 - Report: the costliest turns come right after the totals, then cost facts and energy; the section numbers follow the new order (#73).
