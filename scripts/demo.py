@@ -96,7 +96,7 @@ class Script:
             self.bag[key] = self.rng.sample(PROMPTS[key], len(PROMPTS[key]))
         title, text, branch = self.bag[key].pop()
         if self.rounds[key]:
-            text += ' ' + SCOPES[(self.rounds[key] - 1) % len(SCOPES)]
+            text += ('' if text.endswith(('.', '?', '!')) else '.') + ' ' + SCOPES[(self.rounds[key] - 1) % len(SCOPES)]
         return title, text, branch
 
     def begin(self, key, sid):
