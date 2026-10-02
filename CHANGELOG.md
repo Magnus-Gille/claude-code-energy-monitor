@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-10-02
+
 ### Added
 
 - Back to the conversation from a costliest turn (#84). A private report shows the turn's resume command (and `tokenatlas top` prints it under each turn), `cd <cwd> && claude --resume <id>` / `codex resume <id>` / `pi --session <id>` / `opencode --session <id>`, quoted in Python, with a Copy button; Codex turns also get an "Open in Codex" link (`codex://threads/<id>`, UUID ids only), and each turn has a "Copy prompt" button and its time. The link and commands open the whole conversation, not the turn: scroll or search to it. Claude Code has no deep link, so only the command; it needs a known directory. Shared reports carry no ids, commands, links or paths. In demo reports (`demo: true`, set by `scripts/demo.py`) "Open in Codex" and the command's Copy button explain in a small toast instead of opening or copying. The `top` table's old raw `resume` column is replaced by that validated, quoted command line; ids that contain `:` no longer collide in the report payload.
