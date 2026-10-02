@@ -12,6 +12,7 @@ Ultrafast (6x on the page, but the logs do not identify it), has no usable rate 
 """
 import functools
 import json
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 PACKAGED = Path(__file__).with_name('credits.json')
@@ -36,8 +37,15 @@ def load_credits(path=None):
             raise ValueError(f'credit table: missing key {key}')
     if not isinstance(table['models'], list):
         raise ValueError('credit table: models must be a list')
-    if not _rate(table['fast_multiplier']) or table['fast_multiplier'] < 1:
-        raise ValueError('credit table: fast_multiplier must be a number >= 1')
+    if not _rate(table['fast_multiplier']) or table['fast_multiplier'] <= 0:
+        raise ValueError('credit table: fast_multiplier must be a number > 0')
+    aliases = table['provider_aliases']
+    if not isinstance(aliases, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in aliases.items()):
+        raise ValueError('credit table: provider_aliases must be an object of strings')
+    for key, expected in (('unit', 'credits_per_million_tokens'), ('speed', 'standard')):
+        if table[key] != expected:
+            raise ValueError(f'credit table: {key} must be {expected!r}, got {table[key]!r}')
+    seen = set()
     for entry in table['models']:
         name = entry.get('model') if isinstance(entry, dict) else repr(entry)
         if not isinstance(entry, dict):
@@ -45,6 +53,11 @@ def load_credits(path=None):
         for key in _MODEL_KEYS:
             if key not in entry:
                 raise ValueError(f'{name}: missing key {key}')
+        if not isinstance(entry['model'], str) or not entry['model'] or not isinstance(entry['provider'], str):
+            raise ValueError(f'{name}: provider and model must be non-empty strings')
+        if (entry['provider'], entry['model']) in seen:
+            raise ValueError(f'{name}: duplicate model id')
+        seen.add((entry['provider'], entry['model']))
         for key in RATE_KEYS:
             if not _rate(entry[key]):
                 raise ValueError(f'{name}: {key} must be a number >= 0')
@@ -82,17 +95,17 @@ def _resolve(obs, table):
 
 
 def credit_observation(obs, table):
-    """{'status': 'credited' | 'other_provider' | 'unrated' (model without a rate, or cache-write tokens) | 'nonstandard' | 'partial' (an
-    input/cached/output count is unknown), 'credits': float or None, 'model': canonical model id when known, 'assumptions', 'reason', 'label' (the speed/tier of a nonstandard row)}."""
+    """{'status': 'credited' | 'other_provider' | 'unrated' (model without a rate) | 'cache_write' (the card has no cache-write rate) | 'nonstandard' | 'partial' (a
+    fresh/cached/cache-write/output count is unknown), 'credits': float or None, 'model': canonical model id when known, 'assumptions', 'reason', 'label' (the speed/tier of a nonstandard row)}."""
     early, found = _resolve(obs, table)
     if early:
         return early
     entry, mult, assumptions = found
     t = obs.get('tokens') or {}
-    if (t.get('cache_write') or 0) > 0:
-        return _result('unrated', model=entry['model'], reason='cache-write tokens have no credit rate')
-    if any(t.get(k) is None for k in ('fresh_input', 'cache_read', 'output')):
+    if any(t.get(k) is None for k in ('fresh_input', 'cache_read', 'cache_write', 'output')):  # an unknown cache-write count is not zero
         return _result('partial', model=entry['model'], assumptions=assumptions, reason='unknown token classes')
+    if t['cache_write'] > 0:
+        return _result('cache_write', model=entry['model'], reason='cache-write tokens have no credit rate')
     credits = mult * (t['fresh_input'] * entry['input'] + t['cache_read'] * entry['cached_input'] + t['output'] * entry['output']) / 1e6
     return _result('credited', credits, entry['model'], assumptions)
 
@@ -108,4 +121,7 @@ def credit_vector(obs, table):
 
 def fmt(x):
     """Credits as text: whole numbers from 100, one decimal from 1, two below (the page uses the same rule)."""
-    return f'{x:,.0f}' if x >= 100 else f'{x:,.1f}' if x >= 1 else f'{x:,.2f}'
+    # half away from zero on the float's exact value, as the page's Intl.NumberFormat does (Python's format() rounds half to even)
+    places = 0 if x >= 100 else 1 if x >= 1 else 2
+    q = Decimal(x).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+    return f'{q:,.{places}f}'

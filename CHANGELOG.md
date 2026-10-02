@@ -6,7 +6,7 @@ All notable changes to this project are documented in this file. The project fol
 
 ### Added
 
-- ChatGPT credit equivalents for OpenAI/Codex usage (#83): a versioned rate card (`credits.json`, source and retrieval date 2026-10-02), a `credits` cost fact in `tokenatlas insights` and the report, and `≈ N credits` next to the cost of each costliest turn (also in `tokenatlas top`), in Swedish and English. It is what the usage corresponds to, not what was drawn; fast mode counts at 2x, other speeds, unknown models and unknown token counts are left out and counted.
+- ChatGPT credit equivalents for OpenAI/Codex usage (#83): a versioned rate card (`credits.json`, source and retrieval date 2026-10-02), a `credits` cost fact in `tokenatlas insights` and the report, and `≈ N credits` next to the cost of each costliest turn (also in `tokenatlas top`), in Swedish and English. It is what the usage corresponds to, not what was drawn; fast mode counts at 2x, other speeds, unknown models, requests with cache writes and unknown token counts are left out and counted.
 
 ## [1.10.1] - 2026-10-02
 

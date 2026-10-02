@@ -304,7 +304,7 @@ def _credits(inside, ctable, name):
     """ChatGPT credit equivalent of the OpenAI requests (credit_rates: standard-speed rate card). Requests of other providers are not part of it;
     OpenAI requests without a rate (unknown model), at another speed or tier, or with unknown token counts are counted and named, never guessed.
     Independent of the USD price table: a model can have a credit rate and no list price or the reverse."""
-    by, rated, unrated, nonstd, unknown, openai = {}, [], {}, {}, 0, 0
+    by, rated, unrated, nonstd, unknown, openai, writes = {}, [], {}, {}, 0, 0, 0
     for r in inside:
         res = credit_rates.credit_observation(r, ctable)
         if res['status'] == 'other_provider':
@@ -319,9 +319,10 @@ def _credits(inside, ctable, name):
             nonstd[res['label']] = nonstd.get(res['label'], 0) + 1
         elif res['status'] == 'partial':
             unknown += 1
-        else:  # a model without a rate, or cache-write tokens (no card rate)
-            label = name(r.get('provider'), res['model']) if res['model'] else 'unknown'
-            key = label if res['reason'].startswith('no credit rate for') else f'{label} (cache write)'
+        elif res['status'] == 'cache_write':  # the card has no cache-write rate
+            writes += 1
+        else:  # a model without a rate
+            key = name(r.get('provider'), res['model']) if res['model'] else 'unknown'
             unrated[key] = unrated.get(key, 0) + 1
     if not openai:
         return []
@@ -332,7 +333,7 @@ def _credits(inside, ctable, name):
     other = dict(models=len(rest), credits=sum(g['credits'] for _, g in rest), requests=sum(g['requests'] for _, g in rest)) if rest else None
     return [_fact('credits', dict(credits=total, credited_requests=len(rated), openai_requests=openai, models=shown, other=other,
                                   unrated=[dict(name=k, requests=v) for k, v in sorted(unrated.items())], unrated_requests=sum(unrated.values()),
-                                  nonstandard=dict(sorted(nonstd.items())), nonstandard_requests=sum(nonstd.values()), unknown_token_requests=unknown),
+                                  nonstandard=dict(sorted(nonstd.items())), nonstandard_requests=sum(nonstd.values()), unknown_token_requests=unknown, cache_write_requests=writes),
                   'ins_credits_c', ('ins_a_credit_table', 'ins_a_credit_standard', 'ins_a_credit_notdrawn', 'ins_a_credit_money', 'ins_a_credit_plans', 'ins_a_credit_scope'), used=rated,
                   credit_url=ctable['source_url'], credit_retrieved=ctable['retrieved_on'], credit_fast=ctable['fast_multiplier'])]
 
@@ -436,6 +437,8 @@ def _lines(f):
             out.append(f"left out, no credit rate for the model: {v['unrated_requests']:,} ({', '.join(x['name'] + ' ' + format(x['requests'], ',') for x in v['unrated'])})")
         if v['nonstandard']:
             out.append(f"left out, not standard speed: {v['nonstandard_requests']:,} ({', '.join(f'{k} {n:,}' for k, n in v['nonstandard'].items())})")
+        if v['cache_write_requests']:
+            out.append(f"left out, requests with cache writes (no credit rate): {v['cache_write_requests']:,}")
         if v['unknown_token_requests']:
             out.append(f"left out, unknown token counts: {v['unknown_token_requests']:,}")
         return out

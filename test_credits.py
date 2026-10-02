@@ -48,7 +48,12 @@ class Rates(unittest.TestCase):
         r = credits.credit_observation(row('gpt-9-mystery', out=M), TABLE)
         self.assertEqual((r['status'], r['credits'], r['model']), ('unrated', None, 'gpt-9-mystery'))
         self.assertEqual(credits.credit_observation(dict(row(out=1), model=None), TABLE)['status'], 'unrated')
-        self.assertEqual(credits.credit_observation(dict(row(out=1), tokens=dict(fresh_input=0, cache_read=0, cache_write=5, output=1)), TABLE)['status'], 'unrated')
+        self.assertEqual(credits.credit_observation(dict(row(out=1), tokens=dict(fresh_input=0, cache_read=0, cache_write=5, output=1)), TABLE)['status'], 'cache_write')
+
+    def test_unknown_cache_write_counter_is_not_zero(self):
+        r = credits.credit_observation(dict(row(out=0), tokens=dict(fresh_input=1_000_000, cache_read=0, cache_write=None, output=0)), TABLE)
+        self.assertEqual((r['status'], r['credits']), ('partial', None))
+        self.assertIsNone(credits.credit_vector(dict(row(out=0), tokens=dict(fresh_input=1_000_000, cache_read=0, cache_write=None, output=0)), TABLE))
 
     def test_unknown_token_counts_give_no_credits(self):
         r = credits.credit_observation(dict(row(out=1), tokens=dict(fresh_input=None, cache_read=0, cache_write=0, output=1)), TABLE)
@@ -71,7 +76,11 @@ class Rates(unittest.TestCase):
     def test_table_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             for patch, message in ((dict(schema=2), 'schema'), (dict(models=[{'provider': 'openai', 'model': 'm'}]), 'm: missing key'),
-                                   (dict(models=[dict(TABLE['models'][0], output=-1)]), 'output'), (dict(fast_multiplier=0.5), 'fast_multiplier')):
+                                   (dict(models=[dict(TABLE['models'][0], output=-1)]), 'output'), (dict(fast_multiplier=0), 'fast_multiplier'), (dict(fast_multiplier=True), 'fast_multiplier'),
+                                   (dict(provider_aliases=[]), 'provider_aliases'), (dict(provider_aliases={'a': 1}), 'provider_aliases'),
+                                   (dict(unit='tokens'), 'unit'), (dict(speed='fast'), 'speed'),
+                                   (dict(models=[dict(TABLE['models'][0], model='')]), 'non-empty'), (dict(models=[dict(TABLE['models'][0], model=5)]), 'non-empty'),
+                                   (dict(models=[TABLE['models'][0], TABLE['models'][0]]), 'duplicate')):
                 path = Path(tmp) / 'c.json'
                 path.write_text(json.dumps(dict(TABLE, **patch)))
                 with self.assertRaisesRegex(ValueError, message):
@@ -79,6 +88,8 @@ class Rates(unittest.TestCase):
 
     def test_fmt(self):
         self.assertEqual([credits.fmt(x) for x in (1234.4, 99.96, 12.34, .456)], ['1,234', '100.0', '12.3', '0.46'])
+        # ties are rounded half away from zero on the exact value, as the page's Intl.NumberFormat does (not half to even)
+        self.assertEqual([credits.fmt(x) for x in (1.25, 100.5, .125, 2.5 + 100, 0)], ['1.3', '101', '0.13', '103', '0.00'])
 
 
 class Fact(unittest.TestCase):
@@ -96,12 +107,25 @@ class Fact(unittest.TestCase):
         self.assertEqual((v['credited_requests'], v['openai_requests'], v['unrated_requests'], v['nonstandard_requests'], v['unknown_token_requests']), (3, 6, 1, 1, 1))
         self.assertEqual(v['unrated'], [dict(name='gpt-9-mystery', requests=1)])
         self.assertEqual(v['nonstandard'], {'service_tier=priority': 1})
+        self.assertEqual(v['cache_write_requests'], 0)
         self.assertEqual(f['provenance'], 'computed')
         self.assertFalse(v['lower_bound'])
         joined = ' '.join(f['assumptions'])
         for needle in ('standard speed', 'corresponds to', 'not what was drawn', 'legacy rate card', 'depends on the plan', '2026-10-02', 'Fast mode, counted at a higher'):
             self.assertIn(needle, joined)
         self.assertNotIn('{', f['computation'] + joined)
+
+    def test_cache_write_rows_have_their_own_exclusion(self):
+        w = lambda i, model='gpt-5.5': dict(row(model, i=i), tokens=dict(fresh_input=M, cache_read=0, cache_write=7, output=0))
+        f = self.fact([row('gpt-5.5', fresh=M, i='a'), w('b'), w('c'), row('gpt-9-mystery', fresh=1, i='d')])
+        v = f['values']
+        self.assertEqual((v['cache_write_requests'], v['unrated_requests'], v['credited_requests'], v['openai_requests']), (2, 1, 1, 4))
+        self.assertEqual(v['unrated'], [dict(name='gpt-9-mystery', requests=1)])  # a rated model with cache writes is not 'no rate for the model'
+        text = insights.render_text({'window': {'start': None, 'end': None}, 'requests': 4, 'priced_requests': 0, 'unpriced_requests': 4,
+                                     'ambiguous_requests': 0, 'incomplete_requests': 0, 'facts': [f]})
+        self.assertIn('left out, requests with cache writes (no credit rate): 2', text)
+        self.assertIn('left out, no credit rate for the model: 1 (gpt-9-mystery 1)', text)
+        self.assertIn('cache writes', ' '.join(f['assumptions']))
 
     def test_no_fact_without_openai_rows(self):
         self.assertIsNone(self.fact([row('claude-x', 'anthropic', fresh=M)]))
@@ -130,6 +154,9 @@ class Fact(unittest.TestCase):
         for k in keys:
             self.assertIn(k, texts['sv'], k)
             self.assertEqual(set(re.findall(r'\{(\w+)\}', texts['sv'][k])), set(re.findall(r'\{(\w+)\}', texts['en'][k])), k)
+        self.assertEqual(texts['sv']['ins_l_credit_write'], 'Anrop med cacheskrivning (saknar kreditpris)')
+        self.assertEqual(texts['en']['ins_l_credit_write'], 'Requests with cache writes (no credit rate)')
+        self.assertIn('cacheskrivning', texts['sv']['ins_a_credit_standard'])
         self.assertIn('krediter', texts['sv']['cr_n'])
         self.assertIn('inte vad som dragits', texts['sv']['ins_a_credit_notdrawn'])
 
