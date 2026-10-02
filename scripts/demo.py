@@ -28,6 +28,106 @@ WORDS = ('lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod 
          'magna aliqua enim ad minim veniam quis nostrud exercitation ullamco laboris nisi aliquip ex ea commodo '
          'consequat duis aute irure in reprehenderit voluptate velit esse cillum fugiat nulla pariatur').split()
 ORCH = 'demo-orchestrated'
+# Fictional developer prompts per demo project; chosen deterministically from the seed (see Script).
+PROMPTS = {  # project -> (short title, prompt, git branch derived from the title)
+    'acme': [('Orders pagination', 'Add pagination to GET /orders and update the OpenAPI spec', 'feature/orders-pagination'),
+             ('Auth middleware cleanup', 'Refactor the auth middleware to use the new token validator and keep the existing tests green', 'refactor/auth-middleware'),
+             ('Invoice 500 error', 'The /invoices endpoint returns 500 when the customer has no address. Find the cause and fix it', 'fix/invoice-missing-address'),
+             ('API rate limiting', 'Add rate limiting to the public API and document the limits in the README', 'feature/api-rate-limiting'),
+             ('Users timezone column', 'Add a nullable timezone column to the users table with a reversible migration', 'feature/users-timezone-column'),
+             ('Refund flow tests', 'Write integration tests for the refund flow, including the partial refund case', 'test/refund-flow'),
+             ('Webhook retries', 'Webhook deliveries are not retried after a 503. Add exponential backoff with a retry cap', 'feature/webhook-retries'),
+             ('Slow orders query', 'The orders list query takes seconds on large accounts. Find the missing index and add it', 'fix/orders-query-index'),
+             ('Request logging', 'Add structured request logging with a correlation id and make sure no tokens end up in the logs', 'feature/request-logging'),
+             ('Order status enum', 'Replace the stringly-typed order status with an enum and migrate the existing rows', 'refactor/order-status-enum'),
+             ('Health endpoint', 'Add a /healthz endpoint that also checks the database connection and returns build info', 'feature/healthz-endpoint'),
+             ('Python upgrade', 'Upgrade the service to the latest Python minor release and fix whatever breaks in CI', 'chore/python-upgrade')],
+    'shop': [('Checkout test fixes', 'Fix the failing checkout tests in the webshop and explain what broke', 'fix/checkout-tests'),
+             ('Wishlist button', 'Add a wishlist button to the product page and persist it for logged-in users', 'feature/wishlist-button'),
+             ('Cart rounding bug', 'The cart total is off by one cent for discounted items. Track down the rounding bug', 'fix/cart-rounding'),
+             ('Price formatter', 'Replace the hand-rolled price formatter with Intl.NumberFormat and update the snapshots', 'refactor/price-formatter'),
+             ('Responsive product grid', 'Make the product grid responsive on small screens without changing the desktop layout', 'feature/responsive-grid'),
+             ('Checkout skeleton', 'Add a loading skeleton to the checkout page while shipping options are fetched', 'feature/checkout-skeleton'),
+             ('Coupon stacking', 'Customers can stack two percentage coupons. Make the rules explicit and add tests for each combination', 'fix/coupon-stacking'),
+             ('Image lazy loading', 'Lazy-load product images below the fold and keep the layout from jumping', 'feature/image-lazy-loading'),
+             ('Order emails', 'Move the order confirmation email to a template with a plain-text fallback', 'feature/order-email-template'),
+             ('Search filters', 'Add size and colour filters to product search and keep them in the URL', 'feature/search-filters'),
+             ('Stock badge', 'Show a low-stock badge when fewer than five items are left, without extra API calls', 'feature/low-stock-badge'),
+             ('Address form a11y', 'The address form fails keyboard navigation. Fix the tab order and add proper labels', 'fix/address-form-a11y')],
+    'docs': [('Slow docs build', 'Why is the docs build so slow? Profile it and suggest fixes', 'chore/docs-build-speed'),
+             ('Offline docs search', 'Add a search page to the docs site that works without a backend', 'feature/offline-search'),
+             ('Broken links', 'Fix the broken internal links reported by the link checker', 'fix/broken-links'),
+             ('Getting-started rewrite', 'Rewrite the getting-started guide for the 2.0 API and add a quickstart snippet', 'docs/getting-started-2-0'),
+             ('Docs dark mode', 'Add dark mode support to the docs theme and check the contrast ratios', 'feature/docs-dark-mode'),
+             ('API reference build', 'Generate the API reference pages from the OpenAPI spec during the build', 'feature/api-reference-build'),
+             ('Versioned docs', 'Add a version switcher so readers can move between the 1.x and 2.x docs', 'feature/version-switcher'),
+             ('Code sample tests', 'Extract the code samples from the guides and run them in CI so they cannot rot', 'test/code-samples'),
+             ('Sidebar navigation', 'Group the sidebar by task instead of by module and add a short intro to each group', 'docs/sidebar-by-task'),
+             ('Image optimisation', 'Convert the screenshots to WebP at build time and add width and height attributes', 'chore/image-optimisation'),
+             ('Changelog page', 'Generate a changelog page from the release notes and link it from the footer', 'docs/changelog-page'),
+             ('Migration guide', 'Write a migration guide from 1.x to 2.x listing every breaking change with before and after code', 'docs/migration-guide')],
+}
+FOLLOWUPS = ['Also update the README', 'Run the tests again', 'Keep the change small, please', 'Add a changelog entry for this']
+FINALS = ['Done. The change is in place and the tests pass; I also touched up the related docs.',
+          'Fixed. The root cause was a missing null check, and I added a regression test for it.',
+          'All green now. Summary: one small refactor, two new tests and no behaviour change elsewhere.',
+          'Finished. I kept the diff small and left a note on the one edge case I could not cover.',
+          'Implemented and verified locally. Next step would be a review of the naming in the new helper.']
+SCOPES = ['Keep the change backwards compatible.', 'Start with the smallest change that works.', 'Add a test for it.',
+          'Mention anything risky in the summary.', 'Do not touch unrelated files.', 'Follow the existing code style.',
+          'Check the docs for anything that needs updating.', 'Explain your reasoning briefly as you go.']
+PROGRESS = ['Reading the relevant files first.', 'Running the tests to see the current state.', 'Applying the change.',
+            'Checking the edge cases.', 'Updating the tests to match.']
+
+
+class Script:
+    """Seeded, independent source of fictional prompt text so the token streams stay untouched by it."""
+
+    def __init__(self, seed):
+        self.rng = random.Random(f'prompts-{seed}')
+        self.bag = {}
+        self.sessions, self.fresh, self.rounds = {}, set(), {}
+
+    def draw(self, key):
+        """Next (title, prompt, branch) of the project's shuffled deck; the deck is refilled only once it is exhausted.
+        A refilled round adds a distinct scope clause so a prompt never repeats verbatim."""
+        if not self.bag.get(key):
+            self.rounds[key] = self.rounds.get(key, -1) + 1
+            self.bag[key] = self.rng.sample(PROMPTS[key], len(PROMPTS[key]))
+        title, text, branch = self.bag[key].pop()
+        if self.rounds[key]:
+            text += ('' if text.endswith(('.', '?', '!')) else '.') + ' ' + SCOPES[(self.rounds[key] - 1) % len(SCOPES)]
+        return title, text, branch
+
+    def begin(self, key, sid):
+        """Draw a session's first prompt (and its title and branch)."""
+        if sid not in self.sessions:
+            self.sessions[sid] = self.draw(key)
+            self.fresh.add(sid)
+        return self.sessions[sid]
+
+    def prompt(self, key, sid):
+        """(prompt text, git branch) of the next initiating input."""
+        self.begin(key, sid)
+        if sid in self.fresh:
+            self.fresh.discard(sid)
+            return self.sessions[sid][1:]
+        return self.draw(key)[1:]
+
+    def branch(self, key, sid):
+        return self.begin(key, sid)[2]
+
+    def title(self, key, sid):
+        return self.begin(key, sid)[0]
+
+    def followup(self):
+        return self.rng.choice(FOLLOWUPS) if self.rng.random() < .35 else None
+
+    def final(self):
+        return self.rng.choice(FINALS)
+
+    def progress(self):
+        return self.rng.choice(PROGRESS)
 
 
 def utc(day, hh, mm=0):
@@ -77,19 +177,25 @@ def attachments(rng, t, sid, cwd, common, main=True):
 
 
 def claude_thread(rng, t0, n, model, effort, sid, cwd, *, floor, gap, out_range=(180, 2200), entrypoint='cli',
-                  agent=None, main=True, skill=None, prompt_every=7):
+                  agent=None, main=True, skill=None, prompt_every=7, script=None, key=None, branch='main'):
     """One Claude transcript: attachment rows, then n streamed assistant calls with a growing cached context."""
-    common = {'entrypoint': entrypoint, 'version': '2.3.0', 'isSidechain': agent is not None}
+    common = {'entrypoint': entrypoint, 'version': '2.3.0', 'isSidechain': agent is not None, 'gitBranch': branch}
     if agent:
         common.update(agentId=agent[0], attributionAgent=agent[1])
     rows = attachments(rng, t0, sid, cwd, common, main)
+    if script and not agent:
+        rows.append({'type': 'custom-title', 'customTitle': script.title(key, sid), 'sessionId': sid})
     t, ctx = t0 + timedelta(seconds=1), 0
     pending = skill
     for i in range(n):
         t += timedelta(seconds=rng.randint(*gap))
         if i % prompt_every == 0 and not agent:
+            if script:
+                text, common['gitBranch'] = script.prompt(key, sid)
+            else:
+                text = lorem(rng, 80)
             rows.append({'type': 'user', 'timestamp': iso(t), 'uuid': hexid(rng, 12), 'sessionId': sid, 'cwd': cwd,
-                         'message': {'role': 'user', 'content': f'Demo prompt {i // prompt_every + 1}: ' + lorem(rng, 80)},
+                         'message': {'role': 'user', 'content': text},
                          **common})
             t += timedelta(seconds=2)
         delta = floor if i == 0 else rng.randint(400, 7000) if rng.random() > .2 else rng.randint(9000, 16000)
@@ -99,7 +205,15 @@ def claude_thread(rng, t0, n, model, effort, sid, cwd, *, floor, gap, out_range=
                  else {'ephemeral_5m_input_tokens': delta, 'ephemeral_1h_input_tokens': 0})
         usage = {'input_tokens': rng.randint(1, 6), 'cache_creation_input_tokens': delta, 'cache_read_input_tokens': read,
                  'output_tokens': out, 'cache_creation': split, 'service_tier': 'standard', 'speed': 'standard'}
-        content = [{'type': 'text', 'text': lorem(rng, 60)}]
+        last = i == n - 1 or (i + 1) % prompt_every == 0
+        if script and not agent:
+            text = script.final() if last else script.progress()
+        else:
+            text = lorem(rng, 60)
+        content = [{'type': 'text', 'text': text}]
+        if script and not agent and not last and rng.random() < .5:
+            content.append({'type': 'tool_use', 'id': 'toolu_' + hexid(rng, 10), 'name': rng.choice(('Bash', 'Edit', 'Read')),
+                            'input': {'command': 'python -m pytest -q', 'file_path': f'{cwd}/src/app.py'}})
         if pending and i == 3:
             content.append({'type': 'tool_use', 'id': 'toolu_' + hexid(rng, 10), 'name': 'Skill', 'input': {'skill': pending}})
         rows.append({'type': 'assistant', 'timestamp': iso(t), 'requestId': 'req_' + hexid(rng, 14), 'uuid': hexid(rng, 12),
@@ -111,7 +225,8 @@ def claude_thread(rng, t0, n, model, effort, sid, cwd, *, floor, gap, out_range=
             tool_id = content[-1]['id']
             rows.append({'type': 'user', 'isMeta': True, 'sourceToolUseID': tool_id, 'timestamp': iso(t + timedelta(seconds=1)),
                          'uuid': hexid(rng, 12), 'sessionId': sid, 'cwd': cwd,
-                         'message': {'role': 'user', 'content': '---\nname: ' + pending + '\n---\n' + lorem(rng, rng.randint(4000, 7000))},
+                         'message': {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': tool_id, 'content':
+                                                             '---\nname: ' + pending + '\n---\n' + lorem(rng, rng.randint(4000, 7000))}]},
                          **common})
             pending = None
         ctx += out
@@ -122,12 +237,13 @@ def subagent_path(base, sid, agent_id, wf=None):
     return base / sid / 'subagents' / (f'workflows/{wf}/' if wf else '') / f'agent-{agent_id}.jsonl'
 
 
-def claude_session(w, rng, key, sid, t0, n, model, subs=(), skill=None, gap=(40, 200)):
+def claude_session(w, rng, key, sid, t0, n, model, subs=(), skill=None, gap=(40, 200), script=None):
     """A main session plus subagents; subs are (offset_min, agent type, n_calls, workflow run or None)."""
     cwd = PROJECTS[key]
     base = w['claude'] / cwd.replace('/', '-')
     effort = 'high' if 'opus' in model else 'medium'
-    rows, end = claude_thread(rng, t0, n, model, effort, sid, cwd, floor=rng.randint(21000, 27000), gap=gap, skill=skill)
+    rows, end = claude_thread(rng, t0, n, model, effort, sid, cwd, floor=rng.randint(21000, 27000), gap=gap, skill=skill,
+                              script=script, key=key, branch=script.branch(key, sid) if script else 'main')
     write_jsonl(base / f'{sid}.jsonl', rows)
     ids = []
     for offset, kind, calls, wf in subs:
@@ -148,6 +264,7 @@ SKILL_BODY = '---\nname: {name}\ndescription: demo skill\n---\n# {name}\n{text}'
 
 def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, skill=None, gap=(30, 150)):
     cwd = PROJECTS[key]
+    script = w['script']
     exec_run = kind == 'exec'
     source = ({'subagent': {'thread_spawn': {'parent_thread_id': parent, 'agent_nickname': kind, 'agent_role': 'worker'}}}
               if parent else 'exec' if exec_run else 'cli')
@@ -158,20 +275,25 @@ def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, s
         return {'timestamp': iso(ts), 'type': typ, 'payload': payload, **extra}
     rows = [row(t, 'session_meta', {'id': sid, 'timestamp': iso(t), 'cwd': cwd, 'model_provider': 'openai', 'source': source,
                                     'originator': 'codex_exec' if exec_run else 'codex-tui', 'cli_version': '0.9.2',
+                                    'git': {'branch': script.branch(key, sid), 'repository_url': f'https://git.example.com/demo/{cwd.rsplit("/", 1)[1]}.git'},
                                     'base_instructions': {'text': lorem(rng, rng.randint(22000, 30000))}})]
     rows.append(row(t, 'response_item', {'type': 'message', 'role': 'developer', 'content': [
         {'type': 'input_text', 'text': '<permissions>' + lorem(rng, 600) + '</permissions>\n<skills_instructions>'
          + lorem(rng, rng.randint(5000, 9000)) + '</skills_instructions>'}]}))
     rows.append(row(t, 'response_item', {'type': 'message', 'role': 'user', 'content': [
-        {'type': 'input_text', 'text': '<INSTRUCTIONS>' + lorem(rng, rng.randint(3000, 6000)) + '</INSTRUCTIONS>\n<environment_context>'
+        {'type': 'input_text', 'text': f'# AGENTS.md instructions for {cwd}\n\n<INSTRUCTIONS>' + lorem(rng, rng.randint(3000, 6000)) + '</INSTRUCTIONS>\n<environment_context>'
          + lorem(rng, 300) + '</environment_context>'}]}))
     total, ctx, ordinal = dict.fromkeys(('input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens'), 0), 0, 0
     for i in range(n):
         t += timedelta(seconds=rng.randint(*gap))
         model = models[min(i * len(models) // n, len(models) - 1)]
+        turn = f'turn-{sid}-{i // 6}'
         if i % 6 == 0:
-            rows.append(row(t, 'event_msg', {'type': 'task_started', 'turn_id': f'turn-{sid}-{i // 6}'}))
-            rows.append(row(t, 'event_msg', {'type': 'user_message', 'message': f'Demo prompt {i // 6 + 1}: ' + lorem(rng, 70)}))
+            rows.append(row(t, 'event_msg', {'type': 'task_started', 'turn_id': turn}))
+            rows.append(row(t, 'event_msg', {'type': 'user_message', 'message': script.prompt(key, sid)[0]}))
+            if (follow := script.followup()) and n - i > 3:
+                rows.append(row(t, 'event_msg', {'type': 'item_completed', 'turn_id': turn, 'item': {
+                    'type': 'UserMessage', 'id': f'item-{turn}', 'content': [{'type': 'text', 'text': follow}]}}))
         rows.append(row(t, 'turn_context', {'model': model, 'effort': rng.choice(('medium', 'high')), 'cwd': cwd}))
         if skill and i == 2:
             call = 'call_' + hexid(rng, 8)
@@ -179,6 +301,9 @@ def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, s
                                                  'input': f'cat /Users/demo/.codex/skills/{skill}/SKILL.md'}))
             rows.append(row(t, 'response_item', {'type': 'custom_tool_call_output', 'call_id': call,
                                                  'output': SKILL_BODY.format(name=skill, text=lorem(rng, rng.randint(3000, 5000)))}))
+        if rng.random() < .5:
+            rows.append(row(t, 'response_item', {'type': 'function_call', 'name': 'exec_command', 'call_id': 'call_' + hexid(rng, 8),
+                                                 'arguments': json.dumps({'cmd': 'python -m pytest -q'})}))
         delta = rng.randint(12500, 16000) if i == 0 else rng.randint(300, 6000) if rng.random() > .2 else rng.randint(8000, 15000)
         prev, ctx = ctx, ctx + delta
         out = rng.randint(250, 2400)
@@ -191,7 +316,13 @@ def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, s
         rows.append(row(t, 'event_msg', {'type': 'token_count', 'info': {'last_token_usage': last,
                         'total_token_usage': {**total, 'total_tokens': total_tokens}}}, ordinal=ordinal))
         ctx += out
+        if i % 6 == 5 or i == n - 1:
+            rows.append(row(t, 'response_item', {'type': 'message', 'role': 'assistant', 'content': [
+                {'type': 'output_text', 'text': script.final()}]}))
+            rows.append(row(t, 'event_msg', {'type': 'task_complete', 'turn_id': turn}))
     write_jsonl(path, rows)
+    with (w['codex'].parent / 'session_index.jsonl').open('a') as index:
+        index.write(json.dumps({'id': sid, 'thread_name': script.title(key, sid), 'updated_at': iso(t)}) + '\n')
     return t
 
 
@@ -199,10 +330,16 @@ def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, s
 
 def pi_session(w, rng, sid, key, t0, n, provider, model):
     cwd = PROJECTS[key]
-    rows = [{'type': 'session', 'version': 3, 'id': sid, 'timestamp': iso(t0), 'cwd': cwd}]
+    script = w['script']
+    rows = [{'type': 'session', 'version': 3, 'id': sid, 'timestamp': iso(t0), 'cwd': cwd},
+            {'type': 'session_info', 'name': script.title(key, sid)}]
     t, ctx = t0, 0
     for i in range(n):
         t += timedelta(seconds=rng.randint(30, 160))
+        if i % 6 == 0:
+            rows.append({'type': 'message', 'id': f'{sid}-u{i // 6}', 'timestamp': iso(t),
+                         'message': {'role': 'user', 'content': [{'type': 'text', 'text': script.prompt(key, sid)[0]}]}})
+            t += timedelta(seconds=2)
         delta = rng.randint(9000, 13000) if i == 0 else rng.randint(300, 5000)
         read, ctx = (0, ctx + delta) if i == 0 else (ctx, ctx + delta)
         out = rng.randint(200, 1800)
@@ -211,17 +348,17 @@ def pi_session(w, rng, sid, key, t0, n, provider, model):
         usage['totalTokens'] = sum(usage[k] for k in ('input', 'cacheRead', 'cacheWrite', 'output'))
         rows.append({'type': 'message', 'id': f'{sid}-{i}', 'timestamp': iso(t),
                      'message': {'role': 'assistant', 'provider': provider, 'model': model, 'responseId': f'resp_{sid}_{i}',
-                                 'usage': usage, 'content': lorem(rng, 60)}})
+                                 'usage': usage, 'content': [{'type': 'text', 'text': script.final() if i % 6 == 5 or i == n - 1 else script.progress()}]}})
         ctx += out
     write_jsonl(w['pi'] / f'{t0:%Y-%m-%dT%H-%M-%S}_{sid}.jsonl', rows)
 
 
-def opencode_db(path, rng):
+def opencode_db(path, rng, script):
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path)
     con.executescript("""
         CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT, directory TEXT NOT NULL,
-            version TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
+            title TEXT, version TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
         CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL,
             time_updated INTEGER NOT NULL, data TEXT NOT NULL);
         CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER,
@@ -232,10 +369,18 @@ def opencode_db(path, rng):
     for sid, parent, key, t0, n, provider, model, agent in specs:
         cwd = PROJECTS[key]
         ms0 = int(t0.timestamp() * 1000)
-        con.execute('INSERT INTO session VALUES (?,?,?,?,?,?,?)', (sid, 'demo-project-' + key, parent, cwd, '1.18.32', ms0, ms0 + n * 90000))
-        ctx = 0
+        con.execute('INSERT INTO session VALUES (?,?,?,?,?,?,?,?)',
+                    (sid, 'demo-project-' + key, parent, cwd, script.title(key, sid), '1.18.32', ms0, ms0 + n * 90000))
+        ctx, user, clock = 0, None, ms0
         for i in range(n):
-            created = ms0 + (i + 1) * rng.randint(40000, 110000)
+            clock += rng.randint(40000, 110000)
+            created = clock
+            if i % 5 == 0:
+                user = f'{sid}-u{i // 5}'
+                udata = {'role': 'user', 'agent': agent, 'time': {'created': created - 1000}}
+                con.execute('INSERT INTO message VALUES (?,?,?,?,?)', (user, sid, created - 1000, created - 1000, json.dumps(udata)))
+                text = {'type': 'text', 'text': script.prompt(key, sid)[0]}
+                con.execute('INSERT INTO part VALUES (?,?,?,?,?,?)', (f'{user}-p', user, sid, created - 1000, created - 1000, json.dumps(text)))
             delta = rng.randint(11000, 15000) if i == 0 else rng.randint(300, 4500)
             read, ctx = ctx, ctx + delta
             out = rng.randint(200, 1600)
@@ -243,8 +388,10 @@ def opencode_db(path, rng):
                       'cache': {'read': read, 'write': 0 if i == 0 else delta}}
             tokens['total'] = tokens['input'] + tokens['output'] + tokens['reasoning'] + read + tokens['cache']['write']
             data = {'role': 'assistant', 'providerID': provider, 'modelID': model, 'agent': agent, 'variant': 'high',
-                    'time': {'created': created, 'completed': created + 4000}, 'path': {'cwd': cwd, 'root': cwd}, 'tokens': tokens}
+                    'parentID': user, 'time': {'created': created, 'completed': created + 4000}, 'path': {'cwd': cwd, 'root': cwd}, 'tokens': tokens}
             con.execute('INSERT INTO message VALUES (?,?,?,?,?)', (f'{sid}-m{i}', sid, created, created + 4000, json.dumps(data)))
+            text = {'type': 'text', 'text': script.final() if i % 5 == 4 or i == n - 1 else script.progress()}
+            con.execute('INSERT INTO part VALUES (?,?,?,?,?,?)', (f'{sid}-m{i}-t', f'{sid}-m{i}', sid, created + 3000, created + 3000, json.dumps(text)))
             ctx += out
         if sid == 'oc-webshop-1':
             skill = {'type': 'tool', 'tool': 'skill', 'state': {'input': {'name': 'brainstorming'}, 'output': lorem(rng, 2600)}}
@@ -257,7 +404,8 @@ def opencode_db(path, rng):
 
 def build_home(home, seed):
     rng = random.Random(seed)
-    w = {'claude': home / '.claude/projects', 'codex': home / '.codex/sessions', 'pi': home / '.pi/agent/sessions'}
+    w = {'claude': home / '.claude/projects', 'codex': home / '.codex/sessions', 'pi': home / '.pi/agent/sessions',
+         'script': Script(seed)}
     sonnet, opus = 'claude-sonnet-5-5', 'claude-opus-5-5'
     S = lambda offset, kind, calls, wf=None: (offset, kind, calls, wf)  # noqa: E731
     claude = [
@@ -275,11 +423,11 @@ def build_home(home, seed):
         ('demo-docs-04', 'docs', utc(28, 7, 30), 28, sonnet, [], None),
     ]
     for sid, key, t0, n, model, subs, skill in claude:
-        claude_session(w, rng, key, sid, t0, n, model, subs, skill)
+        claude_session(w, rng, key, sid, t0, n, model, subs, skill, script=w['script'])
     # The showcase session: an opus conductor, three implementers, one Explore and an inferred headless Codex child.
     t0 = utc(24, 9, 5)
     subs = [(4, 'Explore', 14, None), (14, 'implementer', 26, None), (16, 'implementer', 30, None), (48, 'implementer', 34, None)]
-    ids, _ = claude_session(w, rng, 'acme', ORCH, t0, 44, opus, subs, 'brainstorming', gap=(60, 220))
+    ids, _ = claude_session(w, rng, 'acme', ORCH, t0, 44, opus, subs, 'brainstorming', gap=(60, 220), script=w['script'])
     codex_rollout(w, rng, 'codex-orch-review', 'acme', t0 + timedelta(minutes=76), 22, ['gpt-6-sol'], kind='exec')
     # Other Codex rollouts, kept clear of the showcase window and cwd so only the review is inferred.
     luna, sol = 'gpt-5.6-luna', 'gpt-6-sol'
@@ -303,7 +451,7 @@ def build_home(home, seed):
     pi_session(w, rng, 'pi-shop-01', 'shop', utc(12, 9, 10), 32, 'openrouter', 'qwen/qwen3-coder')
     pi_session(w, rng, 'pi-docs-01', 'docs', utc(18, 7, 45), 20, 'openrouter', 'z-ai/glm-5.3')
     pi_session(w, rng, 'pi-shop-02', 'shop', utc(26, 10, 0), 28, 'openai-codex', luna)
-    opencode_db(home / '.local/share/opencode/opencode.db', rng)
+    opencode_db(home / '.local/share/opencode/opencode.db', rng, w['script'])
     return ids
 
 
@@ -407,6 +555,7 @@ def main(argv=None):
         overhead_text = cli(env, db, 'overhead', '--refresh')
         session_text = cli(env, db, 'session', ORCH, '--outcomes', str(outc))
         session_json = json.loads(cli(env, db, 'session', ORCH, '--outcomes', str(outc), '--json'))
+        cli(env, db, 'top', '--keep-text')
         report = outdir / 'demo-report.html'
         report_args = ['report', '--html', str(report)] + ([] if args.shared else ['--private'])
         cli(env, db, *report_args)

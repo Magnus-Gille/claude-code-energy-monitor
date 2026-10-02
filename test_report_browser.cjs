@@ -147,6 +147,10 @@ async function ready(page, errors, what = 'report') {
       assert.ok(sparseText.includes('Refactor the importer'));for(const x of [T.labels[0],T.labels[2],T.labels[3],T.labels[4]])assert.ok(!sparseText.includes(x),'unknown parts are omitted: '+x);
       await p2.locator('#prompts').screenshot({path:path.join(screenshotDir,'energy-report-context-'+T.lang+'.png')});
       {
+        // Section order (#73): the costliest turns come right after the totals, then cost facts and energy; turns are numbered 01
+        {const pos=await p2.evaluate(()=>['prompts','cost-facts','energy','sessions','coverage'].map(id=>document.getElementById(id).getBoundingClientRect().top+window.scrollY));
+         assert.ok(pos.every((v,i)=>i===0||pos[i-1]<v),'section order prompts < cost facts < energy < sessions < coverage: '+pos);
+         const e4=norm(await p2.locator('#prompts [data-t="e4"]').innerText());assert.ok(e4.startsWith('01'),'turns eyebrow: '+e4);}
         // Energy card (#61): an order-of-magnitude estimate that follows the filters, with its range, the unweighted count and the proxy note
         const e=await p2.evaluate(()=>({title:document.querySelector('#energy h2').textContent,value:document.getElementById('energy-value').textContent,range:document.getElementById('energy-range').textContent,unw:document.getElementById('energy-unweighted').textContent,proxy:document.getElementById('energy-proxy').textContent,calc:UsageReport.energyOf(UsageReport.getSelected())}));
         assert.equal(norm(e.title),T.lang==='sv'?'Energi (uppskattning)':'Energy (estimate)');
