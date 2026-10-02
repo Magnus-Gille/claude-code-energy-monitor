@@ -1,5 +1,7 @@
 # Usage Attribution — Epics and Tickets
 
+> **Archived (2026-10-02).** This document predates TokenAtlas 1.9 and refers to the checkout scripts (`statusline.py`, `advisor.py`, `stepcount.py`, the `why.py` command and its statusline caches) that were retired in #63. They remain in git history up to tag `v1.8.0`; the packaged replacements are `tokenatlas statusline` and the energy card and fact. Kept as a record, not as current instructions.
+
 Implementation breakdown of [`token-attribution-architecture.md`](token-attribution-architecture.md).
 
 Written to be executed by an implementing agent working one ticket at a time. Every ticket states

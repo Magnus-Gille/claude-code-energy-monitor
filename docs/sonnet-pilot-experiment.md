@@ -1,5 +1,7 @@
 # Sonnet-First Pilot Experiment
 
+> **Archived (2026-10-02).** This document predates TokenAtlas 1.9 and refers to the checkout scripts (`statusline.py`, `advisor.py`, `stepcount.py`, the `why.py` command and its statusline caches) that were retired in #63. They remain in git history up to tag `v1.8.0`; the packaged replacements are `tokenatlas statusline` and the energy card and fact. Kept as a record, not as current instructions.
+
 ## Hypothesis
 
 Switching Hugin code tasks from Opus (default) to Sonnet will meaningfully reduce Max subscription quota consumption without a significant increase in task failure rate.
