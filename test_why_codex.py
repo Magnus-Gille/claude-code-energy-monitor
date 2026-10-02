@@ -281,6 +281,101 @@ class CodexAttributionTests(unittest.TestCase):
         self.assertNotEqual(records[0].call_id, records[1].call_id)
 
 
+def _tier(timestamp, tier="__missing__", **extra):
+    settings = {"model": "gpt-test", "model_provider_id": "openai"}
+    if tier != "__missing__":
+        settings["service_tier"] = tier
+    return {"timestamp": timestamp, "type": "event_msg", "payload": {
+        "type": "thread_settings_applied", "thread_settings": settings, **extra}}
+
+
+class CodexServiceTierTests(unittest.TestCase):
+    def setUp(self):
+        self.start = datetime(2026, 9, 3, tzinfo=timezone.utc)
+        self.end = datetime(2026, 9, 4, tzinfo=timezone.utc)
+
+    def _collect(self, rows, source="cli"):
+        calls = [r for r in rows if r.get("type") == "event_msg" and r["payload"].get("type") == "token_count"]
+        self.assertTrue(calls)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_rollout(root / "rollout-tier.jsonl", [_meta(source=source)] + rows)
+            return [r.tariff for r in why.collect_codex(root, self.start, self.end)]
+
+    @staticmethod
+    def _call(minute, n):
+        usage = {"input_tokens": 10 * n, "output_tokens": n}
+        return _tokens(f"2026-09-03T09:{minute:02d}:00Z", n, usage, {"input_tokens": 10 * n, "output_tokens": n})
+
+    def test_each_tier_maps_to_a_tariff(self):
+        for tier, expected in (("default", {"service_tier": "standard"}), ("priority", {"service_tier": "fast"}),
+                               ("fast", {"service_tier": "fast"}), ("flex", {"service_tier": "flex"})):
+            with self.subTest(tier=tier):
+                rows = [_tier("2026-09-03T09:00:00Z", tier, thread_id="t"), self._call(1, 1)]
+                self.assertEqual(self._collect(rows), [expected])
+
+    def test_no_event_or_missing_tier_leaves_tariff_none(self):
+        self.assertEqual(self._collect([self._call(1, 1)]), [None])
+        self.assertEqual(self._collect([_tier("2026-09-03T09:00:00Z"), self._call(1, 1)]), [None])
+
+    def test_requests_before_the_first_event_stay_unrecorded(self):
+        rows = [self._call(1, 1), _tier("2026-09-03T09:02:00Z", "priority"), self._call(3, 2)]
+        self.assertEqual(self._collect(rows), [None, {"service_tier": "fast"}])
+
+    def test_mid_thread_switch_applies_until_it_changes(self):
+        rows = [_tier("2026-09-03T09:00:00Z", "default"), self._call(1, 1), self._call(2, 2),
+                _tier("2026-09-03T09:03:00Z", "priority"), self._call(4, 3), self._call(5, 4),
+                _tier("2026-09-03T09:06:00Z", "default"), self._call(7, 5)]
+        std, fast = {"service_tier": "standard"}, {"service_tier": "fast"}
+        self.assertEqual(self._collect(rows), [std, std, fast, fast, std])
+
+    def test_a_snapshot_without_a_tier_resets_to_not_recorded(self):
+        # Each thread_settings_applied row is a full snapshot: a later one without service_tier must not keep Fast.
+        rows = [_tier("2026-09-03T09:00:00Z", "priority"), self._call(1, 1),
+                _tier("2026-09-03T09:02:00Z"), self._call(3, 2)]
+        self.assertEqual(self._collect(rows), [{"service_tier": "fast"}, None])
+
+    def test_an_unknown_tier_is_kept_and_left_unpriced(self):
+        rows = [_tier("2026-09-03T09:00:00Z", "priority"), self._call(1, 1),
+                _tier("2026-09-03T09:02:00Z", "Turbo"), self._call(3, 2)]
+        tariffs = self._collect(rows)
+        self.assertEqual(tariffs, [{"service_tier": "fast"}, {"service_tier": "turbo"}])
+        obs = {"provider": "openai", "model": "gpt-5.5", "tariff": tariffs[1], "complete": True,
+               "tokens": {"fresh_input": 1000, "cache_read": 0, "cache_write": 0, "output": 10, "reasoning": 0}}
+        from tokenatlas.pricing import load_prices, price_observation
+        self.assertIsNone(price_observation(obs, load_prices())["cost"])
+
+    def test_exec_and_subagent_rollouts_use_their_own_events(self):
+        subagent = {"subagent": {"thread_spawn": {"parent_thread_id": "p", "agent_nickname": "Sagan"}}}
+        for source in ("exec", subagent):
+            with self.subTest(source=source):
+                rows = [self._call(1, 1), _tier("2026-09-03T09:02:00Z", "priority"), self._call(3, 2)]
+                self.assertEqual(self._collect(rows, source=source), [None, {"service_tier": "fast"}])
+
+    def test_tier_does_not_leak_between_rollouts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_rollout(root / "rollout-a.jsonl", [_meta("a"), _tier("2026-09-03T09:00:00Z", "priority"), self._call(1, 1)])
+            _write_rollout(root / "rollout-b.jsonl", [_meta("b"), self._call(2, 1)])
+            got = {r.session_id: r.tariff for r in why.collect_codex(root, self.start, self.end)}
+        self.assertEqual(got, {"a": {"service_tier": "fast"}, "b": None})
+
+    def test_pricing_uses_fast_modifier_and_explicit_default_has_no_assumption(self):
+        from tokenatlas.pricing import load_prices, price_observation
+        table = load_prices()
+        entry = next(m for m in table["models"] if m["provider"] == "openai" and "service_tier=fast" in (m.get("modifiers") or {}))
+        base = dict(harness="codex", provider="openai", model=entry["model"], raw_usage={},
+                    tokens={"fresh_input": 100_000, "cache_read": 0, "cache_write": 0, "output": 0, "reasoning": 0})
+        fast = entry["modifiers"]["service_tier=fast"]
+        std = price_observation(dict(base, tariff={"service_tier": "standard"}), table)
+        self.assertEqual((std["status"], std["assumptions"]), ("priced", []))
+        self.assertAlmostEqual(std["cost"], entry["input"] / 10)
+        got = price_observation(dict(base, tariff={"service_tier": "fast"}), table)
+        self.assertEqual((got["status"], got["assumptions"]), ("priced", []))
+        self.assertAlmostEqual(got["cost"], fast["input"] / 10)
+        self.assertEqual(price_observation(dict(base, tariff=None), table)["status"], "assumed")
+
+
 class CodexHostileMetadataTests(unittest.TestCase):
     def test_non_string_metadata_is_never_persisted(self):
         secret = {"prompt": "SECRET"}

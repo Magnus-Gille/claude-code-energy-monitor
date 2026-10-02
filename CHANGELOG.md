@@ -8,6 +8,10 @@ All notable changes to this project are documented in this file. The project fol
 
 - ChatGPT credit equivalents for OpenAI/Codex usage (#83): a versioned rate card (`credits.json`, source and retrieval date 2026-10-02), a `credits` cost fact in `tokenatlas insights` and the report, and `≈ N credits` next to the cost of each costliest turn (also in `tokenatlas top`), in Swedish and English. It is what the usage corresponds to, not what was drawn; fast mode counts at 2x, other speeds, unknown models, requests with cache writes and unknown token counts are left out and counted.
 
+### Fixed
+
+- Codex: the collector reads `service_tier` from `thread_settings_applied` events. The latest setting applies to every later request in the rollout: `priority` or `fast` is priced with the Fast modifier, `flex` with the Flex modifier, and `default` as explicit standard without the "not recorded" assumption. Requests before any setting, and after a setting without a tier, stay unrecorded; an unknown tier is kept and left unpriced rather than guessed. Existing Codex histories are re-read once (#86).
+
 ## [1.10.1] - 2026-10-02
 
 ### Changed
