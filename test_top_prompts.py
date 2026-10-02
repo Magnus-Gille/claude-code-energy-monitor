@@ -1,6 +1,7 @@
 import dataclasses
 import json
 import unittest
+from unittest.mock import patch
 import unittest.mock
 from datetime import datetime, timezone
 from pathlib import Path
@@ -200,6 +201,9 @@ def user(ts, uuid):
 
 class Cli(Base):
     def setUp(self):
+        patcher = patch('tokenatlas.resume._windows', return_value=False)  # POSIX command text on any OS
+        patcher.start()
+        self.addCleanup(patcher.stop)
         super().setUp()
         d = why.CLAUDE_PROJECTS / 'proj'
         jl(d / 'sess.jsonl', [user('2026-09-03T09:59:00Z', 'u1'), claude_row('2026-09-03T10:00:00Z', 'r1', 10),

@@ -15,10 +15,15 @@ CONTROL = re.compile(r'[\x00-\x1f\x7f]')
 COMMANDS = {'claude': ['claude', '--resume'], 'codex': ['codex', 'resume'], 'pi': ['pi', '--session'], 'opencode': ['opencode', '--session']}
 
 
+def _windows():
+    """The quoting platform when the caller does not say (patched by tests that compare POSIX command text on any OS)."""
+    return os.name == 'nt'
+
+
 def shell_command(cmd, windows=None):
     """cmd quoted for the user's shell; on Windows None unless every argument is plain, since cmd.exe has no quoting that is safe for every
     character (&, |, ^, %, !, ...), so only the path is shown there."""
-    if not (os.name == 'nt' if windows is None else windows):
+    if not (_windows() if windows is None else windows):
         return shlex.join(cmd)
     return None if any(re.search(r'[^\w\-.:\\/ ]', a) for a in cmd) else subprocess.list2cmdline(cmd)
 
@@ -38,7 +43,7 @@ def resume_command(harness, session, cwd=None, windows=None):
         return None
     if not has_cwd and harness == 'claude':
         return None
-    win = os.name == 'nt' if windows is None else windows
+    win = _windows() if windows is None else windows
     parts = [shell_command([*base, session], windows=win)]
     if has_cwd:
         parts.insert(0, shell_command(['cd', '/d', cwd] if win else ['cd', cwd], windows=win))

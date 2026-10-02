@@ -3,6 +3,7 @@ import gzip
 import json
 import re
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 
 from tokenatlas import __main__ as cli
@@ -63,7 +64,21 @@ class ResumeCommandTests(unittest.TestCase):
         self.assertIsNone(resume_info('claude', UUID, '/w', windows=False)['codex_link'])  # only Codex has a deep link
 
 
+class PlatformDefaultTests(unittest.TestCase):
+    def test_the_platform_decides_when_the_caller_does_not(self):
+        with patch('tokenatlas.resume._windows', return_value=True):
+            self.assertEqual(resume_command('codex', 'abc', r'C:\w\app'), r'cd /d C:\w\app && codex resume abc')
+        with patch('tokenatlas.resume._windows', return_value=False):
+            self.assertEqual(resume_command('codex', 'abc', '/w/app'), 'cd /w/app && codex resume abc')
+
+
 class ReportBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        # these compare POSIX command text; Windows quoting (cd /d, list2cmdline) has its own tests above
+        patcher = patch('tokenatlas.resume._windows', return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     now = datetime(2026, 9, 20, tzinfo=timezone.utc)
 
     def private(self, **extra):
@@ -105,6 +120,12 @@ class ReportBoundaryTests(unittest.TestCase):
 
 
 class TopOutputTests(unittest.TestCase):
+    def setUp(self):
+        # these compare POSIX command text; Windows quoting (cd /d, list2cmdline) has its own tests above
+        patcher = patch('tokenatlas.resume._windows', return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_top_prints_a_validated_resume_command_under_each_turn(self):
         prompt = dict(harness='codex', session=UUID, turn_id='t1', cost=1.0, cost_complete=True, credits=None, credits_lower_bound=False,
                       first_ts='2026-09-03T10:00:00+00:00', project_label='app', models=['gpt-5'], requests=1, subagents=0,

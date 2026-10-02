@@ -59,7 +59,7 @@ class DemoTests(unittest.TestCase):
         self.assertIs(payload['demo'], True)
         commands = [r['command'] for r in payload['prompt_resume'].values()]
         self.assertEqual(len(commands), 10)
-        self.assertTrue(all(c.startswith('cd /Users/demo/code/') for c in commands), commands)
+        self.assertTrue(all(re.match(r'cd (/d )?/Users/demo/code/', c) for c in commands), commands)  # cd /d on Windows
         links = [r['codex_link'] for r in payload['prompt_resume'].values() if r['codex_link']]
         self.assertTrue(links and all(re.fullmatch(r'codex://threads/[0-9a-f-]{36}', x) for x in links), links)
 
