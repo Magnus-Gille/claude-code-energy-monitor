@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file. The project fol
 
 ### Added
 
+- Back to the conversation from a costliest turn (#84). A private report (and `tokenatlas top --keep-text`) shows the turn's resume command, `cd <cwd> && claude --resume <id>` / `codex resume <id>` / `pi --session <id>` / `opencode --session <id>`, quoted in Python, with a Copy button; Codex turns also get an "Open in Codex" link (`codex://threads/<id>`, UUID ids only), and each turn has a "Copy prompt" button and its time. The link and commands open the whole conversation, not the turn: scroll or search to it. Claude Code has no deep link, so only the command; it needs a known directory. Shared reports carry no ids, commands, links or paths. In demo reports (`demo: true`, set by `scripts/demo.py`) clicking explains in a small toast instead of opening or copying.
 - ChatGPT credit equivalents for OpenAI/Codex usage (#83): a versioned rate card (`credits.json`, source and retrieval date 2026-10-02), a `credits` cost fact in `tokenatlas insights` and the report, and `≈ N credits` next to the cost of each costliest turn (also in `tokenatlas top`), in Swedish and English. It is what the usage corresponds to, not what was drawn; fast mode counts at 2x, other speeds, unknown models, requests with cache writes and unknown token counts are left out and counted.
 
 ### Fixed

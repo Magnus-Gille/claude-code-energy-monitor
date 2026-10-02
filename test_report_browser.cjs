@@ -29,6 +29,14 @@ function withLang(html, lang) {
     return a + zlib.gzipSync(Buffer.from(JSON.stringify(data), 'utf8')).toString('base64') + c;
   });
 }
+// Re-encode a report with `demo: true` (what scripts/demo.py does to the demo report).
+function withDemo(html) {
+  return html.replace(/(<script id="report-data" type="application\/octet-stream\+base64">)([A-Za-z0-9+\/=]+)(<\/script>)/, (_, a, b64, c) => {
+    const data = JSON.parse(zlib.gunzipSync(Buffer.from(b64, 'base64')).toString('utf8'));
+    data.demo = true;
+    return a + zlib.gzipSync(Buffer.from(JSON.stringify(data), 'utf8')).toString('base64') + c;
+  });
+}
 async function ready(page, errors, what = 'report') {
   // The page forbids eval (CSP), which waitForFunction's polling needs in WebKit; poll via evaluate instead.
   for (const deadline = Date.now() + 60000; !(await page.evaluate(() => window.reportReady === true));) {
@@ -151,7 +159,7 @@ async function ready(page, errors, what = 'report') {
       assert.deepEqual(card.texts,['Refactor the importer','Fix the <b>failing</b> build']);assert.equal(card.markup,0,'preview must be text, not markup');
       await p2.screenshot({path:path.join(screenshotDir,'energy-report-prompts-'+T.lang+'.png'),fullPage:true});
       // Private context: a collapsed details block per stored turn; opening shows title, place, final message and activity, all as text.
-      const det=p2.locator('#top-prompts tr.prompt-ctx details.tc');assert.equal(await det.count(),2);
+      const det=p2.locator('#top-prompts tr.prompt-ctx details.tc');assert.equal(await det.count(),3);
       const costly=det.nth(1);assert.equal(await costly.locator('.tc-row').first().isVisible(),false,'collapsed until opened');
       const tableWidth=()=>p2.evaluate(()=>{const tb=document.querySelector('#top-prompts table')||document.querySelector('#top-prompts');return {table:tb.scrollWidth,box:tb.parentElement.clientWidth}});const before=await tableWidth();await costly.locator('summary').click();assert.equal(await costly.locator('.tc-row').first().isVisible(),true);const after=await tableWidth();assert.ok(after.table<=Math.max(before.table,after.box)+1,'opening context must not widen the table: '+JSON.stringify({before,after}));
       const body=(await costly.innerText()).replace(/\s/g,' ');
@@ -160,6 +168,63 @@ async function ready(page, errors, what = 'report') {
       const sparse=det.nth(0);await sparse.locator('summary').click();const sparseText=await sparse.innerText();
       assert.ok(sparseText.includes('Refactor the importer'));for(const x of [T.labels[0],T.labels[2],T.labels[3],T.labels[4]])assert.ok(!sparseText.includes(x),'unknown parts are omitted: '+x);
       await p2.locator('#prompts').screenshot({path:path.join(screenshotDir,'energy-report-context-'+T.lang+'.png')});
+
+      // Back to the conversation (#84): private reports only; a link for Codex, the quoted command, copy buttons, the turn time.
+      {
+        const RS={sv:{open:'Öppna i Codex',copy:'Kopiera',prompt:'Kopiera prompten',copied:'Kopierat',selected:'Markerad – tryck ⌘C/Ctrl+C',toast:x=>'Här hade du öppnat konversationen i '+x+'.',hint:'Öppnar hela konversationen'},en:{open:'Open in Codex',copy:'Copy',prompt:'Copy prompt',copied:'Copied',selected:'Selected – press ⌘C/Ctrl+C',toast:x=>'Here you would open the conversation in '+x+'.',hint:'Opens the whole conversation'}}[T.lang];
+        const stub=()=>{Object.defineProperty(navigator,'clipboard',{value:{writeText:v=>{window.__copied=v;return Promise.resolve()}},configurable:true})};
+        const reject=()=>{Object.defineProperty(navigator,'clipboard',{value:{writeText:()=>Promise.reject(new Error('denied'))},configurable:true})};
+        const CODEX='codex://threads/019a1b2c-3d4e-7f80-9a1b-2c3d4e5f6a7b',CODEX_CMD="cd '/w/my app/it'\"'\"'s' && codex resume 019a1b2c-3d4e-7f80-9a1b-2c3d4e5f6a7b";
+        const grab=pg=>pg.evaluate(()=>[...document.querySelectorAll('#top-prompts .rs')].map(b=>({links:[...b.querySelectorAll('a')].map(a=>[a.getAttribute('href'),a.textContent]),code:[...b.querySelectorAll('code')].map(c=>c.textContent),buttons:[...b.querySelectorAll('button')].map(x=>x.textContent),hint:b.querySelector('.rs-hint')?.textContent??null})));
+        const r1=await newPage({locale:T.locale},fixture,stub);
+        const rs=await grab(r1.page);assert.equal(rs.length,3);
+        assert.deepEqual(rs[0],{links:[],code:[],buttons:[RS.prompt],hint:null},'no directory: no Claude command, prompt copy only, no open hint');
+        assert.deepEqual([rs[1].links,rs[1].code,rs[1].buttons],[[],['cd /w/app && claude --resume s1'],[RS.prompt,RS.copy]]);
+        assert.deepEqual([rs[2].links,rs[2].code,rs[2].buttons],[[[CODEX,RS.open]],[CODEX_CMD],[RS.copy]]);
+        for(const b of rs.slice(1)){assert.ok(b.hint.startsWith(RS.hint)&&/2026-09-03 1[0-2]:\d\d/.test(b.hint),'hint with the turn time: '+b.hint)}
+        // Copy: the command goes to the clipboard and the note confirms; the prompt button copies the prompt text.
+        const blk=r1.page.locator('#top-prompts .rs');
+        await blk.nth(1).getByRole('button',{name:RS.copy,exact:true}).click();
+        assert.equal(await r1.page.evaluate(()=>window.__copied),'cd /w/app && claude --resume s1');assert.equal((await blk.nth(1).locator('.rs-note').innerText()).trim(),RS.copied);
+        await blk.nth(1).getByRole('button',{name:RS.prompt,exact:true}).click();assert.equal(await r1.page.evaluate(()=>window.__copied),'Fix the <b>failing</b> build');
+        assert.deepEqual(r1.errors,[]);await r1.context.close();
+        // A rejected or missing clipboard falls back to selecting the text; no dialog.
+        for(const init of [reject,()=>{Object.defineProperty(navigator,'clipboard',{value:undefined,configurable:true})}]){
+          const r2=await newPage({locale:T.locale},fixture,init);const dialogs=[];r2.page.on('dialog',d=>{dialogs.push(d.type());d.dismiss()});
+          const b2=r2.page.locator('#top-prompts .rs').nth(1);await b2.getByRole('button',{name:RS.copy,exact:true}).click();
+          for(let i=0;i<50&&(await b2.locator('.rs-note').innerText()).trim()==='';i++)await r2.page.waitForTimeout(50);
+          assert.equal((await b2.locator('.rs-note').innerText()).trim(),RS.selected);assert.equal(await r2.page.evaluate(()=>String(getSelection())),'cd /w/app && claude --resume s1');
+          assert.deepEqual(dialogs,[]);assert.deepEqual(r2.errors,[]);await r2.context.close();
+        }
+        // Screenshots: the private context with its resume row, desktop and 390 px.
+        const dir=path.join(screenshotDir,'resume-shots');fs.mkdirSync(dir,{recursive:true});
+        for(const [name,vp] of [['desktop',{width:1440,height:1080}],['390',{width:390,height:900}]]){
+          const r3=await newPage({locale:T.locale,viewport:vp},fixture);await r3.page.locator('#top-prompts tr.prompt-ctx details.tc summary').nth(1).click();
+          await r3.page.locator('#prompts').screenshot({path:path.join(dir,'resume-context-'+name+'-'+T.lang+'.png')});
+          if(name==='390')assert.equal(await r3.page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1),true,'no horizontal overflow at 390 px');
+          assert.deepEqual(r3.errors,[]);await r3.context.close();
+        }
+        // Demo: clicking explains instead of opening or copying; same page, no popup, no clipboard write.
+        const d1=await newPage({locale:T.locale},withDemo(fixture),stub);const popups=[];d1.context.on('page',x=>popups.push(x.url()));
+        const url0=d1.page.url();
+        await d1.page.locator('#top-prompts .rs a').click();
+        await d1.page.locator('#toast.show').waitFor({timeout:5000});
+        assert.equal((await d1.page.locator('#toast').innerText()).trim(),RS.toast('Codex'));
+        assert.equal(d1.page.url(),url0);assert.deepEqual(popups,[]);
+        await d1.page.screenshot({path:path.join(dir,'demo-toast-'+T.lang+'.png')});
+        await d1.page.locator('#top-prompts .rs').nth(1).getByRole('button',{name:RS.copy,exact:true}).click();
+        assert.equal((await d1.page.locator('#toast').innerText()).trim(),RS.toast('Claude Code'));assert.equal(await d1.page.evaluate(()=>window.__copied===undefined),true,'demo copies nothing');
+        assert.equal((await d1.page.locator('#top-prompts .rs code').first().innerText()),'cd /w/app && claude --resume s1','demo still shows the commands');
+        {let hidden=false;for(let i=0;i<160&&!hidden;i++){hidden=await d1.page.evaluate(()=>!document.getElementById('toast').classList.contains('show'));if(!hidden)await d1.page.waitForTimeout(50)}assert.ok(hidden,'toast hides after about 4 s')}
+        assert.deepEqual(d1.errors,[]);await d1.context.close();
+        // The toast is pure DOM: it works inside a sandboxed iframe (no top navigation, no popups).
+        const outer=await browser.newContext({viewport:{width:1440,height:1080},offline:true,locale:T.locale});const op=await outer.newPage();
+        await op.setContent('<iframe id="f" style="width:1400px;height:1000px" sandbox="allow-scripts allow-downloads allow-modals" srcdoc="'+withDemo(fixture).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'"></iframe>');
+        const fh=await op.waitForSelector('#f');const fr=await fh.contentFrame();
+        for(let i=0;i<1200&&!(await fr.evaluate(()=>window.reportReady===true).catch(()=>false));i++)await op.waitForTimeout(50);
+        await fr.locator('#top-prompts .rs a').click();await fr.locator('#toast.show').waitFor({timeout:5000});
+        assert.equal((await fr.locator('#toast').innerText()).trim(),RS.toast('Codex'));await outer.close();
+      }
       {
         // Section order (#73): the costliest turns come right after the totals, then cost facts and energy; turns are numbered 01
         {const pos=await p2.evaluate(()=>['prompts','cost-facts','energy','sessions','coverage'].map(id=>document.getElementById(id).getBoundingClientRect().top+window.scrollY));
@@ -228,8 +293,8 @@ async function ready(page, errors, what = 'report') {
       // Shared: no side-file data at all (the Inputs column is all unknown); no details block, no context text of any kind.
       const {context:c3,page:p3,errors:errors3}=await newPage({locale:T.locale},sharedFixture);
       const shared=await p3.evaluate(()=>({rows:[...document.querySelectorAll('#top-prompts tr.prompt-row')].map(r=>[...r.children].map(c=>c.textContent)),details:document.querySelectorAll('#top-prompts details, #top-prompts tr.prompt-ctx, #top-prompts tr.prompt-text').length,page:document.body.innerText,data:Object.keys(window.UsageReport.data)}));
-      assert.deepEqual(shared.rows.map(r=>r[7]),['–','–','–','–']);assert.equal(shared.details,0);assert.equal(await p3.locator('#top-prompts th').nth(7).innerText(),T.inputs);
-      for(const x of ['feat/x','Fix the','pipeline','all green','example.test','#16','Add lint'])assert.ok(!shared.page.includes(x),'shared page must not show '+x);
+      assert.deepEqual(shared.rows.map(r=>r[7]),['–','–','–','–']);assert.equal(await p3.locator('#top-prompts .rs, #top-prompts a, #top-prompts code, #top-prompts button').count(),0,'shared: no resume links, commands or buttons');assert.ok(!shared.data.includes('prompt_resume')&&!shared.data.includes('demo'));assert.equal(shared.details,0);assert.equal(await p3.locator('#top-prompts th').nth(7).innerText(),T.inputs);
+      for(const x of ['feat/x','Fix the','pipeline','all green','example.test','#16','Add lint','claude --resume','codex resume','codex://','019a1b2c'])assert.ok(!shared.page.includes(x),'shared page must not show '+x);
       assert.ok(!shared.data.includes('prompt_inputs')&&!shared.data.includes('prompt_context')&&!shared.data.includes('prompt_texts'));
       {
         const card=await p3.locator('#cost-facts').innerText();for(const x of ['mystery','/w/','secret','s1'])assert.ok(!card.includes(x),'shared cost facts must not show '+x);

@@ -55,6 +55,13 @@ class DemoTests(unittest.TestCase):
             self.assertTrue(context['title'] and context['cwd'] and context['final'], context)
             self.assertFalse(lorem & set(re.findall(r'[a-z]+', context['final'].lower())), context['final'])
         self.assertEqual(payload['prompt_texts'], build(7)['prompt_texts'])
+        # Resume data is fictional but present, and the page is told it is a demo (it explains instead of opening or copying).
+        self.assertIs(payload['demo'], True)
+        commands = [r['command'] for r in payload['prompt_resume'].values()]
+        self.assertEqual(len(commands), 10)
+        self.assertTrue(all(c.startswith('cd /Users/demo/code/') for c in commands), commands)
+        links = [r['codex_link'] for r in payload['prompt_resume'].values() if r['codex_link']]
+        self.assertTrue(links and all(re.fullmatch(r'codex://threads/[0-9a-f-]{36}', x) for x in links), links)
 
 
 if __name__ == '__main__':

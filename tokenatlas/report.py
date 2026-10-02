@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from tokenatlas import __version__
 from tokenatlas import credits as credit_rates, energy, insights, pricing, prompts
 from tokenatlas.history import ALL_FIELDS
+from tokenatlas.resume import resume_info
 
 PUBLIC_NAMES = dict(
     provider=frozenset('anthropic openai openai-codex openrouter opencode berget google mistral'.split()),
@@ -98,12 +99,13 @@ def report_state(revision, machine, spec, coverage, token=None, texts_hash=None,
 
 
 def build_report(records, source_status, timezone_name='Europe/Stockholm', redact=True, prompt_texts=None, table=None, lang='auto',
-                 prompt_context=None, prompt_inputs=None, now=None, credit_table=None):
+                 prompt_context=None, prompt_inputs=None, now=None, credit_table=None, demo=False):
     """prompt_texts ({(harness, session, turn_id): text or None} from prompt_store) and prompt_context ({key: turn_context dict}) are for
     prompt_inputs ({key: input count or None}) are for private reports only (any of them with redact=True raises);
     credit_table is the ChatGPT credit rate card behind `credit_classes` and the credits fact (None = packaged credits.json); table is the price table behind the `price_classes` unit prices (None = packaged prices). `insights` holds the cost facts (insights.py) for the
     last 30 days before `now` (default: the current time) and for all given records, computed here and never following the page filters; model names
-    go through the same redaction as the rows."""
+    go through the same redaction as the rows. A private report with texts or contexts also carries `prompt_resume` ({id: {command, codex_link}}, resume.py),
+    and demo=True marks it as a fictional demo (the page then explains instead of opening or copying)."""
     if lang not in LANGS:
         raise ValueError(f'unknown report language {lang!r}; use one of {", ".join(LANGS)}')
     if redact and (prompt_texts is not None or prompt_context is not None or prompt_inputs is not None):
@@ -197,6 +199,16 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
         report['prompt_texts'] = {shown[':'.join(k)]: t for k, t in prompt_texts.items() if t and ':'.join(k) in shown}
     if prompt_context is not None:
         report['prompt_context'] = {shown[':'.join(k)]: c for k, c in prompt_context.items() if c and ':'.join(k) in shown}
+    if prompt_texts is not None or prompt_context is not None:
+        found = {}
+        for k in {*(prompt_texts or {}), *(prompt_context or {})}:
+            info = resume_info(k[0], k[1], ((prompt_context or {}).get(k) or {}).get('cwd')) if ':'.join(k) in shown else None
+            if info:
+                found[shown[':'.join(k)]] = info
+        if found:
+            report['prompt_resume'] = found
+    if demo:
+        report['demo'] = True
     if prompt_inputs is not None:
         report['prompt_inputs'] = {shown[':'.join(k)]: n for k, n in prompt_inputs.items() if isinstance(n, int) and ':'.join(k) in shown}
     return report

@@ -8,6 +8,8 @@ read (Claude Code, Codex, Pi, OpenCode), then the real `python3 -m tokenatlas` C
 user logs or state are read. Stdlib only; Playwright is used only for the PNGs (skipped with --no-screens).
 """
 import argparse
+import base64
+import gzip
 import html
 import json
 import os
@@ -18,6 +20,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -262,18 +265,41 @@ def claude_session(w, rng, key, sid, t0, n, model, subs=(), skill=None, gap=(40,
 SKILL_BODY = '---\nname: {name}\ndescription: demo skill\n---\n# {name}\n{text}'
 
 
-def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, skill=None, gap=(30, 150), turn_len=6):
+def mark_demo(path):
+    """Set `demo: true` in the report payload: the page then explains instead of opening or copying (every id, path and command in it is fictional)."""
+    sys.path.insert(0, str(ROOT))
+    from tokenatlas.report import pack
+    page = path.read_text(encoding='utf-8')
+    pattern = re.compile(r'(<script id="report-data" type="application/octet-stream\+base64">)([A-Za-z0-9+/=]+)(</script>)')
+    def mark(m):
+        data = json.loads(gzip.decompress(base64.b64decode(m.group(2))).decode('utf-8'))
+        data['demo'] = True
+        return m.group(1) + pack(data) + m.group(3)
+    marked, n = pattern.subn(mark, page, count=1)
+    if n != 1:
+        raise SystemExit('demo report has no data block to mark')
+    path.write_text(marked, encoding='utf-8')
+
+
+def codex_id(name):
+    """A fictional but UUID-shaped Codex thread id (the report only builds an Open-in-Codex link for real-looking ids)."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, 'https://tokenatlas.invalid/demo/' + name))
+
+
+def codex_rollout(w, rng, name, key, t0, n, models, *, kind='tui', parent=None, skill=None, gap=(30, 150), turn_len=6):
+    sid, parent = name, parent and codex_id(parent)  # `name` seeds the script text; the logs carry the UUID
+    uid = codex_id(name)
     cwd = PROJECTS[key]
     script = w['script']
     exec_run = kind == 'exec'
     source = ({'subagent': {'thread_spawn': {'parent_thread_id': parent, 'agent_nickname': kind, 'agent_role': 'worker'}}}
               if parent else 'exec' if exec_run else 'cli')
     stamp = t0.strftime('%Y-%m-%dT%H-%M-%S')
-    path = w['codex'] / t0.strftime('%Y/%m/%d') / f'rollout-{stamp}-{sid}.jsonl'
+    path = w['codex'] / t0.strftime('%Y/%m/%d') / f'rollout-{stamp}-{uid}.jsonl'
     t = t0
     def row(ts, typ, payload, **extra):
         return {'timestamp': iso(ts), 'type': typ, 'payload': payload, **extra}
-    rows = [row(t, 'session_meta', {'id': sid, 'timestamp': iso(t), 'cwd': cwd, 'model_provider': 'openai', 'source': source,
+    rows = [row(t, 'session_meta', {'id': uid, 'timestamp': iso(t), 'cwd': cwd, 'model_provider': 'openai', 'source': source,
                                     'originator': 'codex_exec' if exec_run else 'codex-tui', 'cli_version': '0.9.2',
                                     'git': {'branch': script.branch(key, sid), 'repository_url': f'https://git.example.com/demo/{cwd.rsplit("/", 1)[1]}.git'},
                                     'base_instructions': {'text': lorem(rng, rng.randint(22000, 30000))}})]
@@ -322,7 +348,7 @@ def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, s
             rows.append(row(t, 'event_msg', {'type': 'task_complete', 'turn_id': turn}))
     write_jsonl(path, rows)
     with (w['codex'].parent / 'session_index.jsonl').open('a') as index:
-        index.write(json.dumps({'id': sid, 'thread_name': script.title(key, sid), 'updated_at': iso(t)}) + '\n')
+        index.write(json.dumps({'id': uid, 'thread_name': script.title(key, sid), 'updated_at': iso(t)}) + '\n')
     return t
 
 
@@ -466,7 +492,7 @@ def outcomes(path, agent_ids):
     units = [('map-endpoints', [ag(explore), ag(impl[0])], 'pass', 'Endpoint inventory and first handler port'),
              ('migrate-schema', [ag(impl[1])], 'pass', 'Migration applied and tests green'),
              ('rewrite-auth-tests', [ag(impl[2])], 'partial', 'Two flaky cases left'),
-             ('cross-model-review', [{'harness': 'codex', 'session': 'codex-orch-review'}], 'pass', 'Review found no blockers')]
+             ('cross-model-review', [{'harness': 'codex', 'session': codex_id('codex-orch-review')}], 'pass', 'Review found no blockers')]
     lines = [{'v': 1, 'root_session': ORCH, 'unit': u, 'threads': t, 'outcome': o, 'note': n, 'ts': '2026-09-24T12:30:00Z'}
              for u, t, o, n in units]
     path.write_text(''.join(json.dumps(x, sort_keys=True) + '\n' for x in lines))
@@ -564,6 +590,7 @@ def main(argv=None):
         report = outdir / 'demo-report.html'
         report_args = ['report', '--html', str(report)] + ([] if args.shared else ['--private'])
         cli(env, db, *report_args)
+        mark_demo(report)
         (outdir / 'session.txt').write_text(session_text + '\n')
         (outdir / 'overhead.txt').write_text(overhead_text + '\n')
         sys.path.insert(0, str(ROOT))
