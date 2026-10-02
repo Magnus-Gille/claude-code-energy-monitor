@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+### Changed
+
+- Report: the costliest turns come right after the totals, then cost facts and energy; the section numbers follow the new order (#73).
+- Demo (`scripts/demo.py`): realistic, clearly fictional developer prompts with titles, branches, follow-ups and final messages instead of lorem ipsum, and the demo stores the top-turn text and context, so the demo report shows them (#73).
+
 ## [1.9.0] - 2026-10-02
 
 ### Added
