@@ -190,9 +190,10 @@ def claude_thread(rng, t0, n, model, effort, sid, cwd, *, floor, gap, out_range=
     for i in range(n):
         t += timedelta(seconds=rng.randint(*gap))
         if i % prompt_every == 0 and not agent:
-            text = lorem(rng, 80)
             if script:
                 text, common['gitBranch'] = script.prompt(key, sid)
+            else:
+                text = lorem(rng, 80)
             rows.append({'type': 'user', 'timestamp': iso(t), 'uuid': hexid(rng, 12), 'sessionId': sid, 'cwd': cwd,
                          'message': {'role': 'user', 'content': text},
                          **common})
