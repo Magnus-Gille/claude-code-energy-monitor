@@ -33,9 +33,7 @@ class DemoTests(unittest.TestCase):
             self.assertEqual([t['rank'] for t in top], list(range(1, 11)))
             self.assertTrue(all(t['cost'] is not None for t in top))
             self.assertEqual(summary['seed'], 7)
-            harnesses = {t['harness'] for t in top}
-            self.assertGreaterEqual(len(harnesses), 3, harnesses)
-            self.assertLessEqual({'claude', 'codex'}, harnesses)
+            self.assertEqual({t['harness'] for t in top}, {'claude', 'codex', 'pi', 'opencode'})
 
     def test_demo_report_embeds_realistic_prompt_text_for_top_turns(self):
         def build(seed):

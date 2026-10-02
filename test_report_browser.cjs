@@ -193,7 +193,12 @@ async function ready(page, errors, what = 'report') {
           return {box:over(box),wrap:over(w),doc:document.documentElement.scrollWidth<=W+1,rows:box.querySelectorAll('tr.prompt-row').length,costs:[...box.querySelectorAll('tr.prompt-row td:last-child')].map(fit),texts:[...box.querySelectorAll('tr.prompt-text td')].map(fit),labels:[...box.querySelectorAll('tr.prompt-row')].every(r=>[...r.children].every(c=>c.dataset.label))}});
         assert.ok(m.rows>0&&m.costs.length===m.rows&&m.texts.length>0,'prompt rows with texts at 390 px');
         assert.ok(m.box&&m.wrap&&m.doc,'no horizontal overflow at 390 px: '+JSON.stringify(m));assert.ok(m.costs.every(Boolean),'every cost cell is on screen at 390 px');assert.ok(m.texts.every(Boolean),'every prompt text fits at 390 px');assert.ok(m.labels,'cells carry their localized column label');
+        assert.equal(await p2.evaluate(()=>getComputedStyle(document.querySelector('#top-prompts tr.prompt-row')).borderTopWidth),'0px','no rule above the first card');
         await p2.locator('#prompts').screenshot({path:path.join(screenshotDir,'energy-report-prompts-390-'+T.lang+'.png')});
+        // A narrow printed page keeps the table: the cards are a screen layout only.
+        await p2.emulateMedia({media:'print'});
+        assert.ok((await p2.evaluate(()=>[...document.querySelectorAll('#top-prompts th')].map(h=>getComputedStyle(h).display))).every(x=>x!=='none'),'table header kept in print at 390 px');
+        await p2.emulateMedia({media:'screen'});
         await p2.setViewportSize({width:1366,height:900});
         const d=await p2.evaluate(()=>[...document.querySelectorAll('#top-prompts th')].map(h=>getComputedStyle(h).display));
         assert.equal(d.length,10);assert.ok(d.every(x=>x!=='none'),'table header visible on desktop: '+d);
