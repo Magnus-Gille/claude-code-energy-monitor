@@ -134,9 +134,9 @@ async function ready(page, errors, what = 'report') {
       assert.equal(card.rows.length,4);assert.equal(card.rows[0][0],'1');assert.deepEqual(card.credits,[null,null,T.credit,null],'credits only for the Codex turn whose requests all have a rate');
       assert.deepEqual(card.rows.map(r=>r[9].replace(/ /g,' ')),T.money);assert.equal(card.rows[1][6],'1');assert.equal(card.rows[1][5],'2');assert.deepEqual(card.rows.map(r=>r[7]),['3','14','–','–'],'inputs column: stored counts, – when unknown');
       assert.equal(await p2.locator('#top-prompts th').nth(9).innerText(),T.lang==='sv'?'Kostnad':'Cost');assert.equal(await p2.locator('#top-prompts th').nth(7).innerText(),T.inputs);
-      {// the page rounds credits half away from zero on the exact value, like credits.fmt (1.25 -> 1.3, 100.5 -> 101, 0.125 -> 0.13)
-        const got=await p2.evaluate(()=>[1.25,100.5,0.125].map(x=>UsageReport.cr(x))),dp=T.lang==='sv'?',':'.';
-        assert.deepEqual(got,['1'+dp+'3','101','0'+dp+'13'],'credit rounding: '+got);
+      {// the page rounds credits half away from zero on the shortest decimal form, like credits.fmt (1.25 -> 1.3, 100.5 -> 101, 0.125 -> 0.13, 1.15 -> 1.2, 0.615 -> 0.62, 9.95 -> 10.0)
+        const got=await p2.evaluate(()=>[1.25,100.5,0.125,1.15,0.615,9.95].map(x=>UsageReport.cr(x))),dp=T.lang==='sv'?',':'.';
+        assert.deepEqual(got,['1'+dp+'3','101','0'+dp+'13','1'+dp+'2','0'+dp+'62','10'+dp+'0'],'credit rounding: '+got);
       }
       {// credits in the costliest-turns card: desktop table, then the 390 px layout (the table scrolls inside its wrapper, the page must not)
         const cr=p2.locator('#top-prompts tr.prompt-row .cr');assert.equal(await cr.count(),1);assert.equal((await cr.first().innerText()).trim(),T.credit);assert.equal(await cr.first().isVisible(),true);

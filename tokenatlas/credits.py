@@ -12,6 +12,7 @@ Ultrafast (6x on the page, but the logs do not identify it), has no usable rate 
 """
 import functools
 import json
+import math
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
@@ -24,7 +25,7 @@ FAST = 'fast speed; counted at the fast multiplier of the standard credit rate'
 
 
 def _rate(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0
 
 
 def load_credits(path=None):
@@ -37,8 +38,8 @@ def load_credits(path=None):
             raise ValueError(f'credit table: missing key {key}')
     if not isinstance(table['models'], list):
         raise ValueError('credit table: models must be a list')
-    if not _rate(table['fast_multiplier']) or table['fast_multiplier'] <= 0:
-        raise ValueError('credit table: fast_multiplier must be a number > 0')
+    if not _rate(table['fast_multiplier']) or table['fast_multiplier'] < 1:
+        raise ValueError('credit table: fast_multiplier must be a finite number >= 1')
     aliases = table['provider_aliases']
     if not isinstance(aliases, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in aliases.items()):
         raise ValueError('credit table: provider_aliases must be an object of strings')
@@ -53,14 +54,17 @@ def load_credits(path=None):
         for key in _MODEL_KEYS:
             if key not in entry:
                 raise ValueError(f'{name}: missing key {key}')
-        if not isinstance(entry['model'], str) or not entry['model'] or not isinstance(entry['provider'], str):
+        if not all(isinstance(entry[k], str) and entry[k] for k in ('provider', 'model')):
             raise ValueError(f'{name}: provider and model must be non-empty strings')
+        aliases = entry.get('aliases', [])
+        if not isinstance(aliases, list) or not all(isinstance(a, str) and a for a in aliases):
+            raise ValueError(f'{name}: aliases must be a list of non-empty strings')
         if (entry['provider'], entry['model']) in seen:
             raise ValueError(f'{name}: duplicate model id')
         seen.add((entry['provider'], entry['model']))
         for key in RATE_KEYS:
             if not _rate(entry[key]):
-                raise ValueError(f'{name}: {key} must be a number >= 0')
+                raise ValueError(f'{name}: {key} must be a finite number >= 0')
     return table
 
 
@@ -121,7 +125,8 @@ def credit_vector(obs, table):
 
 def fmt(x):
     """Credits as text: whole numbers from 100, one decimal from 1, two below (the page uses the same rule)."""
-    # half away from zero on the float's exact value, as the page's Intl.NumberFormat does (Python's format() rounds half to even)
+    # half away from zero on the float's shortest decimal form (repr), as the page's Intl.NumberFormat does: 1.15 -> 1.2, 0.615 -> 0.62
+    # (format() rounds half to even, and Decimal(x) on the exact binary value would give 1.1 and 0.61)
     places = 0 if x >= 100 else 1 if x >= 1 else 2
-    q = Decimal(x).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+    q = Decimal(repr(x)).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
     return f'{q:,.{places}f}'

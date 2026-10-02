@@ -76,7 +76,9 @@ class Rates(unittest.TestCase):
     def test_table_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             for patch, message in ((dict(schema=2), 'schema'), (dict(models=[{'provider': 'openai', 'model': 'm'}]), 'm: missing key'),
-                                   (dict(models=[dict(TABLE['models'][0], output=-1)]), 'output'), (dict(fast_multiplier=0), 'fast_multiplier'), (dict(fast_multiplier=True), 'fast_multiplier'),
+                                   (dict(models=[dict(TABLE['models'][0], output=-1)]), 'output'), (dict(fast_multiplier=0), 'fast_multiplier'), (dict(fast_multiplier=True), 'fast_multiplier'), (dict(fast_multiplier=0.5), 'fast_multiplier'),
+                                   (dict(models=[dict(TABLE['models'][0], provider='')]), 'non-empty'), (dict(models=[dict(TABLE['models'][0], aliases=7)]), 'aliases'),
+                                   (dict(models=[dict(TABLE['models'][0], input=float('inf'))]), 'finite'),
                                    (dict(provider_aliases=[]), 'provider_aliases'), (dict(provider_aliases={'a': 1}), 'provider_aliases'),
                                    (dict(unit='tokens'), 'unit'), (dict(speed='fast'), 'speed'),
                                    (dict(models=[dict(TABLE['models'][0], model='')]), 'non-empty'), (dict(models=[dict(TABLE['models'][0], model=5)]), 'non-empty'),
@@ -90,6 +92,8 @@ class Rates(unittest.TestCase):
         self.assertEqual([credits.fmt(x) for x in (1234.4, 99.96, 12.34, .456)], ['1,234', '100.0', '12.3', '0.46'])
         # ties are rounded half away from zero on the exact value, as the page's Intl.NumberFormat does (not half to even)
         self.assertEqual([credits.fmt(x) for x in (1.25, 100.5, .125, 2.5 + 100, 0)], ['1.3', '101', '0.13', '103', '0.00'])
+        # decimal ties that are not exact in binary round as Intl does too
+        self.assertEqual([credits.fmt(x) for x in (1.15, .615, 9.95, .005, .675)], ['1.2', '0.62', '10.0', '0.01', '0.68'])
 
 
 class Fact(unittest.TestCase):
