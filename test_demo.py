@@ -42,6 +42,7 @@ class DemoTests(unittest.TestCase):
         payload = build(7)
         texts = [t for t in payload['prompt_texts'].values() if t]
         self.assertEqual(len(texts), 10)
+        self.assertEqual(len(set(texts)), len(texts), 'top-turn prompts repeat')
         lorem = {'lorem', 'ipsum', 'dolor', 'consectetur', 'adipiscing', 'eiusmod', 'tempor', 'incididunt'}
         for text in texts:
             self.assertFalse(lorem & set(re.findall(r'[a-z]+', text.lower())), text)

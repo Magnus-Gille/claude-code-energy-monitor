@@ -29,25 +29,43 @@ WORDS = ('lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod 
          'consequat duis aute irure in reprehenderit voluptate velit esse cillum fugiat nulla pariatur').split()
 ORCH = 'demo-orchestrated'
 # Fictional developer prompts per demo project; chosen deterministically from the seed (see Script).
-PROMPTS = {
-    'acme': [('Orders pagination', 'Add pagination to GET /orders and update the OpenAPI spec'),
-             ('Auth middleware cleanup', 'Refactor the auth middleware to use the new token validator and keep the existing tests green'),
-             ('Invoice 500 error', 'The /invoices endpoint returns 500 when the customer has no address. Find the cause and fix it'),
-             ('API rate limiting', 'Add rate limiting to the public API and document the limits in the README'),
-             ('Users timezone column', 'Add a nullable timezone column to the users table with a reversible migration'),
-             ('Refund flow tests', 'Write integration tests for the refund flow, including the partial refund case')],
-    'shop': [('Checkout test fixes', 'Fix the failing checkout tests in the webshop and explain what broke'),
-             ('Wishlist button', 'Add a wishlist button to the product page and persist it for logged-in users'),
-             ('Cart rounding bug', 'The cart total is off by one cent for discounted items. Track down the rounding bug'),
-             ('Price formatter', 'Replace the hand-rolled price formatter with Intl.NumberFormat and update the snapshots'),
-             ('Responsive product grid', 'Make the product grid responsive on small screens without changing the desktop layout'),
-             ('Checkout skeleton', 'Add a loading skeleton to the checkout page while shipping options are fetched')],
-    'docs': [('Slow docs build', 'Why is the docs build so slow? Profile it and suggest fixes'),
-             ('Offline docs search', 'Add a search page to the docs site that works without a backend'),
-             ('Broken links', 'Fix the broken internal links reported by the link checker'),
-             ('Getting-started rewrite', 'Rewrite the getting-started guide for the 2.0 API and add a quickstart snippet'),
-             ('Docs dark mode', 'Add dark mode support to the docs theme and check the contrast ratios'),
-             ('API reference build', 'Generate the API reference pages from the OpenAPI spec during the build')],
+PROMPTS = {  # project -> (short title, prompt, git branch derived from the title)
+    'acme': [('Orders pagination', 'Add pagination to GET /orders and update the OpenAPI spec', 'feature/orders-pagination'),
+             ('Auth middleware cleanup', 'Refactor the auth middleware to use the new token validator and keep the existing tests green', 'refactor/auth-middleware'),
+             ('Invoice 500 error', 'The /invoices endpoint returns 500 when the customer has no address. Find the cause and fix it', 'fix/invoice-missing-address'),
+             ('API rate limiting', 'Add rate limiting to the public API and document the limits in the README', 'feature/api-rate-limiting'),
+             ('Users timezone column', 'Add a nullable timezone column to the users table with a reversible migration', 'feature/users-timezone-column'),
+             ('Refund flow tests', 'Write integration tests for the refund flow, including the partial refund case', 'test/refund-flow'),
+             ('Webhook retries', 'Webhook deliveries are not retried after a 503. Add exponential backoff with a retry cap', 'feature/webhook-retries'),
+             ('Slow orders query', 'The orders list query takes seconds on large accounts. Find the missing index and add it', 'fix/orders-query-index'),
+             ('Request logging', 'Add structured request logging with a correlation id and make sure no tokens end up in the logs', 'feature/request-logging'),
+             ('Order status enum', 'Replace the stringly-typed order status with an enum and migrate the existing rows', 'refactor/order-status-enum'),
+             ('Health endpoint', 'Add a /healthz endpoint that also checks the database connection and returns build info', 'feature/healthz-endpoint'),
+             ('Python upgrade', 'Upgrade the service to the latest Python minor release and fix whatever breaks in CI', 'chore/python-upgrade')],
+    'shop': [('Checkout test fixes', 'Fix the failing checkout tests in the webshop and explain what broke', 'fix/checkout-tests'),
+             ('Wishlist button', 'Add a wishlist button to the product page and persist it for logged-in users', 'feature/wishlist-button'),
+             ('Cart rounding bug', 'The cart total is off by one cent for discounted items. Track down the rounding bug', 'fix/cart-rounding'),
+             ('Price formatter', 'Replace the hand-rolled price formatter with Intl.NumberFormat and update the snapshots', 'refactor/price-formatter'),
+             ('Responsive product grid', 'Make the product grid responsive on small screens without changing the desktop layout', 'feature/responsive-grid'),
+             ('Checkout skeleton', 'Add a loading skeleton to the checkout page while shipping options are fetched', 'feature/checkout-skeleton'),
+             ('Coupon stacking', 'Customers can stack two percentage coupons. Make the rules explicit and add tests for each combination', 'fix/coupon-stacking'),
+             ('Image lazy loading', 'Lazy-load product images below the fold and keep the layout from jumping', 'feature/image-lazy-loading'),
+             ('Order emails', 'Move the order confirmation email to a template with a plain-text fallback', 'feature/order-email-template'),
+             ('Search filters', 'Add size and colour filters to product search and keep them in the URL', 'feature/search-filters'),
+             ('Stock badge', 'Show a low-stock badge when fewer than five items are left, without extra API calls', 'feature/low-stock-badge'),
+             ('Address form a11y', 'The address form fails keyboard navigation. Fix the tab order and add proper labels', 'fix/address-form-a11y')],
+    'docs': [('Slow docs build', 'Why is the docs build so slow? Profile it and suggest fixes', 'chore/docs-build-speed'),
+             ('Offline docs search', 'Add a search page to the docs site that works without a backend', 'feature/offline-search'),
+             ('Broken links', 'Fix the broken internal links reported by the link checker', 'fix/broken-links'),
+             ('Getting-started rewrite', 'Rewrite the getting-started guide for the 2.0 API and add a quickstart snippet', 'docs/getting-started-2-0'),
+             ('Docs dark mode', 'Add dark mode support to the docs theme and check the contrast ratios', 'feature/docs-dark-mode'),
+             ('API reference build', 'Generate the API reference pages from the OpenAPI spec during the build', 'feature/api-reference-build'),
+             ('Versioned docs', 'Add a version switcher so readers can move between the 1.x and 2.x docs', 'feature/version-switcher'),
+             ('Code sample tests', 'Extract the code samples from the guides and run them in CI so they cannot rot', 'test/code-samples'),
+             ('Sidebar navigation', 'Group the sidebar by task instead of by module and add a short intro to each group', 'docs/sidebar-by-task'),
+             ('Image optimisation', 'Convert the screenshots to WebP at build time and add width and height attributes', 'chore/image-optimisation'),
+             ('Changelog page', 'Generate a changelog page from the release notes and link it from the footer', 'docs/changelog-page'),
+             ('Migration guide', 'Write a migration guide from 1.x to 2.x listing every breaking change with before and after code', 'docs/migration-guide')],
 }
 FOLLOWUPS = ['Also update the README', 'Run the tests again', 'Keep the change small, please', 'Add a changelog entry for this']
 FINALS = ['Done. The change is in place and the tests pass; I also touched up the related docs.',
@@ -55,7 +73,9 @@ FINALS = ['Done. The change is in place and the tests pass; I also touched up th
           'All green now. Summary: one small refactor, two new tests and no behaviour change elsewhere.',
           'Finished. I kept the diff small and left a note on the one edge case I could not cover.',
           'Implemented and verified locally. Next step would be a review of the naming in the new helper.']
-BRANCHES = {'acme': 'feature/orders-pagination', 'shop': 'fix/checkout-tests', 'docs': 'chore/docs-build'}
+SCOPES = ['Keep the change backwards compatible.', 'Start with the smallest change that works.', 'Add a test for it.',
+          'Mention anything risky in the summary.', 'Do not touch unrelated files.', 'Follow the existing code style.',
+          'Check the docs for anything that needs updating.', 'Explain your reasoning briefly as you go.']
 PROGRESS = ['Reading the relevant files first.', 'Running the tests to see the current state.', 'Applying the change.',
             'Checking the edge cases.', 'Updating the tests to match.']
 
@@ -66,25 +86,36 @@ class Script:
     def __init__(self, seed):
         self.rng = random.Random(f'prompts-{seed}')
         self.bag = {}
-        self.sessions, self.fresh = {}, set()
+        self.sessions, self.fresh, self.rounds = {}, set(), {}
+
+    def draw(self, key):
+        """Next (title, prompt, branch) of the project's shuffled deck; the deck is refilled only once it is exhausted.
+        A refilled round adds a distinct scope clause so a prompt never repeats verbatim."""
+        if not self.bag.get(key):
+            self.rounds[key] = self.rounds.get(key, -1) + 1
+            self.bag[key] = self.rng.sample(PROMPTS[key], len(PROMPTS[key]))
+        title, text, branch = self.bag[key].pop()
+        if self.rounds[key]:
+            text += ' ' + SCOPES[(self.rounds[key] - 1) % len(SCOPES)]
+        return title, text, branch
 
     def begin(self, key, sid):
-        """Draw a session's first prompt (and its title) without repeating a prompt within a project until all are used."""
+        """Draw a session's first prompt (and its title and branch)."""
         if sid not in self.sessions:
-            if not self.bag.get(key):
-                self.bag[key] = self.rng.sample(PROMPTS[key], len(PROMPTS[key]))
-            self.sessions[sid] = self.bag[key].pop()
+            self.sessions[sid] = self.draw(key)
             self.fresh.add(sid)
         return self.sessions[sid]
 
     def prompt(self, key, sid):
+        """(prompt text, git branch) of the next initiating input."""
         self.begin(key, sid)
         if sid in self.fresh:
             self.fresh.discard(sid)
-            return self.sessions[sid][1]
-        if not self.bag.get(key):
-            self.bag[key] = self.rng.sample(PROMPTS[key], len(PROMPTS[key]))
-        return self.bag[key].pop()[1]
+            return self.sessions[sid][1:]
+        return self.draw(key)[1:]
+
+    def branch(self, key, sid):
+        return self.begin(key, sid)[2]
 
     def title(self, key, sid):
         return self.begin(key, sid)[0]
@@ -159,8 +190,11 @@ def claude_thread(rng, t0, n, model, effort, sid, cwd, *, floor, gap, out_range=
     for i in range(n):
         t += timedelta(seconds=rng.randint(*gap))
         if i % prompt_every == 0 and not agent:
+            text = lorem(rng, 80)
+            if script:
+                text, common['gitBranch'] = script.prompt(key, sid)
             rows.append({'type': 'user', 'timestamp': iso(t), 'uuid': hexid(rng, 12), 'sessionId': sid, 'cwd': cwd,
-                         'message': {'role': 'user', 'content': script.prompt(key, sid) if script else lorem(rng, 80)},
+                         'message': {'role': 'user', 'content': text},
                          **common})
             t += timedelta(seconds=2)
         delta = floor if i == 0 else rng.randint(400, 7000) if rng.random() > .2 else rng.randint(9000, 16000)
@@ -208,7 +242,7 @@ def claude_session(w, rng, key, sid, t0, n, model, subs=(), skill=None, gap=(40,
     base = w['claude'] / cwd.replace('/', '-')
     effort = 'high' if 'opus' in model else 'medium'
     rows, end = claude_thread(rng, t0, n, model, effort, sid, cwd, floor=rng.randint(21000, 27000), gap=gap, skill=skill,
-                              script=script, key=key, branch=BRANCHES[key])
+                              script=script, key=key, branch=script.branch(key, sid) if script else 'main')
     write_jsonl(base / f'{sid}.jsonl', rows)
     ids = []
     for offset, kind, calls, wf in subs:
@@ -240,7 +274,7 @@ def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, s
         return {'timestamp': iso(ts), 'type': typ, 'payload': payload, **extra}
     rows = [row(t, 'session_meta', {'id': sid, 'timestamp': iso(t), 'cwd': cwd, 'model_provider': 'openai', 'source': source,
                                     'originator': 'codex_exec' if exec_run else 'codex-tui', 'cli_version': '0.9.2',
-                                    'git': {'branch': BRANCHES[key], 'repository_url': f'https://git.example.com/demo/{cwd.rsplit("/", 1)[1]}.git'},
+                                    'git': {'branch': script.branch(key, sid), 'repository_url': f'https://git.example.com/demo/{cwd.rsplit("/", 1)[1]}.git'},
                                     'base_instructions': {'text': lorem(rng, rng.randint(22000, 30000))}})]
     rows.append(row(t, 'response_item', {'type': 'message', 'role': 'developer', 'content': [
         {'type': 'input_text', 'text': '<permissions>' + lorem(rng, 600) + '</permissions>\n<skills_instructions>'
@@ -255,7 +289,7 @@ def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, s
         turn = f'turn-{sid}-{i // 6}'
         if i % 6 == 0:
             rows.append(row(t, 'event_msg', {'type': 'task_started', 'turn_id': turn}))
-            rows.append(row(t, 'event_msg', {'type': 'user_message', 'message': script.prompt(key, sid)}))
+            rows.append(row(t, 'event_msg', {'type': 'user_message', 'message': script.prompt(key, sid)[0]}))
             if (follow := script.followup()) and n - i > 3:
                 rows.append(row(t, 'event_msg', {'type': 'item_completed', 'turn_id': turn, 'item': {
                     'type': 'UserMessage', 'id': f'item-{turn}', 'content': [{'type': 'text', 'text': follow}]}}))
@@ -303,7 +337,7 @@ def pi_session(w, rng, sid, key, t0, n, provider, model):
         t += timedelta(seconds=rng.randint(30, 160))
         if i % 6 == 0:
             rows.append({'type': 'message', 'id': f'{sid}-u{i // 6}', 'timestamp': iso(t),
-                         'message': {'role': 'user', 'content': [{'type': 'text', 'text': script.prompt(key, sid)}]}})
+                         'message': {'role': 'user', 'content': [{'type': 'text', 'text': script.prompt(key, sid)[0]}]}})
             t += timedelta(seconds=2)
         delta = rng.randint(9000, 13000) if i == 0 else rng.randint(300, 5000)
         read, ctx = (0, ctx + delta) if i == 0 else (ctx, ctx + delta)
@@ -344,7 +378,7 @@ def opencode_db(path, rng, script):
                 user = f'{sid}-u{i // 5}'
                 udata = {'role': 'user', 'agent': agent, 'time': {'created': created - 1000}}
                 con.execute('INSERT INTO message VALUES (?,?,?,?,?)', (user, sid, created - 1000, created - 1000, json.dumps(udata)))
-                text = {'type': 'text', 'text': script.prompt(key, sid)}
+                text = {'type': 'text', 'text': script.prompt(key, sid)[0]}
                 con.execute('INSERT INTO part VALUES (?,?,?,?,?,?)', (f'{user}-p', user, sid, created - 1000, created - 1000, json.dumps(text)))
             delta = rng.randint(11000, 15000) if i == 0 else rng.randint(300, 4500)
             read, ctx = ctx, ctx + delta
