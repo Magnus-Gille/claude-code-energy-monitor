@@ -186,6 +186,19 @@ async function ready(page, errors, what = 'report') {
         await p2.locator('#cost-facts').screenshot({path:path.join(screenshotDir,'energy-report-costfacts-'+T.lang+'.png')});
         await p2.click('[data-lang="'+(T.lang==='sv'?'en':'sv')+'"]');assert.equal(await p2.locator('#cost-facts h2').innerText(),INS[T.lang==='sv'?'en':'sv'].title);assert.equal(await p2.locator('#cost-facts [data-win="all"]').getAttribute('aria-pressed'),'true','the window survives a language switch');
       }
+      {
+        // Mobile (#80): the costliest turns become cards at 390 px (cost and prompt text on screen, no sideways scroll); the desktop table is unchanged.
+        await p2.setViewportSize({width:390,height:844});
+        const m=await p2.evaluate(()=>{const box=document.getElementById('top-prompts'),w=box.querySelector('.table-wrap'),W=window.innerWidth,over=e=>e.scrollWidth<=e.clientWidth+1,fit=e=>e.getBoundingClientRect().right<=W&&over(e);
+          return {box:over(box),wrap:over(w),doc:document.documentElement.scrollWidth<=W+1,rows:box.querySelectorAll('tr.prompt-row').length,costs:[...box.querySelectorAll('tr.prompt-row td:last-child')].map(fit),texts:[...box.querySelectorAll('tr.prompt-text td')].map(fit),labels:[...box.querySelectorAll('tr.prompt-row')].every(r=>[...r.children].every(c=>c.dataset.label))}});
+        assert.ok(m.rows>0&&m.costs.length===m.rows&&m.texts.length>0,'prompt rows with texts at 390 px');
+        assert.ok(m.box&&m.wrap&&m.doc,'no horizontal overflow at 390 px: '+JSON.stringify(m));assert.ok(m.costs.every(Boolean),'every cost cell is on screen at 390 px');assert.ok(m.texts.every(Boolean),'every prompt text fits at 390 px');assert.ok(m.labels,'cells carry their localized column label');
+        await p2.locator('#prompts').screenshot({path:path.join(screenshotDir,'energy-report-prompts-390-'+T.lang+'.png')});
+        await p2.setViewportSize({width:1366,height:900});
+        const d=await p2.evaluate(()=>[...document.querySelectorAll('#top-prompts th')].map(h=>getComputedStyle(h).display));
+        assert.equal(d.length,10);assert.ok(d.every(x=>x!=='none'),'table header visible on desktop: '+d);
+        await p2.setViewportSize({width:1440,height:1080});
+      }
       assert.deepEqual(errors2,[]);await c2.close();
     }
     if(sharedFixture){
