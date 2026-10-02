@@ -122,7 +122,7 @@ kill_tree() {
 # Every step still runs after a failure; the host returns 1 if any step had a real failure.
 sync_host() {
     local tag="$1" host="$2" fail=0
-    echo "Syncing energy data from $tag ($host)..."
+    echo "Syncing history from $tag ($host)..."
     sync_history "$tag" "$host" || fail=1
     return "$fail"
 }

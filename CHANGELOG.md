@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+### Added
+
+- `tokenatlas show` (#69): opens the latest report in the browser at once, without refreshing or rebuilding and without opening the history; prints where it is and how old it is, and says to run `tokenatlas open` when there is no report yet.
+
 ### Removed
 
 - The checkout-only energy-monitor scripts and the `why` command line (#63). TokenAtlas is the product; the energy estimate (`tokenatlas/energy.py`, the report card and the `energy` insight) and `tokenatlas statusline` already replaced the parts that mattered. Removed from the repository root: `statusline.py`, `stepcount.py`, `advisor.py`, `analyze_tokens.py`, `api_test.py`, `codex_status.py`, `codex_stepcount.py`, `codex_with_summary.py`, `compare.py`, `energy_constants.py`, `interactive_export.py`, `pi_scanner.py`, `pi_status.py`, `pi_stepcount.py`, `plot_daily.py`, `sum_jsonl.py` and the `why.py` shim, with their tests (`test_pi_status.py`, `test_interactive_export.py`) and the matching README sections and CI step. They remain in git history up to tag `v1.8.0`.

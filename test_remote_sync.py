@@ -90,7 +90,7 @@ class RemoteSyncTest(unittest.TestCase):
         proc, log = self.run_script('a:h1 b:h2', mv_fails_first=True)
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn('cannot store snapshot for a', proc.stderr)
-        self.assertIn('Syncing energy data from b (h2)', proc.stdout)
+        self.assertIn('Syncing history from b (h2)', proc.stdout)
         self.assertIn('history: OK', proc.stdout)
         self.assertIn('tokenatlas import', log)
 
@@ -98,7 +98,7 @@ class RemoteSyncTest(unittest.TestCase):
         proc, log = self.run_script('a:h1 b:h2', mv_fails_first=True, rm_fails=True)
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn('cannot store snapshot for a', proc.stderr)
-        self.assertIn('Syncing energy data from b (h2)', proc.stdout)
+        self.assertIn('Syncing history from b (h2)', proc.stdout)
         self.assertIn('history: OK', proc.stdout)
 
     def test_import_failure_is_nonzero_but_other_host_syncs(self):
@@ -106,7 +106,7 @@ class RemoteSyncTest(unittest.TestCase):
             'tokenatlas': 'case "$*" in *"--label a"*) echo boom >&2; exit 1;; esac; exit 0'})
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn('import failed for a', proc.stderr)
-        self.assertIn('Syncing energy data from b (h2)', proc.stdout)
+        self.assertIn('Syncing history from b (h2)', proc.stdout)
         self.assertIn('import ', log.split('--label a', 1)[1])  # b's import ran after a's failure
         self.assertIn('history: OK', proc.stdout)
 
@@ -211,7 +211,7 @@ class RemoteSyncTimeoutTest(unittest.TestCase):
         self.assertGreaterEqual(took, 3)
         self.assertEqual(proc.returncode, 1)
         self.assertIn('stuck: ERROR (timeout after 3s)', proc.stderr)
-        self.assertIn('Syncing energy data from b (healthy)', proc.stdout)
+        self.assertIn('Syncing history from b (healthy)', proc.stdout)
         self.assertIn('history: OK', proc.stdout)
         pid = int((self.root / 'ssh.pid').read_text().split()[0])
         time.sleep(0.5)
