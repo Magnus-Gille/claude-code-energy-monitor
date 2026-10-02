@@ -39,8 +39,6 @@ jobs:
           python -c "from zoneinfo import ZoneInfo; ZoneInfo('Europe/Stockholm')"
       - name: Unit and release-artifact tests
         run: python -m unittest discover -v
-      - name: Interactive export regression
-        run: python test_interactive_export.py
       - name: Compile Python
         run: python -m compileall -q -x "[\\/]\.git[\\/]" .
       - name: Diff hygiene

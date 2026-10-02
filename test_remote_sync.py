@@ -52,7 +52,7 @@ class RemoteSyncTest(unittest.TestCase):
         (root / 'home').mkdir()
         log = root / 'log'
         counter = root / 'mv_count'
-        bodies = {'ssh': 'exit 0', 'rsync': 'exit 0', 'tokenatlas': 'exit 0', 'scp': 'touch "${@: -1}"',
+        bodies = {'ssh': 'exit 0', 'tokenatlas': 'exit 0', 'scp': 'touch "${@: -1}"',
                   'rm': 'exit 1' if rm_fails else 'exit 0',
                   'mv': (f'if [ ! -e "{counter}" ]; then touch "{counter}"; exit 1; fi; exit 0'
                          if mv_fails_first else 'exit 0')}
@@ -84,7 +84,6 @@ class RemoteSyncTest(unittest.TestCase):
         self.assertIn("invalid tag:host entry 'pi:-oProxyCommand=x'", proc.stderr)
         self.assertNotIn('../../x', log)
         self.assertNotIn('ProxyCommand', log)
-        self.assertIn('-- good.host:~/.claude/pi_journal.jsonl', log)
         self.assertIn('-- good.host', log)
 
     def test_failing_mv_does_not_stop_next_host(self):
@@ -121,52 +120,6 @@ class RemoteSyncTest(unittest.TestCase):
         proc, _ = self.run_script('a:h1', bodies_override={'scp': 'echo nope >&2; exit 1'})
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn('scp failed for a', proc.stderr)
-
-    def test_rsync_real_error_is_nonzero_and_steps_continue(self):
-        proc, log = self.run_script('a:h1', bodies_override={'rsync': 'echo "Permission denied" >&2; exit 23'})
-        self.assertEqual(proc.returncode, 1, proc.stderr)
-        self.assertIn('ERROR (rsync exit 23)', proc.stderr)
-        self.assertEqual(log.count('rsync '), 4)
-        self.assertIn('history: OK', proc.stdout)
-
-    def test_missing_remote_files_are_benign(self):
-        proc, _ = self.run_script('a:h1', bodies_override={'rsync': (
-            'p=${@: -2:1}; echo "rsync: [sender] link_stat \"/home/u/.claude/${p##*/}\" failed: No such file or directory (2)" >&2; '
-            'echo "rsync error: some files/attrs were not transferred (see previous errors) (code 23)" >&2; exit 23')})
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn('not found', proc.stdout)
-
-    def test_missing_remote_files_are_benign_with_openrsync(self):
-        # macOS /usr/bin/rsync (openrsync): no "rsync error:" summary, but a receiver warning after the sender's missing-file line (#43)
-        proc, _ = self.run_script('a:h1', bodies_override={'rsync': (
-            'p=${@: -2:1}; echo "rsync: [sender] link_stat \\"/home/u/.claude/${p##*/}\\" failed: No such file or directory (2)" >&2; '
-            'echo "rsync(31563): warning: receiver has empty file list: exiting" >&2; exit 23')})
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stdout.count('not found'), 4, proc.stdout)
-        self.assertNotIn('ERROR', proc.stderr)
-
-    def test_openrsync_warning_alone_is_a_failure(self):
-        proc, _ = self.run_script('a:h1', bodies_override={'rsync': 'echo "rsync(1): warning: receiver has empty file list: exiting" >&2; exit 23'})
-        self.assertEqual(proc.returncode, 1, proc.stderr)
-        self.assertNotIn('not found', proc.stdout)
-
-    def test_missing_remote_file_message_must_name_the_pulled_file(self):
-        # Pulls of the other three files do not match this name: they fail, so the run fails.
-        proc, _ = self.run_script('a:h1', bodies_override={'rsync': (
-            'echo "rsync: [sender] link_stat \"/home/u/.claude/pi_journal.jsonl\" failed: No such file or directory (2)" >&2; exit 23')})
-        self.assertEqual(proc.returncode, 1, proc.stderr)
-        self.assertEqual(proc.stdout.count('not found'), 1, proc.stdout)
-
-    def test_local_destination_enoent_is_a_failure(self):
-        proc, _ = self.run_script('a:h1', bodies_override={'rsync': (
-            'echo "rsync: [receiver] mkstemp \"/h/.claude/.a_journal.jsonl.X\" failed: No such file or directory (2)" >&2; exit 23')})
-        self.assertEqual(proc.returncode, 1, proc.stderr)
-        self.assertNotIn('not found', proc.stdout)
-        self.assertIn('ERROR (rsync exit 23)', proc.stderr)
-
-    def test_generic_enoent_without_a_path_is_a_failure(self):
-        proc, _ = self.run_script('a:h1', bodies_override={'rsync': 'echo "rsync: link_stat No such file or directory" >&2; exit 23'})
-        self.assertEqual(proc.returncode, 1, proc.stderr)
 
     def test_remote_without_tokenatlas_is_benign(self):
         proc, log = self.run_script('a:h1', bodies_override={'ssh': 'exit 1'})
@@ -251,7 +204,6 @@ class RemoteSyncTimeoutTest(unittest.TestCase):
     def test_stalled_host_times_out_and_next_host_runs(self):
         # ssh hangs for host "stuck" only; the healthy host answers at once.
         self.stub('ssh', f'case "$*" in *stuck*) echo $$ > "{self.root}/ssh.pid"; exec sleep 1000;; esac; exit 0')
-        self.stub('rsync', 'exit 0')
         self.stub('tokenatlas', 'exit 0')
         self.stub('scp', 'touch "${@: -1}"')
         proc, took = self.run_sync('a:stuck b:healthy', TOKENATLAS_HOST_TIMEOUT='3')
@@ -287,16 +239,16 @@ class RemoteSyncTimeoutTest(unittest.TestCase):
         self.assertEqual(proc.wait(timeout=5), 143)
         proc.communicate()
 
-    def test_hanging_rsync_is_killed_too(self):
+    def test_hanging_scp_is_killed_too(self):
         self.stub('ssh', 'exit 0')
-        self.stub('rsync', 'sleep 1000')
+        self.stub('scp', 'sleep 1000')
         self.stub('tokenatlas', 'exit 0')
         proc, took = self.run_sync('a:stuck', TOKENATLAS_HOST_TIMEOUT='2')
         self.assertLess(took, 10, proc.stderr)
         self.assertIn('stuck: ERROR (timeout after 2s)', proc.stderr)
 
     def test_calls_carry_timeout_options(self):
-        for name, body in (('ssh', 'exit 0'), ('rsync', 'exit 0'), ('tokenatlas', 'exit 0'),
+        for name, body in (('ssh', 'exit 0'), ('tokenatlas', 'exit 0'),
                            ('scp', 'touch "${@: -1}"')):
             self.stub(name, body)
         proc, _ = self.run_sync('a:h1')
@@ -307,13 +259,10 @@ class RemoteSyncTimeoutTest(unittest.TestCase):
             for opt in ('ConnectTimeout=10', 'ServerAliveInterval=10', 'ServerAliveCountMax=3', 'BatchMode=yes'):
                 self.assertIn(opt, line, line)
             self.assertIn(' -- h1', line)
-        rsync = next(l for l in lines if l.startswith('rsync '))
-        self.assertIn('--timeout=60', rsync)
-        self.assertIn('-e ssh -o ConnectTimeout=10', rsync)
-        self.assertIn('BatchMode=yes', rsync)
+        self.assertFalse([l for l in lines if l.startswith('rsync ')], lines)
 
     def test_ssh_opts_overridable(self):
-        for name, body in (('ssh', 'exit 0'), ('rsync', 'exit 0'), ('tokenatlas', 'exit 0'),
+        for name, body in (('ssh', 'exit 0'), ('tokenatlas', 'exit 0'),
                            ('scp', 'touch "${@: -1}"')):
             self.stub(name, body)
         proc, _ = self.run_sync('a:h1', TOKENATLAS_SSH_OPTS='-o ConnectTimeout=3')
@@ -332,7 +281,6 @@ class RemoteSyncTimeoutTest(unittest.TestCase):
 
     def test_shim_runs_packaged_script(self):
         self.stub('ssh', 'exit 0')
-        self.stub('rsync', 'exit 0')
         self.stub('tokenatlas', 'exit 0')
         self.stub('scp', 'touch "${@: -1}"')
         e = {'PATH': f'{self.root / "bin"}:/usr/bin:/bin', 'HOME': str(self.root / 'home'), 'STUB_LOG': str(self.log),

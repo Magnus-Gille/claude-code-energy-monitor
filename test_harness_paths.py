@@ -122,11 +122,6 @@ class Resolver(unittest.TestCase):
         with patch.dict(os.environ, {'PI_CODING_AGENT_DIR': '~nonexistent-user-xyz/agent'}):
             self.assertEqual(why.harness_root('pi'), (why.PI_SESSIONS, 'default'))
 
-    def test_claude_state_dir_does_not_follow_variable(self):
-        # statusline.py always writes under ~/.claude, whatever CLAUDE_CONFIG_DIR says
-        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.x)}):
-            self.assertEqual(why.claude_state_dir(), why.CLAUDE_STATE)
-
 
 class CodexIndex(unittest.TestCase):
     def test_session_index_follows_codex_home(self):

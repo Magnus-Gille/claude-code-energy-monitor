@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+### Removed
+
+- The checkout-only energy-monitor scripts and the `why` command line (#63). TokenAtlas is the product; the energy estimate (`tokenatlas/energy.py`, the report card and the `energy` insight) and `tokenatlas statusline` already replaced the parts that mattered. Removed from the repository root: `statusline.py`, `stepcount.py`, `advisor.py`, `analyze_tokens.py`, `api_test.py`, `codex_status.py`, `codex_stepcount.py`, `codex_with_summary.py`, `compare.py`, `energy_constants.py`, `interactive_export.py`, `pi_scanner.py`, `pi_status.py`, `pi_stepcount.py`, `plot_daily.py`, `sum_jsonl.py` and the `why.py` shim, with their tests (`test_pi_status.py`, `test_interactive_export.py`) and the matching README sections and CI step. They remain in git history up to tag `v1.8.0`.
+- `tokenatlas/why.py` is no longer a command: its `main()`, the `--date` statusline-coverage reader and the text report are gone. The module keeps the Claude, Codex, Pi and OpenCode collectors that `refresh`, `report`, `overhead` and the turn context use; it was not renamed.
+- `remote_sync.sh` no longer pulls the legacy `pi_journal.jsonl`, `pi_daily_rollup.jsonl`, `interactive_journal_raw.jsonl` and `interactive_rollup_raw.jsonl` with rsync (nothing reads them any more); it syncs history snapshots only, with the same timeouts and exit codes, and no longer needs `rsync`.
+
 ## [1.8.0] - 2026-10-01
 
 ### Added
