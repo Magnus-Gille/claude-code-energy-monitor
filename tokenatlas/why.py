@@ -1,30 +1,26 @@
-#!/usr/bin/env python3
-"""Explain which local coding-harness calls consumed a time window.
+"""Collectors for the local coding harnesses (Claude Code, Codex, Pi, OpenCode).
 
-This is deliberately stateless: it reads the harnesses' retained JSONL files,
-normalises one record per model call, and groups the result by actionable
-dimensions.  Reasoning tokens are a subset of output and are never added twice.
+Stateless readers over the harnesses' retained files: one normalised
+AttributionRecord per model call. Reasoning tokens are a subset of output and
+are never added twice. The module name is historical; the former `why` command
+line is retired and only the collectors live here.
 """
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import math
 import os
 import sqlite3
 import stat
-import sys
-from collections import defaultdict
-from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
-CLAUDE_STATE = Path.home() / ".claude"
 CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 PI_SESSIONS = Path.home() / ".pi" / "agent" / "sessions"
 OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
@@ -57,11 +53,6 @@ def harness_root(name):
             base = _env_dir(var, tilde)
             return (base.joinpath(*tail), var) if base else (default, 'default')
     raise ValueError(f'unknown harness: {name}')
-
-
-def claude_state_dir():
-    """Where the statusline keeps its files: always ~/.claude, since statusline.py ignores CLAUDE_CONFIG_DIR."""
-    return CLAUDE_STATE
 
 
 def codex_session_index():
@@ -1055,232 +1046,3 @@ def reconcile_codex_rollout(path: Path) -> dict:
         "differences": differences,
         "matches": differences is not None and all(value == 0 for value in differences.values()),
     }
-
-
-TOKEN_FIELDS = ("fresh_input", "cache_read", "cache_write", "output", "reasoning")
-GROUP_FIELDS = (
-    "thread_kind", "entrypoint", "agent", "model", "effort", "project", "session_id"
-)
-
-
-def summarize_records(records: list[AttributionRecord], limit: int = 5) -> dict:
-    totals = {field: sum(getattr(record, field) for record in records) for field in TOKEN_FIELDS}
-    totals["tokens"] = sum(record.total_tokens for record in records)
-    totals["calls"] = len(records)
-    totals["sessions"] = len({record.session_id for record in records})
-
-    groups: dict[str, list[dict]] = {}
-    for field in GROUP_FIELDS:
-        buckets: dict[str, dict] = defaultdict(
-            lambda: {"calls": 0, **{token: 0 for token in TOKEN_FIELDS}, "tokens": 0}
-        )
-        for record in records:
-            if field == "project":
-                name = str(record.project_id or record.project or "unknown")
-            else:
-                name = str(getattr(record, field) or "unknown")
-            bucket = buckets[name]
-            bucket["calls"] += 1
-            for token in TOKEN_FIELDS:
-                bucket[token] += getattr(record, token)
-            bucket["tokens"] += record.total_tokens
-        rows = []
-        for name, bucket in buckets.items():
-            denominator = totals["tokens"]
-            rows.append({
-                "name": name,
-                **bucket,
-                "share_pct": round(bucket["tokens"] / denominator * 100, 2)
-                if denominator else 0.0,
-            })
-        rows.sort(key=lambda row: (-row["tokens"], row["name"]))
-        groups[field.removesuffix("_id")] = rows[:limit]
-    return {"totals": totals, "groups": groups}
-
-
-def load_claude_monitor_day(state_dir: Path, day: str) -> dict | None:
-    selected = None
-    history = state_dir / "statusline_history.jsonl"
-    for _, row in _read_json_lines(history):
-        if row.get("date") == day:
-            selected = row
-    daily = state_dir / "statusline_daily.json"
-    try:
-        live = json.loads(daily.read_text())
-        if isinstance(live, dict) and live.get("date") == day:
-            selected = live
-    except (OSError, json.JSONDecodeError):
-        pass
-    if not isinstance(selected, dict):
-        return None
-    totals = {
-        "fresh_input": _nonnegative_int(selected.get("input")),
-        "cache_read": _nonnegative_int(selected.get("cache_read", selected.get("cached"))),
-        "cache_write": _nonnegative_int(selected.get("cache_write")),
-        "output": _nonnegative_int(selected.get("output")),
-    }
-    totals["tokens"] = sum(totals.values())
-    return totals
-
-
-def _coverage(monitor: dict | None, actual: dict) -> dict | None:
-    if monitor is None:
-        return None
-    result = {"monitor": monitor}
-    for field in ("tokens", "cache_read", "output"):
-        denominator = actual.get(field, 0)
-        result[f"{field}_pct"] = round(monitor.get(field, 0) / denominator * 100, 1) \
-            if denominator else None
-    return result
-
-
-def _jsonable(value: object) -> object:
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, AttributionRecord):
-        return {key: _jsonable(item) for key, item in asdict(value).items()}
-    return value
-
-
-def fmt_tokens(value: int) -> str:
-    if value >= 1_000_000_000:
-        return f"{value / 1_000_000_000:.2f}B"
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}M"
-    if value >= 1_000:
-        return f"{value / 1_000:.1f}k"
-    return str(value)
-
-
-def render_report(report: dict) -> str:
-    lines = [
-        "Usage attribution",
-        f"Window: {report['window']['start']} to {report['window']['end']}",
-    ]
-    for harness, summary in report["harnesses"].items():
-        totals = summary["totals"]
-        lines.extend([
-            "",
-            f"{harness.upper()}: {fmt_tokens(totals['tokens'])} tokens · "
-            f"{totals['calls']} calls · {totals['sessions']} sessions",
-            "  mix: "
-            f"fresh {fmt_tokens(totals['fresh_input'])} · "
-            f"cache-read {fmt_tokens(totals['cache_read'])} · "
-            f"cache-write {fmt_tokens(totals['cache_write'])} · "
-            f"output {fmt_tokens(totals['output'])}",
-        ])
-        coverage = summary.get("monitor_coverage")
-        if coverage:
-            output_pct = coverage.get("output_pct")
-            cache_pct = coverage.get("cache_read_pct")
-            lines.append(
-                "  Claude statusline coverage: "
-                f"output {output_pct if output_pct is not None else 'n/a'}% · "
-                f"cache-read {cache_pct if cache_pct is not None else 'n/a'}%"
-            )
-        elif harness == "claude":
-            lines.append("  Claude statusline coverage: unavailable for a partial-day window")
-
-        for dimension in (
-            "project", "thread_kind", "entrypoint", "agent", "model", "effort", "session"
-        ):
-            rows = summary["groups"].get(dimension, [])
-            if not rows:
-                continue
-            formatted = ", ".join(
-                f"{row['name']} {fmt_tokens(row['tokens'])} ({row['share_pct']:.1f}%)"
-                for row in rows
-            )
-            lines.append(f"  by {dimension.replace('_', ' ')}: {formatted}")
-    for harness, error in report.get("errors", {}).items():
-        lines.extend(["", f"{harness.upper()}: unavailable ({error})"])
-    return "\n".join(lines)
-
-
-def _window(args: argparse.Namespace) -> tuple[datetime, datetime, str | None]:
-    if args.date:
-        selected = date.fromisoformat(args.date)
-        start = datetime.combine(selected, time.min).astimezone()
-        end = datetime.combine(selected + timedelta(days=1), time.min).astimezone()
-        return start, end, args.date
-    end = datetime.now().astimezone()
-    return end - timedelta(hours=args.hours or 24.0), end, None
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Explain local coding-harness token use by agent, project, model and session."
-    )
-    parser.add_argument(
-        "--harness", choices=("all", "both", "claude", "codex", "pi", "opencode"),
-        default="all", help="Harness to inspect; 'both' retains the legacy Claude+Codex pair.",
-    )
-    window = parser.add_mutually_exclusive_group()
-    window.add_argument("--date", help="Local calendar date (YYYY-MM-DD)")
-    window.add_argument("--hours", type=float, help="Trailing number of hours (default: 24)")
-    parser.add_argument("--limit", type=int, default=5, help="Rows per grouping (default: 5)")
-    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
-    parser.add_argument("--claude-root", type=Path, default=None)
-    parser.add_argument("--claude-state-dir", type=Path, default=None)
-    parser.add_argument("--codex-root", type=Path, default=None)
-    parser.add_argument("--pi-root", type=Path, default=None)
-    parser.add_argument("--opencode-db", type=Path, default=None)
-    args = parser.parse_args(argv)
-    # Explicit option > harness environment variable > default.
-    args.claude_root = args.claude_root or harness_root("claude")[0]
-    args.claude_state_dir = args.claude_state_dir or claude_state_dir()
-    args.codex_root = args.codex_root or harness_root("codex")[0]
-    args.pi_root = args.pi_root or harness_root("pi")[0]
-    args.opencode_db = args.opencode_db or harness_root("opencode")[0]
-    if args.hours is not None and args.hours <= 0:
-        parser.error("--hours must be greater than zero")
-    if args.limit <= 0:
-        parser.error("--limit must be greater than zero")
-
-    try:
-        start, end, selected_day = _window(args)
-    except ValueError as exc:
-        parser.error(str(exc))
-
-    report = {
-        "window": {"start": start.isoformat(), "end": end.isoformat()},
-        "harnesses": {},
-        "errors": {},
-        "notes": [
-            "Reasoning is reported separately and normalized as a subset of output.",
-            "Transcript, session, rollout, and database formats are internal and may change.",
-        ],
-    }
-    if args.harness in ("all", "both", "claude"):
-        records = collect_claude(args.claude_root.expanduser(), start, end)
-        summary = summarize_records(records, args.limit)
-        monitor = load_claude_monitor_day(args.claude_state_dir.expanduser(), selected_day) \
-            if selected_day else None
-        summary["monitor_coverage"] = _coverage(monitor, summary["totals"])
-        report["harnesses"]["claude"] = summary
-    if args.harness in ("all", "both", "codex"):
-        records = collect_codex(args.codex_root.expanduser(), start, end)
-        report["harnesses"]["codex"] = summarize_records(records, args.limit)
-    if args.harness in ("all", "pi"):
-        records = collect_pi(args.pi_root.expanduser(), start, end)
-        report["harnesses"]["pi"] = summarize_records(records, args.limit)
-    if args.harness in ("all", "opencode"):
-        try:
-            records = collect_opencode(args.opencode_db.expanduser(), start, end) \
-                if args.opencode_db.expanduser().is_file() else []
-            report["harnesses"]["opencode"] = summarize_records(records, args.limit)
-        except (OSError, sqlite3.Error) as exc:
-            message = f"{type(exc).__name__}: {exc}"
-            if args.harness == "opencode":
-                parser.exit(2, f"why: OpenCode unavailable: {message}\n")
-            report["errors"]["opencode"] = message
-
-    if args.json:
-        print(json.dumps(report, default=_jsonable, indent=2, sort_keys=True))
-    else:
-        print(render_report(report))
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

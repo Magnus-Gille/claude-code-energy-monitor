@@ -36,7 +36,7 @@ Input tokens are 100–174x off. Output tokens are 10–17x off. But cache metri
 
 ### The smoking gun: 75% placeholders
 
-I built an [independent JSONL parser](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/master/sum_jsonl.py) (zero dependencies, ~200 lines of Python) to inspect the raw data. The distribution of `usage.input_tokens` values tells the story:
+I built an [independent JSONL parser](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/v1.8.0/sum_jsonl.py) (zero dependencies, ~200 lines of Python) to inspect the raw data. The distribution of `usage.input_tokens` values tells the story:
 
 **75% of all JSONL entries have `usage.input_tokens` of 0 or 1.** These are streaming placeholder values. Claude Code writes JSONL entries during streaming, when the input token count hasn't been finalized yet. The placeholder is never updated after the request completes.
 
@@ -101,7 +101,7 @@ Anthropic's [adaptive thinking documentation](https://docs.anthropic.com/en/docs
 
 But JSONL records only the visible output. For Opus, where roughly 60–70% of output tokens are thinking, this means JSONL captures less than a third of actual output. Combined with the input placeholder issue, the JSONL gives you a fraction of a fraction.
 
-I confirmed this with a [validation harness](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/master/analyze_tokens.py) that logged raw statusbar payloads across 31 API calls: the statusbar's `total_output_tokens` matched the API's `usage.output_tokens` at a 1.0x ratio — both include thinking. JSONL just records something different.
+I confirmed this with a [validation harness](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/v1.8.0/analyze_tokens.py) that logged raw statusbar payloads across 31 API calls: the statusbar's `total_output_tokens` matched the API's `usage.output_tokens` at a 1.0x ratio — both include thinking. JSONL just records something different.
 
 ## Impact
 
@@ -129,9 +129,9 @@ A simpler alternative: a separate append-only usage log with one line per comple
 
 The conclusions rest on three independent lines of evidence:
 
-1. **Independent JSONL parser** ([sum_jsonl.py](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/master/sum_jsonl.py)): Zero dependencies, reads raw JSONL, deduplicates by `requestId`. Reproduced the same pattern across two full days of data.
+1. **Independent JSONL parser** ([sum_jsonl.py](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/v1.8.0/sum_jsonl.py)): Zero dependencies, reads raw JSONL, deduplicates by `requestId`. Reproduced the same pattern across two full days of data.
 
-2. **Validation harness** ([analyze_tokens.py](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/master/analyze_tokens.py)): Logged every raw statusbar JSON payload across 31 API calls in 3 concurrent sessions. Confirmed `total_input_tokens` excludes cache (no double-counting), `total_output_tokens` includes thinking (1.0x ratio to API), and `current_usage.input_tokens` is always 1 (placeholder).
+2. **Validation harness** ([analyze_tokens.py](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/v1.8.0/analyze_tokens.py)): Logged every raw statusbar JSON payload across 31 API calls in 3 concurrent sessions. Confirmed `total_input_tokens` excludes cache (no double-counting), `total_output_tokens` includes thinking (1.0x ratio to API), and `current_usage.input_tokens` is always 1 (placeholder).
 
 3. **API billing reconciliation** ([FINDINGS.md](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/master/FINDINGS.md)): 4 direct Anthropic API calls with a personal key. All four token categories (fresh input, output, cache read, cache write) matched the billing dashboard CSV to the exact token. Cost: $0.01.
 

@@ -2,7 +2,7 @@
 
 *Formerly claude-code-energy-monitor.*
 
-TokenAtlas is a local, private token and cost atlas for AI coding agents (Claude Code, Codex, OpenCode, Pi): a durable history CLI (`tokenatlas`), an offline HTML report, list-price costing, session trees and fixed-context overhead. The statusline and companion scripts below are the original energy monitor and keep working from a checkout.
+TokenAtlas is a local, private token and cost atlas for AI coding agents (Claude Code, Codex, OpenCode, Pi): a durable history CLI (`tokenatlas`), an offline HTML report, list-price costing, session trees and fixed-context overhead.
 
 ### What TokenAtlas adds beyond the vendors' own tools
 
@@ -58,62 +58,6 @@ Off until you opt in:
 - other machines: `tokenatlas collect --remote tag:host`, which needs ssh access and TokenAtlas on that machine
   (see [Other machines](docs/remote-machines.md)).
 
-## The original energy monitor
-
-The statusline and companion scripts below predate TokenAtlas. They run from a checkout, are not part of the PyPI
-package, and the Claude Code statusline is the only part that needs harness configuration (a `statusLine` entry in
-Claude Code's settings).
-
-A statusline script for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that shows real-time token usage and order-of-magnitude energy estimates. It tracks daily, weekly, and monthly totals, distinguishes cheap cached tokens from expensive fresh tokens, and logs history automatically.
-
-The repo also includes companion monitors for Codex CLI (`codex_status.py`) and the Pi coding harness (`pi_status.py`). Both read their harness's session JSONL and print the same style of one-line summary for a prompt, tmux status, or sidecar terminal.
-
-```
-Opus 4.8 | Ctx:42% | 5h:29% 7d:52% | D:2.0M ~2kWh | W:45.3M ~20kWh | M:412M ~50kWh
-```
-
-Reading left to right:
-
-| Segment | Meaning |
-|---------|---------|
-| `Opus 4.8` | Active model |
-| `Ctx:42%` | Context-window utilization (current session) |
-| `5h:29% 7d:52%` | API quota consumption (5-hour and 7-day rolling windows) |
-| `D:2.0M ~2kWh` | Daily total tokens and energy estimate |
-| `W:45.3M ~20kWh` | Weekly total (rolling 7 days) |
-| `M:412M ~50kWh` | Monthly total (rolling 30 days) |
-
-Energy is **model-weighted** (Haiku ×0.3, Sonnet ×0.6, Opus ×1.0; order-of-magnitude) for today and going forward; older history days are model-agnostic. Quota prefers the statusline payload's `rate_limits` (no API call), falling back to the OAuth usage endpoint when absent.
-
-## Explain a spike across Claude, Codex, Pi, and OpenCode
-
-`why.py` reads retained Claude Code transcripts, Codex rollouts, Pi sessions, and OpenCode's local
-usage store directly and ranks the calls that consumed a time window. It groups by project, main
-thread vs subagent, entrypoint, agent, exact model, effort, and session. Codex Desktop calls are
-included when they are present in the shared `~/.codex/sessions/` directory.
-
-```bash
-# All supported harnesses, trailing 24 hours
-python3 why.py
-
-# A short burst, or one local calendar day
-python3 why.py --hours 0.5
-python3 why.py --date 2026-09-03
-
-# Narrow to one harness or emit structured output
-python3 why.py --harness codex --limit 10
-python3 why.py --hours 6 --json
-```
-
-The command is stateless: it writes no ledger or cache. Claude requests are deduplicated by
-`requestId` using the maximum of each streamed token field; Codex uses each turn's
-`last_token_usage` delta and discards repeated cumulative snapshots. Pi deduplicates copied fork
-history by provider response ID and preserves the original session attribution. OpenCode transiently
-parses local message records, then retains only allowlisted usage and attribution fields. Resumed sessions land on the
-day when each call actually happened. For a full Claude calendar day the command also compares
-transcript totals with the older statusline counter and reports the latter's coverage. Use
-`--harness both` for the legacy Claude+Codex pair, or select `claude`, `codex`, `pi`, or `opencode`.
-
 ## Durable local usage history
 
 `tokenatlas` imports Claude, Codex, Pi, and OpenCode observations into a local SQLite
@@ -154,7 +98,7 @@ variable, which TokenAtlas reads at every run (an unset, empty or relative value
 | OpenCode | `XDG_DATA_HOME` | `$XDG_DATA_HOME/opencode/opencode.db` | `~/.local/share/opencode/opencode.db` |
 
 An explicit command-line root (`--root`, `--claude-root`, ...) beats the variable, which beats the default.
-The Claude desktop Cowork location and the statusline's own files (`statusline_daily.json`, `statusline_history.jsonl`, always under `~/.claude`) are not affected by `CLAUDE_CONFIG_DIR`. `tokenatlas doctor` lists the
+The Claude desktop Cowork location is not affected by `CLAUDE_CONFIG_DIR`. `tokenatlas doctor` lists the
 resolved path and its source (`default` or the variable name) per harness under `roots`. A scheduled job
 (cron, launchd) does not inherit your interactive shell's environment: set the variable in the schedule
 itself, for example `CODEX_HOME=/data/codex tokenatlas refresh --all` in the crontab line, or under
@@ -404,224 +348,9 @@ The line reads `Opus 4.8 | Ctx:42% | 5h:29% 7d:52% | D:2.0M ~2 kWh | W:45.3M ~20
 
 Totals are the same numbers as the report (ambiguous observations excluded) and are only as fresh as the last `tokenatlas refresh`, `open` or `collect`, which write a small `statusline.json` (0600) next to the history database; schedule `collect` to keep them current. The statusline reads only that file, never the database, so a new day rolls the totals over without a rewrite. When the file is older than 45 minutes its time is appended, e.g. `(14:40)`; when it is missing, the totals are left out. It makes no network calls, uses no credentials and writes nothing; if anything goes wrong it prints a short fallback line. It starts without loading the history modules to stay fast on every status update.
 
-The legacy `statusline.py` script is retired in #63.
+## Retired checkout scripts
 
-## Codex CLI
-
-Codex support lives in [`codex_status.py`](codex_status.py). It is not injected into the Codex TUI itself; Codex currently writes rollout logs instead of calling an external statusline command.
-
-```bash
-# From this repo
-chmod +x ./codex_status.py
-
-# Print one status line for the latest Codex rollout
-python3 ./codex_status.py
-
-# Continuously refresh it in a side terminal
-python3 ./codex_status.py --watch
-```
-
-Example output:
-
-```
-gpt-5.4 | Win:258k | 5h:36% 7d:46% | D:1.8M ~100Wh | W:27.4M ~5kWh | M:75.6M ~10kWh
-```
-
-Useful integrations:
-
-```bash
-# zsh right prompt
-setopt PROMPT_SUBST
-RPROMPT='$(python3 /path/to/codex_status.py 2>/dev/null)'
-
-# tmux status-right
-set -g status-right "#(python3 /path/to/codex_status.py 2>/dev/null)"
-```
-
-Notes:
-- Codex rollout logs expose total input, cached input, output, reasoning output, context window, and 5h/7d rate-limit usage.
-- Current Codex rollouts expose cache-write tokens. `why.py` reports them; the older energy status scripts do not yet apply a distinct cache-write energy constant.
-- Parsed rollout summaries are cached in `~/.codex/statusline_rollout_cache.json` to keep prompt-time execution reasonably fast.
-
-### Codex step counter
-
-For copy/pasteable summaries similar to `stepcount.py`, use [`codex_stepcount.py`](codex_stepcount.py):
-
-```bash
-python3 ./codex_stepcount.py
-python3 ./codex_stepcount.py -d
-python3 ./codex_stepcount.py -w
-python3 ./codex_stepcount.py -m
-python3 ./codex_stepcount.py -t
-python3 ./codex_stepcount.py --rough-energy-estimate
-python3 ./codex_stepcount.py --copy
-```
-
-Example output:
-
-```text
-⚡ Codex
-   Today  5.1M tokens ·    5 sessions
-   Week  30.8M tokens · 1395 sessions
-   Month 79.0M tokens · 2129 sessions
-```
-
-### Print after Codex exits
-
-Codex still has no native Stop hook, so the practical equivalent is a wrapper that runs Codex and then prints the summary after the process exits.
-
-This repo includes [`codex_with_summary.py`](codex_with_summary.py):
-
-```bash
-python3 ./codex_with_summary.py
-python3 ./codex_with_summary.py resume --last
-python3 ./codex_with_summary.py exec "fix the failing tests"
-```
-
-If you want this behavior on your normal `codex` command, add a shell function to your `~/.zshrc`:
-
-```bash
-codex() {
-  python3 /path/to/codex_with_summary.py "$@"
-}
-```
-
-Optional:
-- Set `CODEX_SUMMARY_ARGS="--rough-energy-estimate"` to change the summary flags.
-- The wrapper intentionally skips printing a summary for `--help`, `--version`, `completion`, `features`, `login`, `logout`, `mcp`, and `debug`.
-
-## Pi coding harness
-
-Pi support lives in [`pi_status.py`](pi_status.py). Pi already displays live-session token and cache usage in its footer; this companion adds daily, weekly, and monthly totals with the repository's energy proxy by reading `~/.pi/agent/sessions/`.
-
-```bash
-# Print one status line from saved Pi sessions
-python3 ./pi_status.py
-
-# Continuously refresh it in a side terminal
-python3 ./pi_status.py --watch
-
-# Emit machine-readable totals
-python3 ./pi_status.py --json
-```
-
-Example output:
-
-```text
-gpt-5.6-sol | D:512k ~200Wh | W:1.8M ~500Wh | M:4.2M ~1kWh
-```
-
-For shareable summaries:
-
-```bash
-python3 ./pi_stepcount.py
-python3 ./pi_stepcount.py -d
-python3 ./pi_stepcount.py -w
-python3 ./pi_stepcount.py -m
-python3 ./pi_stepcount.py -t
-python3 ./pi_stepcount.py --rough-energy-estimate
-python3 ./pi_stepcount.py --copy
-```
-
-Notes:
-- Pi records normalized `input`, `output`, `cacheRead`, `cacheWrite`, and `reasoning` usage on every assistant response. Reasoning is a subset of output and is not added twice.
-- Calls are assigned to the date of each assistant response, including sessions continued on later days.
-- Pi forks and clones can copy earlier entries into a new session file. The monitor deduplicates copied responses while retaining genuinely new calls on each branch.
-- Pi's internal compaction and branch-summary model requests are persisted without usage fields, so their tokens and energy cannot be recovered from session JSONL and are omitted.
-- `--no-session` runs are not persisted and therefore cannot be counted afterward.
-- Parsed responses are cached by file size and modification time in `~/.pi/agent/statusline_session_cache.json` for prompt, tmux, and watch performance.
-- Pi can use many providers. The energy values remain the same documented, provider-agnostic order-of-magnitude proxy; they are not suitable for comparing providers or models.
-- [`pi_scanner.py`](pi_scanner.py) is unrelated: its name refers to a Raspberry Pi machine running headless Claude Code jobs.
-
-Useful integrations are the same as for Codex:
-
-```bash
-# zsh right prompt
-setopt PROMPT_SUBST
-RPROMPT='$(python3 /path/to/pi_status.py 2>/dev/null)'
-
-# tmux status-right
-set -g status-right "#(python3 /path/to/pi_status.py 2>/dev/null)"
-```
-
-## How Claude Code monitoring works
-
-1. **Claude Code calls the script** on every status update (after each API call, during streaming). It pipes a JSON object with session data into stdin.
-2. **The script reads the data**, computes energy estimates, updates daily totals, and prints one line to stdout — which Claude Code renders in the status bar.
-3. **Daily totals persist** across sessions in `~/.claude/statusline_daily.json`. Multiple concurrent sessions are handled safely with file locking.
-4. **At midnight** (or rather, on the first prompt of a new day), the previous day's totals are archived to `~/.claude/statusline_history.jsonl` and the daily counter resets.
-
-The statusline needs no cron job or daemon: Claude Code runs it on every status update and its daily totals accumulate. (TokenAtlas's own history grows whenever you run `tokenatlas open` or `tokenatlas collect`; schedule `collect` so nothing is lost to the agents' log cleanup between runs, see [Quick start](#quick-start).)
-
-### Data files
-
-| File | Purpose | Format |
-|------|---------|--------|
-| `~/.claude/statusline_daily.json` | Today's running totals | JSON object with per-session and daily aggregates |
-| `~/.claude/statusline_history.jsonl` | Historical daily log | One JSON line per day, appended automatically |
-| `~/.claude/statusline_quota_cache.json` | Cached API quota data | JSON with 5-minute TTL |
-
-All files are created with owner-only permissions (`0600`). Example history entry:
-
-```json
-{"date": "2026-02-18", "input": 2797805, "output": 693769, "cache_read": 1901548, "cache_write": 312000, "sessions": 12}
-```
-
-## Step counter (shareable summaries)
-
-`stepcount.py` generates copy-pasteable usage summaries from the accumulated history — like a fitness tracker for AI coding.
-
-```bash
-python3 stepcount.py           # today + week + month stacked (default)
-python3 stepcount.py -d        # today only
-python3 stepcount.py -w        # last 7 days only
-python3 stepcount.py -m        # last 30 days only
-python3 stepcount.py -t        # today + week + month as ASCII table
-python3 stepcount.py --copy    # copy output to clipboard
-```
-
-Add `--rough-energy-estimate` to any view to include the order-of-magnitude energy guess.
-
-Week and Month rows only appear once you have 7 and 30 days of data respectively.
-
-**Optional: auto-print after each session.** Add a [Stop hook](https://docs.anthropic.com/en/docs/claude-code/hooks) to `~/.claude/settings.json`:
-
-```json
-"hooks": {
-  "Stop": [
-    {
-      "hooks": [
-        {
-          "type": "command",
-          "command": "python3 '/path/to/stepcount.py'"
-        }
-      ]
-    }
-  ]
-}
-```
-
-Example output (default):
-
-```
-⚡ Claude Code
-   Today   18M tokens ·   9 sessions
-   Week   563M tokens · 106 sessions
-   Month  917M tokens · 156 sessions
-```
-
-Example output (`-t`):
-
-```
-⚡ Claude Code
-   ┌───────┬────────┬──────┬────────────┐
-   │       │ tokens │ sess │            │
-   ├───────┼────────┼──────┼────────────┤
-   │ Today │    18M │    9 │ █░░░░░░░░░ │
-   │ Week  │   563M │  106 │ ██████░░░░ │
-   │ Month │   917M │  156 │ ██████████ │
-   └───────┴────────┴──────┴────────────┘
-```
+This release retires the old checkout-only energy-monitor scripts (the standalone `statusline.py`, the `stepcount.py` summaries, the Codex and Pi status and step-count scripts, `advisor.py`, the interactive export, the analysis and validation scripts, and the `why.py` command). They are not part of the PyPI package and remain in git history up to tag `v1.8.0`. What replaced them: `tokenatlas statusline` for the status line, and the energy card in the report and the `energy` fact in `tokenatlas insights` for the energy estimate; `tokenatlas open`, `top` and `insights` cover the rest. `tokenatlas/why.py` stays as the internal module with the per-harness collectors.
 
 ## Results & Claims
 
@@ -629,12 +358,12 @@ This section separates what we can measure with high confidence from what we can
 
 ### What we measure (data source)
 
-The script reads Claude Code's **statusbar JSON payload**, piped to stdin on every status update. This payload contains:
+The retired standalone statusline script read Claude Code's **statusbar JSON payload**, piped to stdin on every status update. This payload contains:
 
-- **Per-call snapshot (`current_usage`):** `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` — these reflect the most recent API call. The monitor accumulates these across calls (detecting call boundaries) to build daily totals.
-- **Current-context totals:** `total_input_tokens` (= `input + cache_creation + cache_read` of the most recent response) and `total_output_tokens` (that response's output). **As of Claude Code v2.1.122 these are current-context snapshots, not cumulative session counters.** Earlier builds of this monitor treated them as cumulative; the accumulation now sums per-call `current_usage` fields and derives fresh (uncached) input as `total_input − cache_read − cache_creation`.
+- **Per-call snapshot (`current_usage`):** `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` — these reflect the most recent API call. The old monitor accumulated these across calls (detecting call boundaries) to build daily totals.
+- **Current-context totals:** `total_input_tokens` (= `input + cache_creation + cache_read` of the most recent response) and `total_output_tokens` (that response's output). **As of Claude Code v2.1.122 these are current-context snapshots, not cumulative session counters.** Earlier builds of that monitor treated them as cumulative; the final version summed per-call `current_usage` fields and derives fresh (uncached) input as `total_input − cache_read − cache_creation`.
 
-Daily totals are accumulated across sessions via a locked JSON file. The statusbar payload and
+The old script accumulated daily totals across sessions in a locked JSON file. The statusbar payload and
 Claude Code's JSONL transcripts are complementary local sources whose coverage depends on the
 Claude Code version and workload. In a later v2.1.226 comparison, deduplicated transcript output
 was within 1% of the statusline output for a full observed day, while the statusline missed
@@ -643,7 +372,7 @@ subagent and non-interactive calls. Neither source should be treated as universa
 
 ### Token accounting claims (high confidence, validated)
 
-These claims are supported by a [validation harness](analyze_tokens.py) that logged raw statusbar payloads (Feb 2026: 31 calls / 3 sessions; re-validated May 2026 on CC v2.1.157), plus [direct API billing reconciliation](FINDINGS.md):
+These claims are supported by a validation harness (`analyze_tokens.py`, retired; in git history up to `v1.8.0`) that logged raw statusbar payloads (Feb 2026: 31 calls / 3 sessions; re-validated May 2026 on CC v2.1.157), plus [direct API billing reconciliation](FINDINGS.md):
 
 1. **No double-counting.** Energy applies separate constants to four non-overlapping token types: fresh (uncached) input, cache reads, cache creation, and output. Fresh input is derived per call as `total_input − cache_read − cache_creation` (≈ `current_usage.input_tokens`).
 2. **Thinking visibility is version-dependent.** In the February 2026 captures, the statusbar
@@ -651,16 +380,16 @@ These claims are supported by a [validation harness](analyze_tokens.py) that log
    thinking in `usage.output_tokens`. This was a dated observation, not a universal multiplier or
    rule: on Claude Code v2.1.226, deduplicated transcript output was within 1% of statusline
    output for a full observed day.
-3. **Cache metrics are accurate.** Per-call `cache_read_input_tokens` and `cache_creation_input_tokens` match API billing to the token across 4 direct API test calls, and are stable within a call (the monitor sums them once per call).
+3. **Cache metrics are accurate.** Per-call `cache_read_input_tokens` and `cache_creation_input_tokens` match API billing to the token across 4 direct API test calls, and are stable within a call (the old monitor summed them once per call).
 4. **Most prefill work shows up as cache creation.** In a heavily-cached workload, truly-fresh input is tiny (~1% of energy); the bulk of prefill work is `cache_creation`. This is why `E_CW` is treated as roughly prefill-cost.
 
-> ⚠️ **Schema change (CC v2.1.122):** `total_input_tokens`/`total_output_tokens` became *current-context snapshots* rather than cumulative session counters. Builds of this monitor before the 2026-05 fix mis-counted input (≈53× over) and output (under) as a result. See [docs/energy-constants.md](docs/energy-constants.md#2026-05-30-audit-update) for the corrected accounting and re-validation.
+> ⚠️ **Schema change (CC v2.1.122):** `total_input_tokens`/`total_output_tokens` became *current-context snapshots* rather than cumulative session counters. Builds of the old monitor before the 2026-05 fix mis-counted input (≈53× over) and output (under) as a result. See [docs/energy-constants.md](docs/energy-constants.md#2026-05-30-audit-update) for the corrected accounting and re-validation.
 
-Full evidence in [FINDINGS.md](FINDINGS.md). To collect your own validation data, set `ENERGY_DEBUG=1` as an env var in the statusline command, then run `python3 analyze_tokens.py` after a session.
+Full evidence in [FINDINGS.md](FINDINGS.md).
 
 ### Energy estimate claims (order-of-magnitude proxy)
 
-The energy numbers shown in the statusbar are **order-of-magnitude estimates, not measurements**. They use per-token energy constants derived from published research and refined via adversarial debate (see [methodology](#energy-estimation-methodology) below), applied to each token type:
+The energy numbers shown by TokenAtlas (the energy card, `tokenatlas insights` and the statusline) are **order-of-magnitude estimates, not measurements**. They use per-token energy constants derived from published research and refined via adversarial debate (see [methodology](#energy-estimation-methodology) below), applied to each token type:
 
 ```
 Energy = (fresh_input × 0.39) + (output × 1.40) + (cache_read × 0.015) + (cache_write × 0.49)  Wh per 1k tokens
@@ -668,11 +397,11 @@ Energy = (fresh_input × 0.39) + (output × 1.40) + (cache_read × 0.015) + (cac
 
 The display snaps to order-of-magnitude steps (1, 2, 5, 10, 20, 50, ...) because the real uncertainty is at least ±3x in each direction. This is intentionally coarse — it reflects genuine uncertainty, not imprecision in the token counting.
 
-**Which token type dominates energy depends heavily on the workload.** For long interactive sessions (e.g. a Feb 2026 Opus month, ~757M tokens, ~48 kWh mid) **output** dominated (~46% of energy from ~3% of tokens, since decode is ~3.6x more expensive per token than parallel prefill). For many short automated/headless sessions (the more recent pattern) **cache creation** dominates (~34–40%), because each session writes a fresh cache that is read few times before expiring. Don't assume one fixed breakdown — the statusline reflects whatever mix you actually run.
+**Which token type dominates energy depends heavily on the workload.** For long interactive sessions (e.g. a Feb 2026 Opus month, ~757M tokens, ~48 kWh mid) **output** dominated (~46% of energy from ~3% of tokens, since decode is ~3.6x more expensive per token than parallel prefill). For many short automated/headless sessions (the more recent pattern) **cache creation** dominates (~34–40%), because each session writes a fresh cache that is read few times before expiring. Don't assume one fixed breakdown — your own mix is what the numbers reflect.
 
 ### What the energy estimate does NOT include
 
-- **Full datacenter overhead.** The estimates cover GPU/accelerator compute only — not cooling, networking, CPU/RAM, storage, idle power, or PUE. Google reported a [2.4x multiplier](https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference) from chip-active to full-stack for Gemini queries. The real operational energy is likely 1.5–3x higher than what this script shows.
+- **Full datacenter overhead.** The estimates cover GPU/accelerator compute only — not cooling, networking, CPU/RAM, storage, idle power, or PUE. Google reported a [2.4x multiplier](https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference) from chip-active to full-stack for Gemini queries. The real operational energy is likely 1.5–3x higher than what TokenAtlas shows.
 - **Training energy.** Training a frontier model costs tens of gigawatt-hours, but that's a one-time cost amortized across millions of users.
 - **Embodied energy.** Manufacturing GPUs, building datacenters, networking infrastructure.
 - **Your own hardware.** Your laptop and monitor also consume energy while you wait for responses.
@@ -682,7 +411,7 @@ The display snaps to order-of-magnitude steps (1, 2, 5, 10, 20, 50, ...) because
 1. **Pricing ≠ energy.** Anthropic's pricing ratios were the original basis for relative energy cost between token types. We've since revised the output and cache read constants using physics-derived cross-checks (FLOP-based estimates, AI Energy Score benchmarks, Google's measured per-query energy). The fresh input and cache write constants still inherit from pricing. Pricing reflects margin, competitive positioning, and demand management — not just energy.
 
 2. **Per-model constants are approximate.** The current implementation uses rough order-of-magnitude
-   weights — Haiku ×0.3, Sonnet ×0.6, Opus ×1.0 — as a model for this monitor, based on the
+   weights — Haiku ×0.3, Sonnet ×0.6, Opus ×1.0 — as a model for TokenAtlas, based on the
    input-price ratio (1:3:5) discounted for sub-linear parameter-to-energy scaling. These are
    project assumptions, not universal energy multipliers or measurements. Anthropic discloses no
    parameter counts. (Earlier versions used the same constant for all three tiers.)
@@ -717,7 +446,7 @@ The display snaps to order-of-magnitude steps (1, 2, 5, 10, 20, 50, ...) because
 
 ### The problem
 
-**No one outside Anthropic knows the actual energy per token for Claude models.** There are no published measurements. Rather than pretending to have precise numbers, the script shows a range with ~10x total uncertainty.
+**No one outside Anthropic knows the actual energy per token for Claude models.** There are no published measurements. Rather than pretending to have precise numbers, TokenAtlas shows a range with ~10x total uncertainty.
 
 ### Mid estimates
 
@@ -788,47 +517,32 @@ A typical day of AI-assisted coding likely falls in the 1–5 kWh range (mid est
 
 | Feature | macOS | Linux | Windows/WSL |
 |---------|-------|-------|-------------|
-| Token tracking | Yes | Yes | Yes |
-| Energy estimates | Yes | Yes | Yes |
-| Daily history | Yes | Yes | Yes |
-| Prompt cache tracking | Yes | Yes | Yes |
-| Durable history and TokenAtlas | Yes | Yes | Yes** |
-| API quota display | Yes | Yes* | Yes* |
+| Token tracking and energy estimates | Yes | Yes | Yes* |
+| Durable history, report and statusline | Yes | Yes | Yes* |
+| Quota in the statusline (`rate_limits` payload field, Claude Code v2.1.80+, Pro/Max) | Yes | Yes | Yes |
 
-\* Quota now comes primarily from the statusline payload's `rate_limits` fields (Claude Code v2.1.80+, Pro/Max), which work on every platform with no API call. The legacy fallback reads the OAuth token from the macOS Keychain via the `security` command and is macOS-only; on Linux/Windows it's simply skipped. So if your build provides `rate_limits`, quota shows everywhere; otherwise it's macOS-only.
-
-\** The packaged CLI installs `tzdata` on native Windows so named IANA timezones such as
+\* The packaged CLI installs `tzdata` on native Windows so named IANA timezones such as
 `Europe/Stockholm` remain available. WSL normally uses the distribution's timezone database.
-
-**Note:** The fallback quota path uses an **undocumented** Anthropic beta API endpoint (`/api/oauth/usage` with `anthropic-beta: oauth-2025-04-20`), which may change or disappear without notice. The token and energy features do not depend on it.
 
 ## Dependencies
 
-The statusline script uses only the Python 3 standard library (`json`, `os`, `sys`, `subprocess`,
-`time`, `fcntl`, `pathlib`, `datetime`). The packaged history CLI is also standard-library-only on
-macOS, Linux, and WSL; native Windows installs the small `tzdata` package for named timezones.
-
-**`fcntl` note:** The file locking uses `fcntl.flock`, which is available on macOS and Linux. On Windows (outside WSL), this would need to be replaced with an alternative locking mechanism.
+TokenAtlas uses only the Python 3 standard library. It is standard-library-only on macOS, Linux, and WSL; native
+Windows installs the small `tzdata` package for named timezones.
 
 ## Security
 
-- The OAuth token is read from macOS Keychain and sent only to `api.anthropic.com`. It is never written to disk.
 - On POSIX systems, data files are created with `0600` permissions (owner read/write only). Native
   Windows uses the current user profile's filesystem ACLs because POSIX owner/mode checks are unavailable.
-- The script makes no network calls other than the optional quota fetch to Anthropic.
+- TokenAtlas makes no network calls, uses no credentials and reads no OAuth tokens. Only `tokenatlas collect --remote` uses ssh, to hosts you name.
 - No telemetry, no third-party services, no analytics.
-
-**Risk:** If someone modifies `~/.claude/statusline.py`, they get code execution in your user context on every Claude Code update. Same threat model as a shell alias or git hook. Keep the file owner-only writable.
 
 ## Token counting: validated semantics
 
-We built a [validation harness](analyze_tokens.py) that logs raw statusbar payloads and analyzes token-counting behavior across API calls (Feb 2026: 31 calls / 3 sessions; re-validated May 2026 on CC v2.1.157). Key findings:
+We built a validation harness (`analyze_tokens.py`, retired; in git history up to `v1.8.0`) that logged raw statusbar payloads and analyzes token-counting behavior across API calls (Feb 2026: 31 calls / 3 sessions; re-validated May 2026 on CC v2.1.157). Key findings:
 
 - **`total_input_tokens` = `input + cache_creation + cache_read` of the most recent response** (current-context, *not* cumulative, since CC v2.1.122). Fresh (uncached) input is recovered as `total_input − cache_read − cache_creation`.
-- **`total_output_tokens` = the most recent response's output** (per-call, not cumulative since v2.1.122). The February 2026 captures showed a roughly 3x statusbar-to-JSONL output ratio, but that ratio and the associated thinking-token interpretation are version/date-specific; v2.1.226 matched within 1% for a full observed day after requestId deduplication. The monitor accumulates `current_usage.output_tokens` per call.
+- **`total_output_tokens` = the most recent response's output** (per-call, not cumulative since v2.1.122). The February 2026 captures showed a roughly 3x statusbar-to-JSONL output ratio, but that ratio and the associated thinking-token interpretation are version/date-specific; v2.1.226 matched within 1% for a full observed day after requestId deduplication. The old monitor accumulated `current_usage.output_tokens` per call.
 - **Cache fields are stable within a call** and summed once per detected call boundary; no double-counting across the four token types.
-
-To collect your own validation data, set `ENERGY_DEBUG=1` as an env var in the statusline command, then run `python3 analyze_tokens.py` after a session.
 
 Full investigation details in [FINDINGS.md](FINDINGS.md).
 
@@ -893,7 +607,7 @@ quota, wall time or quality is inferred. Source coverage
 is separate from arithmetic completeness. Collector revisions now invalidate file checkpoints so
 existing retained source files are reparsed after parser fixes; lost source files cannot be recovered.
 
-Checks: `python3 -m unittest discover -v` and `python3 test_interactive_export.py`. The release suite
+Checks: `python3 -m unittest discover -v`. The release suite
 also builds and installs a wheel in an isolated environment. Optional local browser
 check: `PLAYWRIGHT_MODULE=/path/to/@playwright/test node test_report_browser.cjs /absolute/report.html`.
 Use an existing Playwright installation and its bundled browser; no browser dependency is installed

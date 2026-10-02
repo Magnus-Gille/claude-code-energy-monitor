@@ -1,22 +1,12 @@
 #!/usr/bin/env bash
-# Pull energy monitoring data from remote machines to this machine.
+# Pull the usage history of remote machines to this machine.
 # Normally run through `tokenatlas collect --remote tag:host`; by hand or cron: */30 * * * * /path/to/remote_sync.sh
 #
 # Requires: SSH access to each remote host (see REMOTE_HOSTS below).
 #
-# Each remote machine produces, locally on itself:
-#   ~/.claude/pi_journal.jsonl + pi_daily_rollup.jsonl                 (headless sessions, pi_scanner.py)
-#   ~/.claude/interactive_journal_raw.jsonl + interactive_rollup_raw.jsonl  (interactive sessions, interactive_export.py)
-# This script pulls all four down, one local copy per machine, named
-# <tag>_journal.jsonl / <tag>_daily_rollup.jsonl / <tag>_interactive_journal.jsonl /
-# <tag>_interactive_daily_rollup.jsonl so multiple machines don't overwrite each
-# other. advisor.py/stepcount.py merge all of them by globbing *_journal.jsonl /
-# *_daily_rollup.jsonl — no further code change needed to add a machine here.
-# When tokenatlas (or the deprecated energy-monitor) is installed on a remote it also snapshots its history DB, which is
-# copied to ~/.local/state/tokenatlas/remote/<tag>.sqlite3 and merged with `tokenatlas import`
+# Each remote machine that has tokenatlas (or the deprecated energy-monitor) installed snapshots its history DB,
+# which is copied to ~/.local/state/tokenatlas/remote/<tag>.sqlite3 and merged with `tokenatlas import`
 # (see docs/remote-machines.md). Hosts without it print "history: not installed on <tag>".
-# A remote with no headless scanner (or no interactive use) just reports "not found"
-# for the files it doesn't produce.
 #
 # This same script runs on multiple machines with different REMOTE_HOSTS, so the
 # data flows as a mesh rather than only into one hub. Override the default host
@@ -29,7 +19,7 @@
 # the sync without touching your real history.
 
 # Bounded remote calls (a stalled host must never hang the run):
-#   TOKENATLAS_SSH_OPTS     options for every ssh/scp/rsync-ssh call (default below)
+#   TOKENATLAS_SSH_OPTS     options for every ssh/scp call (default below)
 #   TOKENATLAS_HOST_TIMEOUT overall seconds per host (default 300); a host over the limit is killed (with its
 #                           children) and reported as "<host>: ERROR (timeout after Ns)", then the next host runs.
 #                           The script then exits 1 once it has finished the remaining hosts.
@@ -38,8 +28,6 @@ set -euo pipefail
 
 # Cron has a minimal PATH, and pipx/venv installs link tokenatlas into ~/.local/bin.
 export PATH="$HOME/.local/bin:$PATH"
-
-DEST="$HOME/.claude"
 
 SSH_OPTS_STR="${TOKENATLAS_SSH_OPTS:--o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o BatchMode=yes}"
 read -ra SSH_OPTS <<< "$SSH_OPTS_STR"
@@ -61,48 +49,10 @@ else
     REMOTE_HOSTS=("${DEFAULT_REMOTE_HOSTS[@]}")
 fi
 
-# Tags become file names and hosts become ssh/scp/rsync arguments: accept only plain characters and never a
-# host that could be read as an option.  (rsync gets `--` too; ssh/scp get it before the host.)
+# Tags become file names and hosts become ssh/scp arguments: accept only plain characters and never a
+# host that could be read as an option.  (ssh/scp get `--` before the host.)
 valid_pair() {
     [[ "$1" =~ ^[A-Za-z0-9_-]+$ && "$2" =~ ^[A-Za-z0-9._@:-]+$ && "$2" != -* ]]
-}
-
-pull() {
-    local tag="$1" host="$2" remote_name="$3" local_name="$4" label="$5"
-    local rsync_err
-    local rc=0
-    rsync_err=$(rsync -az --timeout=60 -e "ssh $SSH_OPTS_STR" -- "$host:~/.claude/$remote_name" "$DEST/$local_name" 2>&1) || rc=$?
-    if [[ $rc -eq 0 ]]; then
-        echo "  $label: OK"
-        return 0
-    fi
-    # rsync exits 23 ("some files/attrs were not transferred") for a missing remote file, but also for permission
-    # denied, local write failures and more. It is benign only when every error line is either the final
-    # "rsync error:" summary or a sender-side "No such file or directory" naming the remote file we asked for;
-    # a local-destination ENOENT ([receiver] mkstemp/rename, ...) or anything else is a real failure.
-    if [[ $rc -eq 23 ]] && remote_missing_only "$rsync_err" "$remote_name"; then
-        echo "  $label: not found ($tag scanner may not have run yet)"
-    else
-        echo "  $label: ERROR (rsync exit $rc) — $rsync_err" >&2
-        return 1
-    fi
-}
-
-# 0 when rsync's stderr holds at least one "remote source missing" line and nothing else but the summary line
-# (GNU rsync) or openrsync's (macOS /usr/bin/rsync) "receiver has empty file list" warning that follows it.
-OPENRSYNC_EMPTY='^rsync\([0-9]+\): warning: receiver has empty file list: exiting$'
-remote_missing_only() {
-    local err="$1" name="$2" line seen=1
-    while IFS= read -r line; do
-        [[ -z "$line" || "$line" == "rsync error:"* || "$line" =~ $OPENRSYNC_EMPTY ]] && continue
-        if [[ "$line" == *"No such file or directory"* && "$line" == *"/.claude/$name"* &&
-              "$line" != *"[receiver]"* && "$line" != *"[generator]"* && "$line" != *mkstemp* && "$line" != *rename* ]]; then
-            seen=0
-        else
-            return 1
-        fi
-    done <<< "$err"
-    return "$seen"
 }
 
 # Merge the remote machine's history database (tokenatlas snapshot -> scp -> local import).
@@ -172,11 +122,7 @@ kill_tree() {
 # Every step still runs after a failure; the host returns 1 if any step had a real failure.
 sync_host() {
     local tag="$1" host="$2" fail=0
-    echo "Syncing energy data from $tag ($host)..."
-    pull "$tag" "$host" "pi_journal.jsonl" "${tag}_journal.jsonl" "journal" || fail=1
-    pull "$tag" "$host" "pi_daily_rollup.jsonl" "${tag}_daily_rollup.jsonl" "rollup" || fail=1
-    pull "$tag" "$host" "interactive_journal_raw.jsonl" "${tag}_interactive_journal.jsonl" "interactive journal" || fail=1
-    pull "$tag" "$host" "interactive_rollup_raw.jsonl" "${tag}_interactive_daily_rollup.jsonl" "interactive rollup" || fail=1
+    echo "Syncing history from $tag ($host)..."
     sync_history "$tag" "$host" || fail=1
     return "$fail"
 }

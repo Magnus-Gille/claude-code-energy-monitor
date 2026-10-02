@@ -5,9 +5,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from datetime import datetime, timezone
-from io import StringIO
 from pathlib import Path
 
 from tokenatlas import why
@@ -142,37 +140,6 @@ class OpenCodeAttributionTests(unittest.TestCase):
         self.assertEqual(record.reasoning, 3)
         self.assertEqual(record.total_tokens, 40)
         self.assertNotIn("PRIVATE", json.dumps(record.raw_usage))
-
-    def test_all_harnesses_report_survives_incompatible_opencode_database(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            for name in ("claude", "codex", "pi"):
-                (root / name).mkdir()
-            db = root / "opencode.db"
-            connection = sqlite3.connect(db)
-            connection.execute("CREATE TABLE unrelated (id INTEGER)")
-            connection.close()
-            output = StringIO()
-            with redirect_stdout(output):
-                status = why.main([
-                    "--json", "--claude-root", str(root / "claude"),
-                    "--codex-root", str(root / "codex"), "--pi-root", str(root / "pi"),
-                    "--opencode-db", str(db),
-                ])
-        report = json.loads(output.getvalue())
-        self.assertEqual(status, 0)
-        self.assertEqual(set(report["harnesses"]), {"claude", "codex", "pi"})
-        self.assertIn("OperationalError", report["errors"]["opencode"])
-
-    def test_explicit_opencode_report_fails_for_incompatible_database(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db = Path(tmp) / "opencode.db"
-            connection = sqlite3.connect(db)
-            connection.execute("CREATE TABLE unrelated (id INTEGER)")
-            connection.close()
-            with self.assertRaises(SystemExit) as raised:
-                why.main(["--harness", "opencode", "--opencode-db", str(db)])
-        self.assertEqual(raised.exception.code, 2)
 
 
 if __name__ == "__main__":

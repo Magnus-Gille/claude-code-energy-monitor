@@ -30,10 +30,10 @@ class Constants(unittest.TestCase):
         self.assertEqual(energy.TIERS, dict(haiku=0.3, sonnet=0.6, opus=1.0))
         self.assertEqual(energy.UNCERTAINTY, 3)
 
-    def test_same_tier_multipliers_as_the_legacy_constants(self):
-        import energy_constants as legacy
-        self.assertEqual(energy.TIERS, legacy.MODEL_MULTIPLIERS)
-        self.assertEqual(energy.PER_1K, dict(fresh_input=legacy.E_IN, output=legacy.E_OUT, cache_read=legacy.E_CACHE, cache_write=legacy.E_CW))
+    def test_same_tier_multipliers_as_the_documented_constants(self):
+        doc = (ROOT / 'docs/energy-constants.md').read_text(encoding='utf-8')
+        for tier, mult in energy.TIERS.items():
+            self.assertRegex(doc, rf'(?i){tier}[^\n]*\b{mult}\b', tier)
 
 
 class Arithmetic(unittest.TestCase):

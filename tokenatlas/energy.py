@@ -40,7 +40,7 @@ def bounds(mid):
 
 
 def snap(mwh):
-    """Nearest 1, 2, 5 or 10 times a power of ten (boundaries at log10 fractions 0.15, 0.5, 0.85 as in statusline.py); below 1 mWh unchanged."""
+    """Nearest 1, 2, 5 or 10 times a power of ten (boundaries at log10 fractions 0.15, 0.5, 0.85 as in the retired statusline.py); below 1 mWh unchanged."""
     if mwh < 1:
         return mwh
     decade = math.floor(math.log10(mwh))

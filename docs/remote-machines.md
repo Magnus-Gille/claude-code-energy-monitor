@@ -34,7 +34,7 @@ default database, set `ENERGY_MONITOR_DB=/path/to/test.sqlite3`; the local impor
 
 ## Bring it home
 
-`remote_sync.sh` does this per host after the JSONL pulls, when `command -v tokenatlas || command -v energy-monitor` succeeds
+`remote_sync.sh` does this per host, when `command -v tokenatlas || command -v energy-monitor` succeeds
 remotely (with `~/.local/bin` prepended to `PATH`): `tokenatlas snapshot` on the host (`energy-monitor snapshot` on a not-yet-upgraded remote), `scp` to `~/.local/state/tokenatlas/remote/<tag>.sqlite3`
 (directory mode 0700), then `tokenatlas import ... --label <tag>` locally. A host without it prints
 `history: not installed on <tag>` and the loop continues.
@@ -43,9 +43,8 @@ remotely (with `~/.local/bin` prepended to `PATH`): `tokenatlas snapshot` on the
 
 A stalled host must not block anything else, so every remote call is bounded:
 
-- `ssh` and `scp` get `-o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o BatchMode=yes`;
-  `rsync` gets the same options through `-e "ssh ..."` plus `--timeout=60`. Override the ssh options with
-  `TOKENATLAS_SSH_OPTS`.
+- `ssh` and `scp` get `-o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o BatchMode=yes`.
+  Override the ssh options with `TOKENATLAS_SSH_OPTS`.
 - Each host also has an overall limit, `TOKENATLAS_HOST_TIMEOUT` seconds (default 300). A host over the limit
   is killed with its child processes, reported as `<host>: ERROR (timeout after Ns)`, and the script moves
   on to the next host. It then exits 1, but returns promptly.
@@ -61,8 +60,10 @@ directory. A busy lock prints `collect: already running` and exits 0.
 
     */30 * * * * $HOME/.local/bin/tokenatlas collect --remote pi:myhost >> ~/Library/Logs/tokenatlas/collect.log 2>&1
 
-For launchd see "Keeping the report fresh" in the README. A missing remote file counts as benign only when rsync
-reports "No such file or directory" for the remote path it was asked to pull; a local write error is a failure.
+For launchd see "Keeping the report fresh" in the README.
+
+The sync moves only history snapshots. The older per-machine journal and rollup files (`pi_journal.jsonl` and the
+like, pulled with rsync) belonged to the retired checkout-only scripts and are no longer synced.
 
 By hand:
 

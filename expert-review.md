@@ -212,9 +212,9 @@ Specifically:
 
 | File | Purpose |
 |---|---|
-| [`statusline.py`](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/master/statusline.py) | Main statusline script (energy monitor) |
-| [`analyze_tokens.py`](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/master/analyze_tokens.py) | Validation harness for statusbar token semantics |
-| [`sum_jsonl.py`](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/master/sum_jsonl.py) | Independent JSONL parser with deduplication |
+| [`statusline.py`](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/v1.8.0/statusline.py) | Main statusline script (energy monitor) |
+| [`analyze_tokens.py`](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/v1.8.0/analyze_tokens.py) | Validation harness for statusbar token semantics |
+| [`sum_jsonl.py`](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/v1.8.0/sum_jsonl.py) | Independent JSONL parser with deduplication |
 | [`FINDINGS.md`](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/master/FINDINGS.md) | Full investigation write-up |
 | [`README.md`](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/master/README.md) | Project documentation with methodology |
 | [`energy-estimate-2026-02-20.md`](https://github.com/Magnus-Gille/claude-code-energy-monitor/blob/master/energy-estimate-2026-02-20.md) | Detailed energy calculation for one heavy day |

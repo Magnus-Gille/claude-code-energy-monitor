@@ -1,5 +1,7 @@
 # Usage Attribution Architecture
 
+> **Archived (2026-10-02).** This document predates TokenAtlas 1.9 and refers to the checkout scripts (`statusline.py`, `advisor.py`, `stepcount.py`, the `why.py` command and its statusline caches) that were retired in #63. They remain in git history up to tag `v1.8.0`; the packaged replacements are `tokenatlas statusline` and the energy card and fact. Kept as a record, not as current instructions.
+
 **Status:** proposal, not yet implemented
 **Date:** 2026-08-10
 **Scope:** answering "where did my tokens go?" across arbitrary machines, harnesses, and providers
