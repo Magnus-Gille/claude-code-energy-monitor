@@ -1,4 +1,7 @@
+import base64
+import gzip
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -26,6 +29,26 @@ class DemoTests(unittest.TestCase):
             self.assertRegex(overhead, r'(?m)^claude ')
             self.assertRegex(overhead, r'(?m)^codex ')
             self.assertFalse((out / 'overview.png').exists())
+
+    def test_demo_report_embeds_realistic_prompt_text_for_top_turns(self):
+        def build(seed):
+            with tempfile.TemporaryDirectory() as tmp:
+                proc = subprocess.run([sys.executable, str(ROOT / 'scripts/demo.py'), tmp, '--no-screens', '--seed', str(seed)],
+                                      capture_output=True, text=True, cwd=ROOT)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                page = (Path(tmp) / 'demo-report.html').read_text(encoding='utf-8')
+            match = re.search(r'<script id="report-data" type="application/octet-stream\+base64">([A-Za-z0-9+/=]*)</script>', page)
+            return json.loads(gzip.decompress(base64.b64decode(match.group(1))).decode('ascii'))
+        payload = build(7)
+        texts = [t for t in payload['prompt_texts'].values() if t]
+        self.assertEqual(len(texts), 10)
+        lorem = {'lorem', 'ipsum', 'dolor', 'consectetur', 'adipiscing', 'eiusmod', 'tempor', 'incididunt'}
+        for text in texts:
+            self.assertFalse(lorem & set(re.findall(r'[a-z]+', text.lower())), text)
+        for context in payload['prompt_context'].values():
+            self.assertTrue(context['title'] and context['cwd'] and context['final'], context)
+            self.assertFalse(lorem & set(re.findall(r'[a-z]+', context['final'].lower())), context['final'])
+        self.assertEqual(payload['prompt_texts'], build(7)['prompt_texts'])
 
 
 if __name__ == '__main__':
