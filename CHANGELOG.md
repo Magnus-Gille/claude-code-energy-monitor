@@ -6,7 +6,7 @@ All notable changes to this project are documented in this file. The project fol
 
 ### Fixed
 
-- Claude turns (#74): a `type: user` row with `isMeta: true` (skill bodies loaded by the Skill tool, `<local-command-caveat>` rows and other injected text) no longer starts a turn, so one real turn is no longer split into several and injected text no longer shows as the turn's prompt in `top --keep-text` or the turn context. Typed slash commands still count as user input. The Claude harness revision is bumped, so the next refresh re-reads Claude files once and corrects existing histories.
+- Claude turns (#74): a `type: user` row with `isMeta: true` (skill bodies loaded by the Skill tool, `<local-command-caveat>` rows and other injected text) no longer starts a turn, so one real turn is no longer split into several and injected text no longer shows as the turn's prompt in `top --keep-text` or the turn context. Typed slash commands still count as user input. The Claude harness revision is bumped, so the next refresh re-reads Claude files once and corrects existing histories. Compaction summaries (`isCompactSummary`), interruption markers (`[Request interrupted by user…]`) and rows that hold only `<system-reminder>` blocks are not user inputs either.
 
 ## [1.9.0] - 2026-10-02
 

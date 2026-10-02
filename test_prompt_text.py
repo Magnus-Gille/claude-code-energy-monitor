@@ -120,6 +120,20 @@ class ClaudeIsMetaTests(TmpCase):
         self.assertEqual(extract_prompt("claude", str(path), "s1", "u2"), "/model")
 
 
+    def test_compaction_interruption_and_reminder_rows_do_not_start_turns(self):
+        rows = [claude_user("u1", "real ask"), claude_asst("a1"),
+                claude_user("c1", "This session is being continued from a previous conversation.", isCompactSummary=True), claude_asst("a2"),
+                claude_user("i1", "[Request interrupted by user for tool use]"), claude_asst("a3"),
+                claude_user("i2", [{"type": "text", "text": "[Request interrupted by user]"}]), claude_asst("a4"),
+                claude_user("r1", "<system-reminder>context</system-reminder>"), claude_asst("a5"),
+                claude_user("u2", "<system-reminder>context</system-reminder> and a real question"), claude_asst("a6")]
+        path = write_jsonl(self.tmp / "s.jsonl", rows)
+        records = why.collect_claude(self.tmp, START, END, paths=[path])
+        self.assertEqual({r.call_id: r.turn_id for r in records},
+                         {"ra1": "u1", "ra2": "u1", "ra3": "u1", "ra4": "u1", "ra5": "u1", "ra6": "u2"})
+        for injected in ("c1", "i1", "i2", "r1"):
+            self.assertIsNone(extract_prompt("claude", str(path), "s1", injected))
+
 def codex_meta():
     return {"timestamp": TS, "type": "session_meta", "payload": {"id": "cs1", "model_provider": "openai", "cwd": "/w"}}
 
