@@ -45,6 +45,25 @@ def _open_in_browser(path):
     if not opened:raise ValueError(where)
 
 
+def _ago(seconds):
+    seconds=max(0,int(seconds))
+    for unit,size in (('day',86400),('h',3600),('min',60)):
+        if seconds>=size:
+            n=seconds//size
+            return f'{n} {unit}'+('s' if unit=='day' and n!=1 else '')
+    return f'{seconds} s'
+
+
+def _show(path):
+    """Open an existing report as it is: the history is not opened, nothing is refreshed or rebuilt."""
+    if not path.is_file():raise ValueError(f'no report at {path.absolute()}; build one with: tokenatlas open')
+    age=max(0.0,time.time()-path.stat().st_mtime)  # a file dated in the future reads as just built
+    _open_in_browser(path)
+    print(f'Report: {path.absolute()} (built {_ago(age)} ago; tokenatlas open refreshes it)',file=sys.stderr)
+    print(json.dumps({'html':str(path.absolute()),'shown':True,'age_seconds':int(age)},indent=2,sort_keys=True))
+    return 0
+
+
 def _output_path(path,db):
     """Expanded HTML path; refuses the history database itself, also through a hard or symbolic link."""
     path,db=Path(path).expanduser(),Path(db).expanduser()
@@ -226,6 +245,8 @@ def main(argv=None):
     opener.add_argument('--shared',action='store_true',help='Pseudonymize the report instead of keeping project labels.')
     opener.add_argument('--lang',choices=('auto','sv','en'),default='auto',help='Report language; auto follows the browser (Swedish for sv, otherwise English).')
     opener.add_argument('--no-refresh',action='store_true',help='Use the saved history as it is.')
+    shower=commands.add_parser('show',help='Open the latest report in the browser at once: no refresh, no rebuild (tokenatlas open refreshes it).')
+    shower.add_argument('--html',type=Path,help=f'Report path; default: report.html next to the database ({_state_base()/"tokenatlas"/"report.html"}).')
     snapshot=commands.add_parser('snapshot',help='Write a consistent private copy of the history database.')
     snapshot.add_argument('out',type=Path)
     importer=commands.add_parser('import',help="Merge another machine's snapshot into this database.")
@@ -294,6 +315,9 @@ def main(argv=None):
     commands.add_parser('statusline',help='Claude Code statusline: one line from the stdin payload and the totals cache refresh writes (no network); --setup prints the settings snippet.').add_argument('--setup',action='store_true')
     commands.add_parser('doctor',help='Show source availability, import errors and known coverage limits.')
     args=parser.parse_args(argv)
+    if args.command=='show':  # before default_db(): show never touches the history, not even its one-time directory move
+        try:return _show(Path(args.html or (args.db.expanduser().parent if args.db else _state_base()/'tokenatlas')/'report.html').expanduser())
+        except (OSError,ValueError) as exc:parser.exit(2,f'usage: {exc}\n')
     if args.db is None:args.db=default_db()
     try:
         start=end=None

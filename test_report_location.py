@@ -1,5 +1,7 @@
 """Where the report is saved is visible (#64): a stderr line from report/open, the private report's footer, and --help; never in a shared report."""
 import json
+import contextlib
+import io
 import os
 import shlex
 import shutil
@@ -29,7 +31,7 @@ class ReportLocation(unittest.TestCase):
         self.db = self.tmp / 'state' / 'history.sqlite3'
         self.env = {k: v for k, v in os.environ.items() if k not in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'PI_CODING_AGENT_DIR', 'XDG_DATA_HOME')}
         self.env.update(HOME=str(self.tmp / 'home'), USERPROFILE=str(self.tmp / 'home'), XDG_STATE_HOME=str(self.tmp / 'state-home'),
-                        BROWSER='true', PYTHONPATH=str(ROOT))
+                        PYTHONPATH=str(ROOT))
         self.run_cli('refresh', '--harness', 'claude', '--root', str(logs))
 
     def run_cli(self, *args):
@@ -59,9 +61,9 @@ class ReportLocation(unittest.TestCase):
 
     def test_a_moved_copy_is_rebuilt_with_its_own_path(self):
         first, moved = self.tmp / 'first.html', self.tmp / 'moved.html'
-        self.run_cli('open', '--html', str(first), '--no-refresh')
+        self.open_cli('open', '--html', str(first), '--no-refresh')
         shutil.copy2(first, moved)
-        self.run_cli('open', '--html', str(moved), '--no-refresh')
+        self.open_cli('open', '--html', str(moved), '--no-refresh')
         self.assertEqual(payload(moved.read_text(encoding='utf-8'))['saved_at'], str(moved))
 
     @unittest.skipIf(os.name == 'nt', 'symlinks need privileges on Windows')
@@ -80,6 +82,71 @@ class ReportLocation(unittest.TestCase):
                          r'tokenatlas open --html "C:\my reports\r.html"')
         self.assertEqual(cli._shell_command(['tokenatlas', 'open', '--html', '/a&b/r.html'], windows=False), "tokenatlas open --html '/a&b/r.html'")
 
+    def open_cli(self, *args):
+        proc, browser = self.run_main('--db', str(self.db), *args)  # as run_cli: always this test's database
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        browser.assert_called_once()
+        return proc
+
+    def run_main(self, *args, opened=True):
+        """The CLI in-process with webbrowser.open replaced, so no test ever starts a real browser (BROWSER=true is not portable)."""
+        from unittest import mock
+        from tokenatlas import __main__ as cli
+        out, err, code = io.StringIO(), io.StringIO(), 0
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(cli.webbrowser, 'open', return_value=opened) as browser, \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = cli.main(list(args))
+            except SystemExit as exc:
+                code = exc.code
+        return subprocess.CompletedProcess(args, code, out.getvalue(), err.getvalue()), browser
+
+    def test_show_opens_the_report_as_it_is_without_the_history(self):
+        out = self.tmp / 'shown.html'
+        self.run_cli('report', '--html', str(out), '--private')
+        before = (out.read_bytes(), out.stat().st_mtime_ns)
+        missing_db = self.tmp / 'no-such-dir' / 'history.sqlite3'  # show never opens or creates the history
+        proc, browser = self.run_main('--db', str(missing_db), 'show', '--html', str(out))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        browser.assert_called_once()
+        self.assertEqual(json.loads(proc.stdout)['html'], str(out))
+        self.assertIn(f'Report: {out} (built ', proc.stderr)
+        self.assertIn('tokenatlas open refreshes it', proc.stderr)
+        self.assertEqual((out.read_bytes(), out.stat().st_mtime_ns), before)
+        self.assertFalse(missing_db.parent.exists())
+
+    def test_show_never_moves_the_legacy_data_directory(self):
+        legacy = self.tmp / 'state-home' / 'agentmon'
+        legacy.mkdir(parents=True)
+        out = self.tmp / 'r.html'
+        out.write_text('<!doctype html>', encoding='utf-8')
+        proc, _ = self.run_main('show', '--html', str(out))  # no --db: show must not run default_db()'s one-time move
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(legacy.is_dir())
+        self.assertFalse((self.tmp / 'state-home' / 'tokenatlas').exists())
+
+    def test_show_defaults_to_the_report_next_to_the_database(self):
+        self.run_cli('report', '--html', str(self.db.parent / 'report.html'), '--private')
+        proc, _ = self.run_main('--db', str(self.db), 'show')
+        self.assertEqual(json.loads(proc.stdout)['html'], str(self.db.parent / 'report.html'))
+
+    def test_show_without_a_report_says_how_to_build_one(self):
+        proc, browser = self.run_main('--db', str(self.db), 'show', '--html', str(self.tmp / 'nothing.html'))
+        browser.assert_not_called()
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('tokenatlas open', proc.stderr)
+
+    def test_show_reports_a_browser_that_cannot_open(self):
+        from unittest import mock
+        from tokenatlas import __main__ as cli
+        out = self.tmp / 'r.html'
+        out.write_text('<!doctype html>', encoding='utf-8')
+        with mock.patch.object(cli.webbrowser, 'open', return_value=False) as opened:  # in-process: no real browser is ever started
+            with self.assertRaises(ValueError) as cm:
+                cli._show(out)
+        opened.assert_called_once()
+        self.assertIn(str(out), str(cm.exception))
+
     def test_skipped_report_still_says_where_it_is(self):
         out = self.tmp / 'r.html'
         self.run_cli('report', '--html', str(out), '--private', '--if-changed')
@@ -88,17 +155,17 @@ class ReportLocation(unittest.TestCase):
 
     def test_open_prints_the_path_and_the_exact_reopen_command(self):
         out = self.tmp / 'open.html'
-        proc = self.run_cli('open', '--html', str(out), '--no-refresh')
+        proc = self.open_cli('open', '--html', str(out), '--no-refresh')
         cmd = JOIN(['tokenatlas', '--db', str(self.db), 'open', '--html', str(out)])
         self.assertIn(f'Report: {out} (reopen any time with: {cmd})', proc.stderr)
         data = payload(out.read_text(encoding='utf-8'))
         self.assertEqual((data['saved_at'], data['reopen']), (str(out), cmd))
         default = self.db.parent / 'report.html'
-        proc = self.run_cli('open', '--no-refresh')
+        proc = self.open_cli('open', '--no-refresh')
         self.assertIn(f"reopen any time with: {JOIN(['tokenatlas', '--db', str(self.db), 'open'])})", proc.stderr)
         self.assertEqual(payload(default.read_text(encoding='utf-8'))['saved_at'], str(default))
         shared = self.tmp / 'open-shared.html'
-        self.run_cli('open', '--html', str(shared), '--no-refresh', '--shared')
+        self.open_cli('open', '--html', str(shared), '--no-refresh', '--shared')
         self.assertNotIn(str(self.tmp), shared.read_text(encoding='utf-8'))
 
     def test_help_shows_the_resolved_default(self):
