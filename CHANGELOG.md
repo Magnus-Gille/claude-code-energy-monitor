@@ -9,6 +9,10 @@ All notable changes to this project are documented in this file. The project fol
 - Report: the costliest turns come right after the totals, then cost facts and energy; the section numbers follow the new order (#73).
 - Demo (`scripts/demo.py`): realistic, clearly fictional developer prompts with titles, branches, follow-ups and final messages instead of lorem ipsum, and the demo stores the top-turn text and context, so the demo report shows them (#73).
 
+### Fixed
+
+- Claude turns (#74): a `type: user` row with `isMeta: true` (skill bodies loaded by the Skill tool, `<local-command-caveat>` rows and other injected text) no longer starts a turn, so one real turn is no longer split into several and injected text no longer shows as the turn's prompt in `top --keep-text` or the turn context. Typed slash commands still count as user input. The Claude harness revision is bumped, so the next refresh re-reads Claude files once and corrects existing histories. Compaction summaries (`isCompactSummary`), interruption markers (`[Request interrupted by user…]`) and rows that hold only `<system-reminder>` blocks are not user inputs either.
+
 ## [1.9.0] - 2026-10-02
 
 ### Added

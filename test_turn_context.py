@@ -99,6 +99,25 @@ def call(name, **payload):
     return {"timestamp": TS, "type": "response_item", "payload": {"type": "function_call" if "arguments" in payload else "custom_tool_call", "name": name, **payload}}
 
 
+class ClaudeIsMetaTests(TmpCase):
+    def test_meta_rows_are_not_inputs_and_do_not_end_the_turn(self):
+        path = write_jsonl(self.tmp / "s1.jsonl", [
+            claude_row("u1", "user", "real ask"),
+            claude_row("a1", "assistant", [use("Skill", skill="x")]),
+            claude_row("m1", "user", "Base directory for this skill: /s/x\n\nbody", isMeta=True),
+            claude_row("m2", "user", "<local-command-caveat>Caveat</local-command-caveat>", isMeta=True),
+            claude_row("m3", "user", [{"type": "text", "text": "injected"}], isMeta=True),
+            claude_row("a2", "assistant", [{"type": "text", "text": "done"}]),
+            claude_row("u2", "user", "<command-name>/model</command-name>"),
+            claude_row("a3", "assistant", [{"type": "text", "text": "other"}]),
+        ])
+        got = turn_context("claude", [str(path)], "s1", "u1")
+        self.assertEqual((got["inputs"]["count"], got["inputs"]["first"]), (1, "real ask"))
+        self.assertEqual(got["final"], "done")
+        self.assertEqual(turn_context("claude", [str(path)], "s1", "m1"), UNKNOWN)
+        self.assertEqual(turn_context("claude", [str(path)], "s1", "u2")["inputs"]["first"], "/model")
+
+
 class CodexTests(TmpCase):
     def fixture(self):
         meta = codex_meta()

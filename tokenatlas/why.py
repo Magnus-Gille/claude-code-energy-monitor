@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import stat
 from dataclasses import dataclass, field
@@ -417,11 +418,34 @@ def _explicit_turn_id(row: dict, message: dict) -> str | None:
     ) or _first_text(message, "turn_id", "turnId")
 
 
+_SYSTEM_REMINDERS_ONLY = re.compile(r"\s*(?:<system-reminder>.*?</system-reminder>\s*)+", re.S)
+
+
+def _claude_injected_only(content) -> bool:
+    """True when a Claude user row's text is only an interruption marker or system reminders: Claude Code wrote it, the user did not."""
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, list):
+        if any(isinstance(i, dict) and i.get("type") in {"tool_result", "tool_use_result", "image"} for i in content):
+            return False
+        texts = [i.get("text", "") for i in content if isinstance(i, dict) and i.get("type") == "text"]
+        if not texts:
+            return False
+    else:
+        return False
+    joined = "\n".join(t for t in texts if isinstance(t, str)).strip()
+    return bool(joined) and (joined.startswith("[Request interrupted by user") or bool(_SYSTEM_REMINDERS_ONLY.fullmatch(joined)))
+
+
 def _is_genuine_user_row(row: dict) -> bool:
     if row.get("type") not in {"user", "user_message"} and _mapping(row.get("message")).get("role") != "user":
         return False
+    if row.get("type") == "user" and (row.get("isMeta") is True or row.get("isCompactSummary") is True):
+        return False  # Claude Code injected text (skill bodies, local-command caveats, compaction summaries), not typed by the user
     message = _mapping(row.get("message"))
     content = message.get("content", row.get("content"))
+    if row.get("type") == "user" and _claude_injected_only(content):
+        return False
     if isinstance(content, str):
         return bool(content)
     if not isinstance(content, list):
