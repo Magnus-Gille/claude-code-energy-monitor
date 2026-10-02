@@ -329,10 +329,21 @@ class CodexServiceTierTests(unittest.TestCase):
         std, fast = {"service_tier": "standard"}, {"service_tier": "fast"}
         self.assertEqual(self._collect(rows), [std, std, fast, fast, std])
 
-    def test_missing_value_keeps_the_current_tier(self):
+    def test_a_snapshot_without_a_tier_resets_to_not_recorded(self):
+        # Each thread_settings_applied row is a full snapshot: a later one without service_tier must not keep Fast.
         rows = [_tier("2026-09-03T09:00:00Z", "priority"), self._call(1, 1),
                 _tier("2026-09-03T09:02:00Z"), self._call(3, 2)]
-        self.assertEqual(self._collect(rows), [{"service_tier": "fast"}] * 2)
+        self.assertEqual(self._collect(rows), [{"service_tier": "fast"}, None])
+
+    def test_an_unknown_tier_is_kept_and_left_unpriced(self):
+        rows = [_tier("2026-09-03T09:00:00Z", "priority"), self._call(1, 1),
+                _tier("2026-09-03T09:02:00Z", "Turbo"), self._call(3, 2)]
+        tariffs = self._collect(rows)
+        self.assertEqual(tariffs, [{"service_tier": "fast"}, {"service_tier": "turbo"}])
+        obs = {"provider": "openai", "model": "gpt-5.5", "tariff": tariffs[1], "complete": True,
+               "tokens": {"fresh_input": 1000, "cache_read": 0, "cache_write": 0, "output": 10, "reasoning": 0}}
+        from tokenatlas.pricing import load_prices, price_observation
+        self.assertIsNone(price_observation(obs, load_prices())["cost"])
 
     def test_exec_and_subagent_rollouts_use_their_own_events(self):
         subagent = {"subagent": {"thread_spawn": {"parent_thread_id": "p", "agent_nickname": "Sagan"}}}

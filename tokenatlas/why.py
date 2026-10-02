@@ -415,10 +415,12 @@ _CODEX_TIERS = {"priority": "fast", "fast": "fast", "flex": "flex", "default": "
 
 
 def _codex_tariff(settings: object) -> dict | None:
-    """Tariff named by a thread_settings_applied row; Codex's "default" is explicit standard, a missing or unknown value says nothing."""
+    """Tariff named by a thread_settings_applied row, a full settings snapshot: Codex's "default" is explicit standard, a missing tier
+    is not recorded (None, never the previous tier) and an unknown one is kept as is, so pricing leaves it unpriced instead of guessing."""
     tier = _meta_text(_mapping(settings).get("service_tier"), limit=64)
-    mapped = _CODEX_TIERS.get(tier.lower()) if tier else None
-    return {"service_tier": mapped} if mapped else None
+    if not tier:
+        return None
+    return {"service_tier": _CODEX_TIERS.get(tier.lower(), tier.lower())}
 
 
 def _explicit_turn_id(row: dict, message: dict) -> str | None:
@@ -730,7 +732,7 @@ def collect_codex(
                 pending_turn_id = None
                 continue
             if row_type == "event_msg" and payload.get("type") == "thread_settings_applied":
-                tariff = _codex_tariff(payload.get("thread_settings")) or tariff
+                tariff = _codex_tariff(payload.get("thread_settings"))
                 continue
             explicit_turn = _meta_text(_codex_event_turn_id(row, payload))
             if explicit_turn:  # task_started, item_completed, token_usage_record, ... name their turn

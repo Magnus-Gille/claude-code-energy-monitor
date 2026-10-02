@@ -75,11 +75,14 @@ class HistoryTests(unittest.TestCase):
             history.HARNESS_REVISION['codex']=1
             old=History.fingerprint(source,harness='codex')
         self.assertNotEqual(old,History.fingerprint(source,harness='codex'))
-        with patch.dict(history.HARNESS_REVISION,clear=False):
+        # Revision 1 is the old collector, which never read the tier: the stored observation has no tariff.
+        with patch.dict(history.HARNESS_REVISION,clear=False),patch('tokenatlas.why._codex_tariff',return_value=None):
             history.HARNESS_REVISION['codex']=1
             with History(self.db) as h:
                 self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],0)
                 self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],1)
+                self.assertEqual([r['tariff'] for r in h.records()],[None])
+        # Revision 2 re-reads the unchanged file once and enriches the stored observation with the tier.
         with History(self.db) as h:
             self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],0)
             self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],1)
