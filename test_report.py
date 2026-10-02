@@ -333,6 +333,21 @@ class TopTurnsCardSize(unittest.TestCase):
         self.assertIn('function topPrompts(rows,n=10)', template)
 
 
+class SectionOrder(unittest.TestCase):
+    def test_turns_come_first_and_eyebrows_follow_the_visible_order(self):
+        root = Path(__file__).parent / 'tokenatlas'
+        template = (root / 'report_template.html').read_text(encoding='utf-8')
+        marks = ['<div class="kpis"', '<section id="prompts"', '<section id="cost-facts"', '<section id="energy"',
+                 'data-t="e1"', 'data-t="e2"', 'data-t="e3"', '<section id="sessions"', '<section id="coverage"']
+        positions = [template.index(mark) for mark in marks]
+        self.assertEqual(positions, sorted(positions))
+        texts = json.loads((root / 'report_i18n.json').read_text(encoding='utf-8'))
+        # Visible numbers follow the page order: turns, over time, distribution, cache, details, basis.
+        for lang in ('sv', 'en'):
+            for number, key in enumerate(('e4', 'e1', 'e2', 'e3', 'e5', 'e6'), 1):
+                self.assertTrue(texts[lang][key].startswith(f'{number:02d} / '), (lang, key, texts[lang][key]))
+
+
 class I18nPlurals(unittest.TestCase):
     def test_count_strings_have_singular_forms(self):
         import json, re
