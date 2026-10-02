@@ -44,6 +44,25 @@ class HistoryTests(unittest.TestCase):
         self.root=Path(self.tmp.name)
         self.db=self.root/'state/history.sqlite3'
 
+    def test_claude_revision_changes_fingerprint_and_forces_one_reread(self):
+        import tokenatlas.history as history
+        self.assertEqual(history.HARNESS_REVISION.get('claude'), 1)
+        source=self.root/'logs/a.jsonl';write_claude(source)
+        with patch.dict(history.HARNESS_REVISION,clear=False):
+            history.HARNESS_REVISION.pop('claude')
+            old=History.fingerprint(source,harness='claude')
+        new=History.fingerprint(source,harness='claude')
+        self.assertNotEqual(old,new)
+        self.assertEqual(History.fingerprint(source,harness='opencode'),History.fingerprint(source))
+        with patch.dict(history.HARNESS_REVISION,clear=False):
+            history.HARNESS_REVISION.pop('claude')
+            with History(self.db) as h:
+                self.assertEqual(h.refresh('claude',source.parent)['files_skipped'],0)
+                self.assertEqual(h.refresh('claude',source.parent)['files_skipped'],1)
+        with History(self.db) as h:
+            self.assertEqual(h.refresh('claude',source.parent)['files_skipped'],0)
+            self.assertEqual(h.refresh('claude',source.parent)['files_skipped'],1)
+
     def test_zero_or_empty_partial_usage_is_retained_as_unknown(self):
         for usage in ({'output_tokens': 0}, {}):
             with self.subTest(usage=usage):

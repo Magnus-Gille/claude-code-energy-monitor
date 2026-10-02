@@ -420,6 +420,8 @@ def _explicit_turn_id(row: dict, message: dict) -> str | None:
 def _is_genuine_user_row(row: dict) -> bool:
     if row.get("type") not in {"user", "user_message"} and _mapping(row.get("message")).get("role") != "user":
         return False
+    if row.get("type") == "user" and row.get("isMeta") is True:
+        return False  # Claude Code injected text (skill bodies, local-command caveats), not typed by the user
     message = _mapping(row.get("message"))
     content = message.get("content", row.get("content"))
     if isinstance(content, str):
