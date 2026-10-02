@@ -262,7 +262,7 @@ def claude_session(w, rng, key, sid, t0, n, model, subs=(), skill=None, gap=(40,
 SKILL_BODY = '---\nname: {name}\ndescription: demo skill\n---\n# {name}\n{text}'
 
 
-def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, skill=None, gap=(30, 150)):
+def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, skill=None, gap=(30, 150), turn_len=6):
     cwd = PROJECTS[key]
     script = w['script']
     exec_run = kind == 'exec'
@@ -287,8 +287,8 @@ def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, s
     for i in range(n):
         t += timedelta(seconds=rng.randint(*gap))
         model = models[min(i * len(models) // n, len(models) - 1)]
-        turn = f'turn-{sid}-{i // 6}'
-        if i % 6 == 0:
+        turn = f'turn-{sid}-{i // turn_len}'
+        if i % turn_len == 0:
             rows.append(row(t, 'event_msg', {'type': 'task_started', 'turn_id': turn}))
             rows.append(row(t, 'event_msg', {'type': 'user_message', 'message': script.prompt(key, sid)[0]}))
             if (follow := script.followup()) and n - i > 3:
@@ -316,7 +316,7 @@ def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, s
         rows.append(row(t, 'event_msg', {'type': 'token_count', 'info': {'last_token_usage': last,
                         'total_token_usage': {**total, 'total_tokens': total_tokens}}}, ordinal=ordinal))
         ctx += out
-        if i % 6 == 5 or i == n - 1:
+        if i % turn_len == turn_len - 1 or i == n - 1:
             rows.append(row(t, 'response_item', {'type': 'message', 'role': 'assistant', 'content': [
                 {'type': 'output_text', 'text': script.final()}]}))
             rows.append(row(t, 'event_msg', {'type': 'task_complete', 'turn_id': turn}))
@@ -328,7 +328,7 @@ def codex_rollout(w, rng, sid, key, t0, n, models, *, kind='tui', parent=None, s
 
 # ----- Pi and OpenCode -------------------------------------------------------------------------------------
 
-def pi_session(w, rng, sid, key, t0, n, provider, model):
+def pi_session(w, rng, sid, key, t0, n, provider, model, turn_len=6):
     cwd = PROJECTS[key]
     script = w['script']
     rows = [{'type': 'session', 'version': 3, 'id': sid, 'timestamp': iso(t0), 'cwd': cwd},
@@ -336,8 +336,8 @@ def pi_session(w, rng, sid, key, t0, n, provider, model):
     t, ctx = t0, 0
     for i in range(n):
         t += timedelta(seconds=rng.randint(30, 160))
-        if i % 6 == 0:
-            rows.append({'type': 'message', 'id': f'{sid}-u{i // 6}', 'timestamp': iso(t),
+        if i % turn_len == 0:
+            rows.append({'type': 'message', 'id': f'{sid}-u{i // turn_len}', 'timestamp': iso(t),
                          'message': {'role': 'user', 'content': [{'type': 'text', 'text': script.prompt(key, sid)[0]}]}})
             t += timedelta(seconds=2)
         delta = rng.randint(9000, 13000) if i == 0 else rng.randint(300, 5000)
@@ -348,7 +348,7 @@ def pi_session(w, rng, sid, key, t0, n, provider, model):
         usage['totalTokens'] = sum(usage[k] for k in ('input', 'cacheRead', 'cacheWrite', 'output'))
         rows.append({'type': 'message', 'id': f'{sid}-{i}', 'timestamp': iso(t),
                      'message': {'role': 'assistant', 'provider': provider, 'model': model, 'responseId': f'resp_{sid}_{i}',
-                                 'usage': usage, 'content': [{'type': 'text', 'text': script.final() if i % 6 == 5 or i == n - 1 else script.progress()}]}})
+                                 'usage': usage, 'content': [{'type': 'text', 'text': script.final() if i % turn_len == turn_len - 1 or i == n - 1 else script.progress()}]}})
         ctx += out
     write_jsonl(w['pi'] / f'{t0:%Y-%m-%dT%H-%M-%S}_{sid}.jsonl', rows)
 
@@ -363,10 +363,12 @@ def opencode_db(path, rng, script):
             time_updated INTEGER NOT NULL, data TEXT NOT NULL);
         CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER,
             time_updated INTEGER, data TEXT);""")
-    specs = [('oc-webshop-1', None, 'shop', utc(9, 8, 5), 14, 'openai', 'gpt-5.6-terra', 'build'),
-             ('oc-webshop-1-explore', 'oc-webshop-1', 'shop', utc(9, 8, 20), 8, 'openai', 'gpt-5.6-terra', 'explore'),
-             ('oc-docs-1', None, 'docs', utc(19, 11, 30), 10, 'opencode', 'big-pickle', 'build')]
-    for sid, parent, key, t0, n, provider, model, agent in specs:
+    specs = [('oc-webshop-1', None, 'shop', utc(9, 8, 5), 14, 'openai', 'gpt-5.6-terra', 'build', 5),
+             ('oc-webshop-1-explore', 'oc-webshop-1', 'shop', utc(9, 8, 20), 8, 'openai', 'gpt-5.6-terra', 'explore', 5),
+             ('oc-docs-1', None, 'docs', utc(19, 11, 30), 10, 'opencode', 'big-pickle', 'build', 5),
+             # One long agentic turn on a larger model: a costly OpenCode turn.
+             ('oc-shop-long', None, 'shop', utc(13, 9, 0), 48, 'openai', 'gpt-6-sol', 'build', 48)]
+    for sid, parent, key, t0, n, provider, model, agent, turn_len in specs:
         cwd = PROJECTS[key]
         ms0 = int(t0.timestamp() * 1000)
         con.execute('INSERT INTO session VALUES (?,?,?,?,?,?,?,?)',
@@ -375,8 +377,8 @@ def opencode_db(path, rng, script):
         for i in range(n):
             clock += rng.randint(40000, 110000)
             created = clock
-            if i % 5 == 0:
-                user = f'{sid}-u{i // 5}'
+            if i % turn_len == 0:
+                user = f'{sid}-u{i // turn_len}'
                 udata = {'role': 'user', 'agent': agent, 'time': {'created': created - 1000}}
                 con.execute('INSERT INTO message VALUES (?,?,?,?,?)', (user, sid, created - 1000, created - 1000, json.dumps(udata)))
                 text = {'type': 'text', 'text': script.prompt(key, sid)[0]}
@@ -390,7 +392,7 @@ def opencode_db(path, rng, script):
             data = {'role': 'assistant', 'providerID': provider, 'modelID': model, 'agent': agent, 'variant': 'high',
                     'parentID': user, 'time': {'created': created, 'completed': created + 4000}, 'path': {'cwd': cwd, 'root': cwd}, 'tokens': tokens}
             con.execute('INSERT INTO message VALUES (?,?,?,?,?)', (f'{sid}-m{i}', sid, created, created + 4000, json.dumps(data)))
-            text = {'type': 'text', 'text': script.final() if i % 5 == 4 or i == n - 1 else script.progress()}
+            text = {'type': 'text', 'text': script.final() if i % turn_len == turn_len - 1 or i == n - 1 else script.progress()}
             con.execute('INSERT INTO part VALUES (?,?,?,?,?,?)', (f'{sid}-m{i}-t', f'{sid}-m{i}', sid, created + 3000, created + 3000, json.dumps(text)))
             ctx += out
         if sid == 'oc-webshop-1':
@@ -444,12 +446,15 @@ def build_home(home, seed):
              ('cx-docs-03', 'docs', utc(22, 9, 30), 34, [sol, luna], 'tui', None, None),
              ('cx-acme-ci', 'acme', utc(25, 6, 0), 12, [luna], 'exec', None, None),
              ('cx-shop-ci', 'shop', utc(25, 11, 0), 14, [luna], 'exec', None, None),
-             ('cx-docs-ci', 'docs', utc(29, 6, 20), 10, [luna], 'exec', None, None)]
-    for sid, key, t0_, n, models, kind, parent, skill in codex:
-        codex_rollout(w, rng, sid, key, t0_, n, models, kind=kind, parent=parent, skill=skill)
+             ('cx-docs-ci', 'docs', utc(29, 6, 20), 10, [luna], 'exec', None, None),
+             # One long agentic turn on the larger model, as a migration the agent works through unattended.
+             ('cx-shop-long', 'shop', utc(20, 9, 0), 42, [sol], 'tui', None, None, 42)]
+    for sid, key, t0_, n, models, kind, parent, skill, *turn in codex:
+        codex_rollout(w, rng, sid, key, t0_, n, models, kind=kind, parent=parent, skill=skill, **({'turn_len': turn[0]} if turn else {}))
     pi_session(w, rng, 'pi-acme-01', 'acme', utc(5, 8, 30), 26, 'openai-codex', luna)
     pi_session(w, rng, 'pi-shop-01', 'shop', utc(12, 9, 10), 32, 'openrouter', 'qwen/qwen3-coder')
     pi_session(w, rng, 'pi-docs-01', 'docs', utc(18, 7, 45), 20, 'openrouter', 'z-ai/glm-5.3')
+    pi_session(w, rng, 'pi-acme-long', 'acme', utc(27, 8, 0), 52, 'openai-codex', sol, turn_len=52)
     pi_session(w, rng, 'pi-shop-02', 'shop', utc(26, 10, 0), 28, 'openai-codex', luna)
     opencode_db(home / '.local/share/opencode/opencode.db', rng, w['script'])
     return ids
@@ -562,11 +567,15 @@ def main(argv=None):
         (outdir / 'session.txt').write_text(session_text + '\n')
         (outdir / 'overhead.txt').write_text(overhead_text + '\n')
         sys.path.insert(0, str(ROOT))
+        from tokenatlas import pricing, prompts
         from tokenatlas.history import History
         counts = {}
         with History(db) as history:
             history.connection.execute('BEGIN')
-            for item in history.records():
+            records = history.records()
+            # The same ranking `tokenatlas top` and the report's Costliest turns card use.
+            top = prompts.top_prompts(records, pricing.load_prices(), 10)['prompts']
+            for item in records:
                 slot = counts.setdefault(item['harness'], {'observations': 0, 'sessions': set(), 'first': item['ts'], 'last': item['ts']})
                 slot['observations'] += 1
                 slot['sessions'].add(item['session'])
@@ -583,6 +592,8 @@ def main(argv=None):
                                'workflow_nodes': sum(n['kind'] == 'workflow' for n in nodes),
                                'inferred_children': sum(n['link'] == 'inferred' for n in nodes),
                                'total_tokens': session_json['total']['total'], 'cost': session_json['total']['cost']},
+                   'top_turns': [{'rank': i, 'harness': p['harness'], 'project': p['project_label'], 'cost': p['cost'],
+                                  'requests': p['requests'], 'subagents': p['subagents']} for i, p in enumerate(top, 1)],
                    'report': str(report)}
         (outdir / 'demo-summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
         if not args.no_screens:

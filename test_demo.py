@@ -29,6 +29,11 @@ class DemoTests(unittest.TestCase):
             self.assertRegex(overhead, r'(?m)^claude ')
             self.assertRegex(overhead, r'(?m)^codex ')
             self.assertFalse((out / 'overview.png').exists())
+            top = summary['top_turns']
+            self.assertEqual([t['rank'] for t in top], list(range(1, 11)))
+            self.assertTrue(all(t['cost'] is not None for t in top))
+            self.assertEqual(summary['seed'], 7)
+            self.assertEqual({t['harness'] for t in top}, {'claude', 'codex', 'pi', 'opencode'})
 
     def test_demo_report_embeds_realistic_prompt_text_for_top_turns(self):
         def build(seed):

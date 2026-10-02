@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-10-02
+
+### Changed
+
+- Report: on narrow screens (640 px or less) the costliest turns show as cards. Each card has rank and cost first, then harness, project and time, the labelled figures and the full prompt text, so cost and prompt are visible on a phone without scrolling sideways. The desktop table is unchanged (#80).
+- Demo (`scripts/demo.py`): the ten costliest turns span Claude Code, Codex, Pi and OpenCode, not only Claude. `demo-summary.json` lists the top 10 with the same ranking as `tokenatlas top` (#81).
+
 ## [1.10.0] - 2026-10-02
 
 ### Changed
