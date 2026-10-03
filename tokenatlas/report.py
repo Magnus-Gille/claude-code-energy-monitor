@@ -99,7 +99,7 @@ def report_state(revision, machine, spec, coverage, token=None, texts_hash=None,
 
 
 def build_report(records, source_status, timezone_name='Europe/Stockholm', redact=True, prompt_texts=None, table=None, lang='auto',
-                 prompt_context=None, prompt_inputs=None, now=None, credit_table=None, demo=False, limit_hits=None):
+                 prompt_context=None, prompt_inputs=None, now=None, credit_table=None, demo=False, limit_hits=None, universe=None):
     """prompt_texts ({(harness, session, turn_id): text or None} from prompt_store) and prompt_context ({key: turn_context dict}) are for
     prompt_inputs ({key: input count or None}) are for private reports only (any of them with redact=True raises);
     credit_table is the ChatGPT credit rate card behind `credit_classes` and the credits fact (None = packaged credits.json); table is the price table behind the `price_classes` unit prices (None = packaged prices). `insights` holds the cost facts (insights.py) for the
@@ -142,6 +142,9 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
             public = isinstance(value, str) and value in PUBLIC_NAMES[kind]
         return value if public else alias(kind, str(value))
     assigned = prompts.assign_prompts(records)
+    if universe is not None:  # a filtered report: the cards use the whole history's assignment, as the limit hits do
+        full = {prompts.ident(r): a for r, a in zip(universe, prompts.assign_prompts(universe))}
+        assigned = [full.get(prompts.ident(r), a) for r, a in zip(records, assigned)]
     shown = {}  # prompt key -> ordinal, numbered by first appearance in row order
     rows = []
     for index, record in enumerate(records):
@@ -233,7 +236,7 @@ def _hit_payload(hit, shown, metadata, texts=None, redact=True):
                 label=label(hit['turn'], hit['at']),
                 window=window and dict(start=window['start'], end=window['end'], requests=window['requests'], unpriced_requests=window['unpriced_requests'],
                                        cost=window['cost'], lower_bound=window['lower_bound'],
-                                       top=[dict(prompt=ordinal(t['turn']), label=label(t['turn'], t['first_ts']), requests=t['requests'], cost=t['cost'], share=t['share'])
+                                       top=[dict(prompt=ordinal(t['turn']), label=label(t['turn'], t['first_ts']), requests=t['requests'], cost=t['cost'], share=t['share'], lower_bound=t['lower_bound'])
                                             for t in window['top']]))
 
 

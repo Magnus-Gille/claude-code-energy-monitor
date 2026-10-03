@@ -140,16 +140,18 @@ def _fill(hit, records, assigned, table):
     aliases = table.get('provider_aliases') or {}
     canon = lambda p: aliases.get(p, p)
     provider = canon(PROVIDER.get(hit['harness']))
-    turns, requests, priced, total, lower = {}, 0, 0, 0.0, False
+    turns, requests, priced, total, lower = {}, 0, 0, 0.0, False  # lower: some request is unpriced or incomplete, so totals are lower bounds
     for record in records:
         if record['harness'] != hit['harness'] or canon(record.get('provider')) != provider or record.get('id_synthetic') or not start <= prompts._t(record['ts']) <= at:
             continue  # an ambiguous identity is in no total, as in the cost facts
         requests += 1
-        lower = lower or not record.get('complete', True)
         cost = prompts._cost(record, table)
+        short = cost is None or not record.get('complete', True)
+        lower = lower or short
         found = assigned.get(id(record))
-        entry = turns.setdefault(tuple(found[:3]), [0.0, 0, 0, record['ts']]) if found else [0.0, 0, 0, record['ts']]
+        entry = turns.setdefault(tuple(found[:3]), [0.0, 0, 0, record['ts'], False]) if found else [0.0, 0, 0, record['ts'], False]
         entry[1] += 1
+        entry[4] = entry[4] or short
         entry[3] = min(entry[3], record['ts'], key=prompts._t)
         if cost is not None:
             priced += 1
@@ -159,7 +161,7 @@ def _fill(hit, records, assigned, table):
     ranked = sorted(((k, v) for k, v in turns.items() if v[2]), key=lambda kv: (-kv[1][0], kv[0]))[:TOP]
     return dict(start=start.isoformat(), end=at.isoformat(), requests=requests, priced_requests=priced, unpriced_requests=requests - priced,
                 cost=total if priced else None, lower_bound=lower,
-                top=[dict(turn=k, requests=v[1], cost=v[0], share=v[0] / total if total > 0 else None, first_ts=v[3]) for k, v in ranked])
+                top=[dict(turn=k, requests=v[1], cost=v[0], share=v[0] / total if total > 0 else None, first_ts=v[3], lower_bound=v[4]) for k, v in ranked])
 
 
 def hit_turns(hits):

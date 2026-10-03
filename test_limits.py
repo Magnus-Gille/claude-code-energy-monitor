@@ -304,6 +304,17 @@ class LimitHits(unittest.TestCase):
         self.assertEqual(mixed['requests'], 3)
         self.assertEqual({t['turn'][2] for t in mixed['top']} >= {'ta', 'tb'}, True)
 
+    def test_unpriced_requests_make_window_and_turn_costs_lower_bounds(self):
+        unknown = obs('u', iso(2), 5000, turn='mixed')
+        unknown['model'] = 'no-such-model'
+        recs = [obs('p', iso(1), 10000, turn='clean'), obs('p2', iso(3), 1000, turn='mixed'), unknown]
+        w = limits.limit_hits(recs, [obs('r', iso(30), quota=five_hour(120))], TABLE)[0]['window']
+        self.assertTrue(w['lower_bound'])
+        self.assertEqual({t['turn'][2]: t['lower_bound'] for t in w['top']}, {'clean': False, 'mixed': True})
+        payload = report.build_report(recs, {}, limit_hits=limits.limit_hits(recs, [obs('r', iso(30), quota=five_hour(120))], TABLE),
+                                      now=datetime(2026, 9, 5, tzinfo=UTC))
+        self.assertEqual({t['lower_bound'] for t in payload['limit_hits'][0]['window']['top']}, {False, True})
+
     def test_subagent_rejection_takes_the_turn_of_its_thread(self):
         main = obs('m', iso(1), 1000, turn='t1')
         sub = dict(obs('s', iso(5), 90000, turn=None), thread_kind='subagent', parent_session='s1', agent='a1')
@@ -551,6 +562,70 @@ class Template(unittest.TestCase):
         self.assertIsNotNone(m)
         statement = m.group(1)
         self.assertRegex(statement, r"^const tr=el\('tr',undefined,'prompt-row'\),c=.*,n=.*;tr\.id=")
+
+
+class RoundSix(unittest.TestCase):
+    def setUp(self):
+        import contextlib
+        import io
+        from tokenatlas.__main__ import main
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.db = str(self.root / 'state' / 'h.sqlite3')
+        def run(*args):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = main(['--db', self.db, *args])
+            return code, out.getvalue()
+        self.run_cli = run
+
+    def refresh(self, rows, sub=None):
+        write(self.root / 'logs', rows)
+        if sub:
+            path = self.root / 'logs' / 'proj' / 's1' / 'subagents' / 'agent-x1.jsonl'
+            path.parent.mkdir(parents=True)
+            path.write_text(''.join(json.dumps(r) + '\n' for r in sub))
+        self.assertEqual(self.run_cli('refresh', '--harness', 'claude', '--root', str(self.root / 'logs'))[0], 0)
+
+    def payload(self, *extra):
+        out = self.root / 'r.html'
+        self.run_cli('report', '--html', str(out), *extra)
+        found = re.search(r'id="report-data"[^>]*>([^<]+)<', out.read_text(encoding='utf-8')).group(1)
+        return json.loads(gzip.decompress(base64.b64decode(found)).decode())
+
+    def test_statusline_cache_does_not_count_a_rejection(self):
+        from tokenatlas import statusline
+        write(self.root / 'logs', [user('t1', 0), call('a', 1, 5000), rejected('r1', 2)])
+        with History(Path(self.db)) as h:
+            h.refresh('claude', self.root / 'logs')
+            cache = statusline.build_cache(h, T0 + timedelta(hours=1))
+        days = cache['days'].values()
+        self.assertEqual((sum(d['requests'] for d in days), sum(d['incomplete'] for d in days)), (1, 0))
+
+    def test_top_marks_only_hits_inside_the_cli_filters(self):
+        self.refresh([user('t1', 0), call('a', 1, 5000), user('t2', 30), call('c', 31, 1000), rejected('r1', 40), call('d', 45, 1000)])
+        def marked(*extra):
+            prompts = {p['turn_id']: p for p in json.loads(self.run_cli('top', '--json', *extra)[1])['prompts']}
+            return 'limit_hit' in prompts['t2']
+        self.assertTrue(marked())
+        self.assertTrue(marked('--end', stamp(41)))
+        self.assertFalse(marked('--end', stamp(40)))  # the hit itself is at the exclusive end
+        self.assertFalse(marked('--start', stamp(41)))  # only the later call of turn t2 is in range
+        self.assertTrue(marked('--start', stamp(40)))
+
+    def test_cards_and_hits_agree_when_a_date_filter_cuts_through_a_subagent_turn(self):
+        def sub_call(request, minute):
+            return dict(call(request, minute, 20000, sidechain=True), agentId='x1', attributionAgent='x1')
+        self.refresh([user('t1', 0), call('a', 1, 1000), user('t2', 30), call('c', 31, 1000), rejected('r1', 50)],
+                     sub=[sub_call('s1a', 35), sub_call('s1b', 45)])
+        full = self.payload()
+        self.assertEqual(len(full['limit_hits']), 1)
+        cut = self.payload('--start', stamp(40))
+        top = cut['limit_hits'][0]['window']['top']
+        self.assertTrue(top and top[0]['prompt'] is not None, top)
+        cols = cut['columns']
+        self.assertIn(top[0]['prompt'], cols['prompt'])  # a card exists for the ranked turn
 
 
 class Cli(unittest.TestCase):
