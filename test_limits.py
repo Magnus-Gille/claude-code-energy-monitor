@@ -736,7 +736,14 @@ class RoundTen(unittest.TestCase):
         full = [{'slot': 'primary', 'minutes': 300, 'used_percent': 100.0, 'resets_at': iso(100)}]
         recs = [self.cx('1', 1, 'rate_limit_reached', []), self.cx('2', 2, 'rate_limit_reached', full), self.cx('3', 3, None, full),
                 self.cx('4', 4, 'rate_limit_reached', full)]
-        self.assertEqual(len(limits.limit_hits(recs, [], TABLE)), 1)
+        hits = limits.limit_hits(recs, [], TABLE)
+        self.assertEqual(len(hits), 1)
+        # the later full window uniquely identifies the window: the existing hit learns its duration and reset (its time stays) and gets a ranking
+        self.assertEqual((hits[0]['at'], hits[0]['window_minutes'], hits[0]['resets_at']), (iso(1), 300, iso(100)))
+        earlier = obs('e', iso(-30), 5000, harness='codex', provider='openai', session='c1', turn='early')
+        earlier['model'] = 'gpt-5.6-luna'
+        ranked = limits.limit_hits([earlier, *recs], [], TABLE)[0]['window']
+        self.assertEqual([t['turn'][2] for t in ranked['top']], ['early'])
         # with no window ever supplied, an omitted type proves nothing for a time-window episode
         none = [self.cx('1', 1, 'rate_limit_reached', []), self.cx('2', 2, None, []), self.cx('3', 3, 'rate_limit_reached', [])]
         self.assertEqual(len(limits.limit_hits(none, [], TABLE)), 1)
@@ -960,6 +967,19 @@ class OneStatePerSeries(RoundEleven):
                 self.cx('3', 3, None, [self.w(40.0, resets=500)], session='A'), self.cx('4', 4, 'rate_limit_reached', [self.w(100.0, resets=900)], session='A')]
         hits = limits.limit_hits(recs, [], TABLE)
         self.assertEqual([(h['at'], h['reached']) for h in hits], [(iso(1), 'rate_limit_reached'), (iso(4), 'rate_limit_reached')])
+
+    def test_continuous_readings_of_a_full_window_are_one_hit_and_a_real_gap_is_two(self):
+        h = self.history(self.calls(*[(m, self.snap(100.0)) for m in (1, 100, 200, 300, 302)]))
+        self.assertEqual([e['ts'][11:16] for e in h.limit_events()], ['13:20'])  # one checkpoint, past half the window since the first reading
+        self.assertEqual(len(self.hits(h)), 1)
+        gap = self.history(self.calls((1, self.snap(100.0, hours=3)), (400, self.snap(100.0, hours=12))))
+        self.assertEqual(len(self.hits(gap)), 2)
+
+    def test_a_credits_episode_never_coalesces_with_a_time_window(self):
+        credits = 'workspace_owner_credits_depleted'
+        recs = [self.cx('1', 1, credits, [self.w(50.0)]), self.cx('2', 2, credits, [self.w(100.0)])]
+        hits = limits.limit_hits(recs, [], TABLE)
+        self.assertEqual([(h['window_minutes'], h['reached']) for h in hits], [(None, credits), (300, 'window_full')])
 
     def test_a_named_five_hour_window_never_suppresses_a_weekly_crossing(self):
         recs = [self.cx('1', 1, 'rate_limit_reached', [self.w(100.0), self.w(50.0, 10080, 900)]),

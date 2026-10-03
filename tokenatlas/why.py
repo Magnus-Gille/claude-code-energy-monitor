@@ -905,10 +905,11 @@ def collect_codex(
                     return
                 scope = (quota.get("limit_id"), quota.get("plan_type"))
                 state = _quota_state(quota)
-                # Besides transitions, a window that is still full but whose last full evidence in this file is older than the window is kept alive
-                # (an event), so that an expiry and a later re-hit of the same window can be told apart.
+                # Besides transitions, a checkpoint event is kept whenever the last retained full evidence for a still-full window (a usage record's
+                # quota counts) is older than half the window: retained evidence is then never farther apart than the window while readings continue,
+                # so a real gap (no readings for longer than the window) is the only thing the detector can see as an expiry.
                 stale = any(
-                    timestamp - last_full.get(scope + (w["minutes"],), timestamp) > timedelta(minutes=w["minutes"])
+                    timestamp - last_full.get(scope + (w["minutes"],), timestamp) > timedelta(minutes=w["minutes"] / 2)
                     for w in quota.get("windows") or () if (w.get("used_percent") or 0) >= 100)
                 if state == last_quota.get(scope, (None, frozenset())) and not stale:
                     return
