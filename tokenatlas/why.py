@@ -491,6 +491,9 @@ def _claude_injected_only(content) -> bool:
 INTERRUPTED = "interrupted"
 
 
+_CLAUDE_INTERRUPT_MARKERS = frozenset({"[Request interrupted by user]", "[Request interrupted by user for tool use]"})
+
+
 def _claude_interrupt_marker(row: dict) -> bool:
     """True for the user row Claude Code writes when the user stops a request ("[Request interrupted by user]", or "... for tool use")."""
     if row.get("type") != "user":
@@ -502,7 +505,8 @@ def _claude_interrupt_marker(row: dict) -> bool:
         texts = [i.get("text", "") for i in content if isinstance(i, dict) and i.get("type") == "text"]
     else:
         return False
-    return any(isinstance(t, str) and t.lstrip().startswith("[Request interrupted by user") for t in texts)
+    found = [t.strip() for t in texts if isinstance(t, str) and t.strip()]
+    return bool(found) and all(t in _CLAUDE_INTERRUPT_MARKERS for t in found)  # marker-only: a message quoting it is a real prompt
 
 
 def _flag_list(keys: set, key) -> list | None:
@@ -551,7 +555,7 @@ def collect_claude(
     contain placeholder output counts, so every token field uses its maximum.
     """
     calls: dict[str, dict] = {}
-    interrupted: set[str] = set()
+    stops: list[list[str]] = []
     for path in _paths_for(root, "*.jsonl", start, paths):
         try:
             parts = path.relative_to(root).parts
@@ -567,17 +571,17 @@ def collect_claude(
         fallback_project = _claude_project_fallback(path, root)
         cowork = path.is_relative_to(COWORK_SESSIONS)
         last_user_turn: str | None = None
-        last_request: str | None = None  # latest request of the current turn in this file: the one running when the user stops
+        turn_requests: list[str] = []  # request keys of the current turn in this file, in order
         for line_number, row in _read_json_lines(path, strict=strict):
             message = _mapping(row.get("message"))
             usage = message.get("usage")
             timestamp = parse_iso_timestamp(row.get("timestamp"))
             row_uuid = _first_text(row, "uuid", "id")
             # Main-thread transcripts rarely carry the marker; a stopped subagent's file does, and its flag rolls up to the parent turn.
-            if last_request is not None and _claude_interrupt_marker(row):
-                interrupted.add(last_request)
+            if turn_requests and _claude_interrupt_marker(row):
+                stops.append(list(turn_requests))  # resolved after eligibility: the last request kept is the one running
             if _is_genuine_user_row(row):
-                last_request = None
+                turn_requests = []
                 last_user_turn = _meta_text(row_uuid) or _stable_hash({
                     "session": row.get("sessionId"),
                     "timestamp": row.get("timestamp"),
@@ -606,7 +610,8 @@ def collect_claude(
                 })
                 id_synthetic = True
             key = str(request_id)
-            last_request = key
+            if not turn_requests or turn_requests[-1] != key:
+                turn_requests.append(key)
             values = {
                 "fresh_input": _nonnegative_int(usage.get("input_tokens")),
                 "cache_read": _nonnegative_int(usage.get("cache_read_input_tokens")),
@@ -670,15 +675,17 @@ def collect_claude(
             if latest or "id_synthetic" not in existing:
                 existing["id_synthetic"] = id_synthetic
 
-    records = []
-    for call_id, values in calls.items():
-        if not start <= values["timestamp"] < end:
-            continue
-        if sum(
+    def kept(values):
+        return start <= values["timestamp"] < end and not (sum(
             values[field]
             for field in ("fresh_input", "cache_read", "cache_write", "output")
         ) <= 0 and not _raw_usage_requires_record(values.get("raw_usage", {}),
-            ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')):
+            ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')))
+    retained = {call_id for call_id, values in calls.items() if kept(values)}
+    interrupted = {next(k for k in reversed(keys) if k in retained) for keys in stops if any(k in retained for k in keys)}
+    records = []
+    for call_id, values in calls.items():
+        if call_id not in retained:
             continue
         fallback_project, fallback_id = values.pop("_fallback")
         if values.pop("_cowork"):
@@ -1057,7 +1064,8 @@ def collect_opencode(
     finally:
         connection.close()
     records = []
-    aborts: list[tuple[str, str | None, str | None]] = []  # (session, turn, own call id): an abort usually carries no tokens, so it is read before the token guards
+    anchors: list[tuple[str, str | None, datetime, str]] = []  # every request with usage, in or out of the window
+    aborts: list[tuple[str, str | None, str | None, datetime | None]] = []  # (session, turn, own call id): an abort usually carries no tokens, so it is read before the token guards
     for row in rows:
         try:
             data = json.loads(row["data"])
@@ -1073,7 +1081,9 @@ def collect_opencode(
             continue
         if _mapping(data.get("error")).get("name") == "MessageAbortedError":
             aborts.append((_meta_text(row["session_id"], default="unknown"), _meta_text(_first_text(data, "parentID", "parentId")),
-                           str(row["id"]) if row["id"] else None))
+                           str(row["id"]) if row["id"] else None, _millisecond_timestamp(
+                               _mapping(data.get("time")).get("completed") or _mapping(data.get("time")).get("created")
+                               or row["time_updated"] or row["time_created"])))
         usage = data.get("tokens")
         if not isinstance(usage, dict):
             if diagnostics is not None:
@@ -1087,8 +1097,7 @@ def collect_opencode(
             if diagnostics is not None:
                 diagnostics["unparsed_usage_lines"] += 1
             continue
-        if not start <= timestamp < end:
-            continue
+        in_window = start <= timestamp < end  # requests outside the window still anchor an abort, so fresh and incremental reads agree
         raw_usage = _sanitize_usage(usage) or {}
         cache = _mapping(usage.get("cache"))
         values = {
@@ -1109,6 +1118,9 @@ def collect_opencode(
         cwd = _meta_text(_mapping(data.get("path")).get("cwd"), row["directory"], limit=4096)
         parent = _meta_text(row["parent_id"])
         turn_id = _meta_text(_first_text(data, "parentID", "parentId"))
+        anchors.append((_meta_text(row["session_id"], default="unknown"), turn_id, timestamp, call_id))
+        if not in_window:
+            continue
         records.append(AttributionRecord(
             harness="opencode", provider=_meta_text(data.get("providerID"), default="unknown"),
             timestamp=timestamp, session_id=_meta_text(row["session_id"], default="unknown"), call_id=call_id,
@@ -1125,13 +1137,15 @@ def collect_opencode(
     if aborts:
         by_id = {r.call_id: i for i, r in enumerate(records)}
         flagged: set[int] = set()
-        for session, turn, own in aborts:
+        for session, turn, own, at in aborts:
             if own in by_id:  # the aborted message itself carries usage
                 flagged.add(by_id[own])
                 continue
-            same = [i for i, r in enumerate(records) if turn and r.session_id == session and r.turn_id == turn]
-            if same:  # the last retained request of the same turn was the one running
-                flagged.add(max(same, key=lambda i: (records[i].timestamp, records[i].call_id)))
+            same = [a for a in anchors if turn and at and a[0] == session and a[1] == turn and a[2] <= at]
+            if same:  # the latest request of the turn up to the abort was the one running; it counts only if this read retains it
+                target = max(same, key=lambda a: (a[2], a[3]))[3]
+                if target in by_id:
+                    flagged.add(by_id[target])
         records = [replace(r, flags=[INTERRUPTED]) if i in flagged else r for i, r in enumerate(records)]
     return sorted(records, key=lambda item: (item.timestamp, item.session_id, item.call_id))
 

@@ -405,5 +405,36 @@ class ClaudeInterruptTests(unittest.TestCase):
                          {"r1": ("u1", ["interrupted"]), "r2": ("u3", None)})
 
 
+class ClaudeInterruptReviewTests(unittest.TestCase):
+    USAGE = ClaudeInterruptTests.USAGE
+    collect = ClaudeInterruptTests.collect
+    ZERO = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}  # fully zero: discarded
+
+    def test_marker_flags_the_last_retained_request_not_a_discarded_zero_usage_one(self):
+        got = self.collect({"p/s.jsonl": [
+            _user_row("2026-09-03T10:00:00Z", "u1", "go"),
+            _claude_row("2026-09-03T10:00:01Z", "r1", self.USAGE),
+            _claude_row("2026-09-03T10:00:02Z", "r2", self.ZERO),
+            _user_row("2026-09-03T10:00:03Z", "u2", [{"type": "text", "text": "[Request interrupted by user]"}])]})
+        self.assertEqual({k: r.flags for k, r in got.items()}, {"r1": ["interrupted"]})
+
+    def test_quoted_or_mixed_markers_are_not_markers(self):
+        for content in ("please explain what [Request interrupted by user] means",
+                        [{"type": "text", "text": "[Request interrupted by user]"}, {"type": "text", "text": "and continue"}],
+                        "[Request interrupted by user] then more"):
+            with self.subTest(content=content):
+                got = self.collect({"p/s.jsonl": [
+                    _user_row("2026-09-03T10:00:00Z", "u1", "go"),
+                    _claude_row("2026-09-03T10:00:01Z", "r1", self.USAGE),
+                    _user_row("2026-09-03T10:00:03Z", "u2", content)]})
+                self.assertEqual({k: r.flags for k, r in got.items()}, {"r1": None})
+
+    def test_marker_with_surrounding_whitespace_still_counts(self):
+        got = self.collect({"p/s.jsonl": [
+            _user_row("2026-09-03T10:00:00Z", "u1", "go"), _claude_row("2026-09-03T10:00:01Z", "r1", self.USAGE),
+            _user_row("2026-09-03T10:00:03Z", "u2", "  [Request interrupted by user for tool use]\n")]})
+        self.assertEqual({k: r.flags for k, r in got.items()}, {"r1": ["interrupted"]})
+
+
 if __name__ == "__main__":
     unittest.main()

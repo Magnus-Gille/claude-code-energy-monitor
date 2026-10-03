@@ -236,5 +236,27 @@ class InterruptedFlagTests(unittest.TestCase):
         self.assertEqual(got, {"r1": ["interrupted"]})
 
 
+    def test_opencode_abort_flags_only_requests_up_to_its_own_time_fresh_or_incremental(self):
+        entries = [("m1", "u1", self.T0, self.BILLED, None), ("m2", "u1", self.T0 + 1000, self.ZERO, "MessageAbortedError"),
+                   ("m3", "u1", self.T0 + 2000, self.BILLED, None)]
+        self.assertEqual(self._opencode(entries), {"m1": ["interrupted"], "m3": None})
+        later = datetime.fromtimestamp((self.T0 + 500) / 1000, tz=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp:  # a window starting after m1: m3 must stay clean, m1 is out of the read
+            db = Path(tmp) / "o.db"
+            connection = create_opencode_db(db)
+            connection.execute("INSERT INTO session VALUES (?,?,?,?,?,?,?)", ("s", "p", None, "/work/app", "1", 1, 2))
+            for name, ms, tokens, error in (("m1", self.T0, self.BILLED, None), ("m2", self.T0 + 1000, self.ZERO, "MessageAbortedError"),
+                                            ("m3", self.T0 + 2000, self.BILLED, None)):
+                data = {"role": "assistant", "providerID": "openai", "modelID": "m", "parentID": "u1",
+                        "time": {"created": ms, "completed": ms}, "tokens": tokens}
+                if error:
+                    data["error"] = {"name": error}
+                connection.execute("INSERT INTO message VALUES (?,?,?,?,?)", (name, "s", ms, ms, json.dumps(data)))
+            connection.commit()
+            connection.close()
+            got = {r.call_id: r.flags for r in why.collect_opencode(db, later, END)}
+        self.assertEqual(got, {"m3": None})
+
+
 if __name__ == "__main__":
     unittest.main()
