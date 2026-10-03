@@ -30,6 +30,14 @@ function withLang(html, lang) {
   });
 }
 // Re-encode a report with one limit hit (a card turn, a turn without a card, lower bound), for the Limit hits section and the card badge.
+function withQuota(html) {
+  return html.replace(/(<script id="report-data" type="application\/octet-stream\+base64">)([A-Za-z0-9+\/=]+)(<\/script>)/, (_, a, b64, c) => {
+    const data = JSON.parse(zlib.gunzipSync(Buffer.from(b64, 'base64')).toString('utf8'));
+    data.quota_shares = {0: {minutes: 10080, label: 'observed', percent: 3, shared_with: 0}};
+    data.quota_windows = [{harness: 'codex', account: null, minutes: 10080, resets_at: '2026-09-08T00:00:00+00:00', start: '2026-09-01T00:00:00+00:00', peak_percent: 70, peak_at: '2026-09-07T12:41:00+00:00', hit: false, snapshots: 5, cost: 1.5, unpriced_requests: 0}];
+    return a + zlib.gzipSync(Buffer.from(JSON.stringify(data), 'utf8')).toString('base64') + c;
+  });
+}
 function withLimitHit(html) {
   return html.replace(/(<script id="report-data" type="application\/octet-stream\+base64">)([A-Za-z0-9+\/=]+)(<\/script>)/, (_, a, b64, c) => {
     const data = JSON.parse(zlib.gunzipSync(Buffer.from(b64, 'base64')).toString('utf8'));
@@ -236,6 +244,9 @@ async function ready(page, errors, what = 'report') {
           assert.equal(await lh.page.locator('#limit-list a[href^="#turn-"]').count(),2,'the two links to a shown card (hit turn and top turn 1)');
           assert.ok((await lh.page.locator('#limit-hits').innerText()).includes(T.lang==='sv'?'2 nekade försök':'2 rejected attempts'));
           assert.deepEqual(lh.errors,[]);await lh.context.close();
+          const qw=await newPage({locale:T.locale},withQuota(fixture));
+          assert.equal(await qw.page.locator('#limit-hits').isVisible(),true);assert.equal(await qw.page.locator('#qw-table tr').count(),2);assert.equal(await qw.page.locator('#top-prompts .qs').count(),1);
+          assert.ok(/3 ?%/.test(await qw.page.locator('#top-prompts .qs').innerText()));assert.deepEqual(qw.errors,[]);await qw.context.close();
           const none=await newPage({locale:T.locale},fixture);assert.equal(await none.page.locator('#limit-hits').isVisible(),false);assert.deepEqual(none.errors,[]);await none.context.close();
         }
         // The toast is pure DOM: it works inside a sandboxed iframe (no top navigation, no popups).

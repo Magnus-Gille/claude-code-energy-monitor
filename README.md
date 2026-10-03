@@ -303,6 +303,16 @@ Each fact is marked **measured** (counted from the logs) or **computed** (arithm
 
 Energy appears in two places, always as an order-of-magnitude proxy and never as a measurement: the `energy` fact in `tokenatlas insights` (above; it is not shown in the report's cost facts card, since energy is not a cost), and an "Energi (uppskattning)" / "Energy (estimate)" card in the report that follows the page filters like the token cards. The card is computed in the page from the token columns and the model of each request (the payload carries the constants and one multiplier per Claude model, nothing per row). It shows the rounded mid value, the range, the split over token classes, the number of requests counted without model weighting, a lower-bound mark (`≥`) when some observations have incomplete counters, and how it is computed. Shared reports include it: it is an aggregate of the token counts the report already holds. The constants, their derivation and the uncertainty are in [Energy estimation methodology](#energy-estimation-methodology); [Everyday comparisons](#everyday-comparisons) puts the magnitudes in context.
 
+### Subscription quota
+
+On a subscription, list price is not what you pay; the vendor's usage limit is. For Codex, `tokenatlas top` (and its `--json`
+as `quota_share`), the report's costliest turns and `insights` show a turn's share of the weekly or 5-hour limit: the
+account-wide percentage at the turn's last request minus the percentage before its first. When turns ran concurrently in the
+same window the movement is spread over them by list price and labeled an estimate. The report also lists the recent limit
+windows with their peak. The counter moves in whole percent (a turn that did not move it shows `< 1%`), covers the whole
+account (other devices and chat are not in the logs), and is not a conversion of dollars to percent. What the vendors expose,
+how well list price predicts the percentage, and the wording rules are in [docs/quota.md](docs/quota.md).
+
 ## Fixed context overhead
 
 `tokenatlas overhead --refresh` reports the floor tokens of a session's first request, the sizes of

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from tokenatlas import __version__
-from tokenatlas import credits as credit_rates, energy, insights, limits, pricing, prompts
+from tokenatlas import credits as credit_rates, energy, insights, limits, pricing, prompts, quota_share
 from tokenatlas.history import ALL_FIELDS
 from tokenatlas.resume import resume_info
 
@@ -34,6 +34,7 @@ PUBLIC_MODEL = re.compile(
 
 
 INSIGHT_DAYS = 30
+MAX_QUOTA_WINDOWS = 12
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 DICT_FIELDS = ('harness', 'provider', 'model', 'effort', 'thread_kind', 'origin', 'turn_confidence', 'session',
                'parent_session', 'turn_id', 'agent', 'project_id', 'project_label', 'warnings')
@@ -99,7 +100,7 @@ def report_state(revision, machine, spec, coverage, token=None, texts_hash=None,
 
 
 def build_report(records, source_status, timezone_name='Europe/Stockholm', redact=True, prompt_texts=None, table=None, lang='auto',
-                 prompt_context=None, prompt_inputs=None, now=None, credit_table=None, demo=False, limit_hits=None, universe=None):
+                 prompt_context=None, prompt_inputs=None, now=None, credit_table=None, demo=False, limit_hits=None, universe=None, quota=True, all_hits=None, quota_events=None):
     """prompt_texts ({(harness, session, turn_id): text or None} from prompt_store) and prompt_context ({key: turn_context dict}) are for
     prompt_inputs ({key: input count or None}) are for private reports only (any of them with redact=True raises);
     credit_table is the ChatGPT credit rate card behind `credit_classes` and the credits fact (None = packaged credits.json); table is the price table behind the `price_classes` unit prices (None = packaged prices). `insights` holds the cost facts (insights.py) for the
@@ -142,8 +143,10 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
             public = isinstance(value, str) and value in PUBLIC_NAMES[kind]
         return value if public else alias(kind, str(value))
     assigned = prompts.assign_prompts(records)
+    whole, whole_assigned = records, assigned  # the history quota shares are computed over: account-wide counters need every request
     if universe is not None:  # a filtered report: the cards use the whole history's assignment, as the limit hits do
-        full = {prompts.ident(r): a for r, a in zip(universe, prompts.assign_prompts(universe))}
+        whole, whole_assigned = universe, prompts.assign_prompts(universe)
+        full = {prompts.ident(r): a for r, a in zip(universe, whole_assigned)}
         assigned = [full.get(prompts.ident(r), a) for r, a in zip(records, assigned)]
     shown = {}  # prompt key -> ordinal, numbered by first appearance in row order
     rows = []
@@ -185,8 +188,11 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
     now = now or datetime.now(timezone.utc)
     display = lambda provider, model: metadata('model', model, {'provider': provider})
     memo = {}
+    cost_of = insights.memo_cost(table, memo)
     # one captured `now` is the exclusive end of the 30-day window: later-dated observations are not 'the last 30 days'
-    windows = [dict(id=wid, **insights.public(insights.cost_facts(records, table, start, end, name=display, memo=memo, credit_table=credit_table, hits=limit_hits, universe=universe)))
+    snapshots = quota_share.snapshots_from_records(whole, whole_assigned, quota_events or ()) if quota else []  # one per window per request that carries a quota
+    shares = quota_share.turn_shares(whole, snapshots, table, cost_of) if snapshots else None
+    windows = [dict(id=wid, **insights.public(insights.cost_facts(records, table, start, end, name=display, memo=memo, credit_table=credit_table, hits=limit_hits, universe=universe, quota=shares)))
                for wid, start, end in (('30d', now - timedelta(days=INSIGHT_DAYS), now), ('all', None, None))]
     # the page's energy card (filter-following) sums tokens x per-class constant x a multiplier per (provider, model); only Claude tiers have one
     # (the rest is unweighted, multiplier 1), keyed by the provider and model names as the rows carry them (after redaction)
@@ -213,11 +219,34 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
             report['prompt_resume'] = found
     if limit_hits:
         report['limit_hits'] = [_hit_payload(h, shown, metadata, prompt_texts, redact) for h in limit_hits]
+    if snapshots or getattr(snapshots, 'events', ()):
+        report.update(_quota_payload(shares or {}, quota_share.windows(snapshots, last=4, records=whole, cost_of=cost_of, hits=limit_hits if all_hits is None else all_hits), shown, metadata, lambda name: alias('limit', name) if redact else name))  # a limit id is pseudonymized whatever it looks like
     if demo:
         report['demo'] = True
     if prompt_inputs is not None:
         report['prompt_inputs'] = {shown[tuple(k)]: n for k, n in prompt_inputs.items() if isinstance(n, int) and tuple(k) in shown}
     return report
+
+
+def _quota_payload(shares, windows, shown, metadata, account):
+    """Quota shares for the page (quota_share.py): per turn by prompt ordinal, never session or turn ids, and the recent windows of the account.
+    `quota_shares` only has turns that are in this report; both keys are left out when there is nothing to show. `account` names a limit id (a
+    non-default one such as a model-specific limit; the harness's own default is left out)."""
+    found = {}
+    for turn, share in quota_share.largest(shares).items():
+        if tuple(turn) in shown:
+            obs = share['observed']
+            found[shown[tuple(turn)]] = dict(minutes=share['window_key'][2], label=share['label'], percent=quota_share.value(share),
+                                             shared_with=obs and obs['shared_with'])
+    out = {}
+    if found:
+        out['quota_shares'] = found
+    windows = sorted(windows, key=lambda w: w['resets_at'])[-MAX_QUOTA_WINDOWS:]  # keeps the table compact when an account has several limits
+    if windows:
+        out['quota_windows'] = [dict(harness=metadata('harness', w['harness'], w), account=None if w['account'] == w['harness'] else account(w['account']), minutes=w['minutes'], resets_at=w['resets_at'], start=w['start'],
+                                     peak_percent=w['peak_percent'], peak_at=w['peak_at'], hit=w['hit'], snapshots=w['snapshots'],
+                                     cost=w.get('cost'), unpriced_requests=w.get('unpriced_requests'), uncertain_requests=w.get('uncertain_requests', 0), lower_bound=w.get('lower_bound', False)) for w in windows]
+    return out
 
 
 def _hit_payload(hit, shown, metadata, texts=None, redact=True):

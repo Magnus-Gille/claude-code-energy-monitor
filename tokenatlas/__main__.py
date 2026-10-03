@@ -139,7 +139,7 @@ def context_lines(ctx,text=None):
 
 def render_top(result,texts=None,contexts=None):
     """Compact table of ranked turns; cost is list-price, '≥' when some requests could not be priced. Stored context or preview goes on indented lines."""
-    from tokenatlas import credits as credit_rates, limits
+    from tokenatlas import credits as credit_rates, limits, quota_share
     zone=ZoneInfo(DEFAULT_TIMEZONE)
     rows=[('#','when','harness','project','models','req','sub','Mtok','cost')]  # a Codex/OpenAI turn with a credit rate adds its credit equivalent to the cost cell; the resume command goes on its own line
     for i,p in enumerate(result['prompts'],1):
@@ -152,7 +152,7 @@ def render_top(result,texts=None,contexts=None):
     lines=['  '.join(c.ljust(w) for c,w in zip(r,widths)).rstrip() for r in rows]
     shown=[]
     for line,p in zip(lines[1:],result['prompts']):
-        key=(p['harness'],p['session'],p['turn_id']);shown.append(line+(' · interrupted' if p.get('interrupted') else '')+('  ['+limits.badge(p['limit_hit'])+']' if p.get('limit_hit') else ''))
+        key=(p['harness'],p['session'],p['turn_id']);shown.append(line+(' · interrupted' if p.get('interrupted') else '')+('  ['+limits.badge(p['limit_hit'])+']' if p.get('limit_hit') else '')+(' · '+quota_share.line(p['quota_share'],p['harness']) if p.get('quota_share') else ''))
         text=(texts or {}).get(key)
         if (contexts or {}).get(key):shown+=context_lines(contexts[key],text)
         elif text:shown.append('    '+text)
@@ -202,10 +202,15 @@ def _visible(history,db,records=None):
     return prompt_store.visible_all(store,history.records() if records is None else records,pricing.load_prices())
 
 
-def _hits(history,records):
+def _hits(history,records,events=None):
     """Limit hits over the whole history's records (a report's filters never shrink the window a hit is explained from)."""
     from tokenatlas import limits, pricing
-    return limits.limit_hits(records,history.limit_events(),pricing.load_prices())  # no shortcut: a full window with no reached type is a hit too
+    return limits.limit_hits(records,history.limit_events() if events is None else events,pricing.load_prices())  # no shortcut: a full window with no reached type is a hit too
+
+
+def _events(events):
+    """Codex quota-only observations (zero-token, status 'event'): window readings that are no requests; they only add to a window's peak and hit."""
+    return [e for e in events if (e.get('quota') or {}).get('status')=='event']
 
 
 def _counts(contexts):
@@ -228,7 +233,7 @@ def main(argv=None):
         if hasattr(stream,'reconfigure'):stream.reconfigure(errors='replace')
     done=_statusline_dispatch(sys.argv[1:] if argv is None else argv)
     if done is not None:return done
-    from tokenatlas import insights, limits, pricing, prompt_store, prompts, sessions, why
+    from tokenatlas import insights, limits, pricing, prompt_store, prompts, quota_share, sessions, why
     from tokenatlas.history import History, summarize
     from tokenatlas.report import build_report, coverage_key, read_report_state, render_report, report_state, write_report
     if Path(sys.argv[0]).name.lower() in ('energy-monitor','energy-monitor.exe','energy-monitor-script.py'):
@@ -399,8 +404,8 @@ def main(argv=None):
                 if path.exists() and read_report_state(path)==state:
                     result={'html':str(path.resolve()),'skipped':True,'reason':'unchanged'}
                 else:
-                    records=history.records()
-                    payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=None if args.shared else _counts(ctx),limit_hits=_hits(history,records))
+                    records=history.records();events=history.limit_events();hits_all=_hits(history,records,events)  # one read of the limit events serves the hits and the quota windows
+                    payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=None if args.shared else _counts(ctx),limit_hits=hits_all,all_hits=hits_all,quota_events=_events(events))
                     payload['initial_granularity']='day'
                     if not args.shared:payload.update(saved_at=str(path.absolute()),reopen=_reopen(path,args.db,always=True))  # private only: a shared report never carries a local path
                     write_report(path,render_report(payload,state=state))
@@ -434,6 +439,7 @@ def main(argv=None):
                 hits=limits.limit_hits(everything,history.limit_events(),table)  # windows come from the whole history; the CLI filters then pick the hits
                 if filtered:hits=limits.scope_hits(hits,history.records(start,end,args.harness,args.project),args.harness,start,end,args.project,universe=everything)
                 limits.mark_turns(result['prompts'],hits)
+                quota_share.mark_turns(result['prompts'],quota_share.compute(everything,table,only={(p['harness'],p['session'],p['turn_id']) for p in result['prompts']})[1])
                 texts,ctx=prompt_store.visible_all(store,everything,table)  # only the global top k: never text or context outside it
                 if kept:result['text_store']=kept
                 if not args.json:
@@ -445,8 +451,8 @@ def main(argv=None):
                         key=(p['harness'],p['session'],p['turn_id']);p['text']=texts.get(key);p['context']=ctx.get(key)
             elif args.command=='insights':
                 history.connection.execute('BEGIN')
-                table=pricing.load_prices(args.prices);everything=history.records()
-                result=insights.cost_facts(everything,table,start,end,hits=limits.limit_hits(everything,history.limit_events(),table))
+                table=pricing.load_prices(args.prices);everything=history.records();memo={}
+                result=insights.cost_facts(everything,table,start,end,hits=limits.limit_hits(everything,history.limit_events(),table),quota=quota_share.turn_shares(everything,quota_share.snapshots_from_records(everything),table,insights.memo_cost(table,memo)),memo=memo)
                 if not args.json:
                     print(insights.render_text(result));return 0
             elif args.command=='snapshot':
@@ -490,7 +496,8 @@ def main(argv=None):
                     filtered=any(getattr(args,key) is not None for key in ('start','end','harness','project','session','turn','model','effort','provider','agent'))
                     universe=history.records() if filtered else records  # the whole history: hits and their turns are computed over it
                     texts,ctx=_visible(history,args.db,universe) if args.private else (None,None)
-                    payload=build_report(records,source_status,args.timezone,redact=not args.private,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=_counts(ctx) if args.private else None,limit_hits=limits.scope_hits(_hits(history,universe),records,args.harness,start,end,args.project,args.session,args.turn,args.model,args.effort,args.provider,args.agent,universe),universe=universe if filtered else None)
+                    events=history.limit_events();hits_all=_hits(history,universe,events)
+                    payload=build_report(records,source_status,args.timezone,redact=not args.private,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=_counts(ctx) if args.private else None,limit_hits=limits.scope_hits(hits_all,records,args.harness,start,end,args.project,args.session,args.turn,args.model,args.effort,args.provider,args.agent,universe),universe=universe if filtered else None,all_hits=hits_all,quota_events=_events(events))
                     payload['initial_granularity']=args.granularity
                     if args.private:payload.update(saved_at=str(path.absolute()),reopen=_reopen(path,args.db))  # private only: a shared report never carries a local path
                     write_report(path,render_report(payload,state=state))
