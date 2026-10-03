@@ -970,7 +970,7 @@ class OneStatePerSeries(RoundEleven):
 
     def test_continuous_readings_of_a_full_window_are_one_hit_and_a_real_gap_is_two(self):
         h = self.history(self.calls(*[(m, self.snap(100.0)) for m in (1, 100, 200, 300, 302)]))
-        self.assertEqual([e['ts'][11:16] for e in h.limit_events()], ['13:20'])  # one checkpoint, past half the window since the first reading
+        self.assertEqual([e['ts'][11:16] for e in h.limit_events()], ['11:40', '13:20'])  # the reading before each half-window gap is retained
         self.assertEqual(len(self.hits(h)), 1)
         gap = self.history(self.calls((1, self.snap(100.0, hours=3)), (400, self.snap(100.0, hours=12))))
         self.assertEqual(len(self.hits(gap)), 2)
@@ -995,6 +995,21 @@ class OneStatePerSeries(RoundEleven):
         h = self.history(self.calls((1, self.snap(100.0, hours=5 / 60)), (6, self.snap(100.0, hours=400 / 60))))
         self.assertEqual(len(h.limit_events()), 1)
         self.assertEqual(len(self.hits(h)), 2)
+
+    def test_irregular_spacing_keeps_continuity_and_a_real_gap_still_splits(self):
+        h = self.history(self.calls(*[(m, self.snap(100.0)) for m in (0, 149, 301)]))
+        self.assertEqual(len(self.hits(h)), 1)  # 149 is retained before the gap to 301, so no fake 301-minute gap
+        gap = self.history(self.calls((0, self.snap(100.0, hours=3)), (149, self.snap(100.0, hours=3)), (460, self.snap(100.0, hours=12))))
+        self.assertEqual(len(self.hits(gap)), 2)  # 460 - 149 = 311 > the window: a genuine gap
+
+    def test_a_stale_provisional_episode_is_not_migrated_and_old_window_episodes_expire_everywhere(self):
+        recs = [self.cx('1', 0, 'rate_limit_reached', []), self.cx('2', 1440, 'rate_limit_reached', [self.w(100.0, resets=1700)])]
+        hits = limits.limit_hits(recs, [], TABLE)
+        self.assertEqual([(h['at'], h['window_minutes']) for h in hits], [(iso(0), None), (iso(1440), 300)])
+        self.assertEqual([h['turn'] for h in hits], [('codex', 'c1', 'ct')] * 2)
+        windowless = [self.cx('1', 0, None, [self.w(100.0, resets=400)]), self.cx('2', 1440, 'rate_limit_reached', [])]
+        hits = limits.limit_hits(windowless, [], TABLE)
+        self.assertEqual([(h['at'], h['reached'], h['window_minutes']) for h in hits], [(iso(0), 'window_full', 300), (iso(1440), 'rate_limit_reached', None)])
 
     def test_a_credits_episode_never_coalesces_with_a_time_window(self):
         credits = 'workspace_owner_credits_depleted'

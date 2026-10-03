@@ -132,6 +132,9 @@ def limit_hits(records, events, table):
         windows = _windows(quota)
         credits = bool(reached) and 'credits' in reached
         full, opened, full_w = [], set(), {}  # window series full in this observation; those it opened; their windows
+        for key, ep in list(ser.items()):  # elapsed-time expiry runs for every open window episode of the scope, whatever this snapshot carries
+            if ep and key[:3] == scope and key[3] == 'window' and at - ep['last'] > timedelta(minutes=key[4]):
+                ser[key] = None
         for w in windows:
             m, key, reset = w['minutes'], scope + ('window', w['minutes']), _iso(w['resets_at'])
             ep = ser.get(key)
@@ -148,6 +151,9 @@ def limit_hits(records, events, table):
                     continue
                 hit = None
                 p = prov.get(scope)
+                if p and at - p['last'] > timedelta(minutes=m):
+                    prov.pop(scope)  # too old to be this window's evidence: it stays an unknown-window hit and a new window episode opens
+                    p = None
                 if p and not opened and p['hit'] is not None:
                     # The provisional episode migrates into the first window that becomes full: its time and turn stay, it learns the window.
                     hit, p['hit']['window_minutes'], p['hit']['resets_at'] = p['hit'], m, w['resets_at']
