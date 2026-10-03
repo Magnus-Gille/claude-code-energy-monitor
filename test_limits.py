@@ -595,6 +595,68 @@ class RoundSeven(unittest.TestCase):
         self.assertNotIn('big_turns', {f['id'] for f in insights.cost_facts(selected, TABLE, big_turn=1.0)['facts']})  # without the universe the subagent has no turn
 
 
+class RoundEight(unittest.TestCase):
+    def test_unrecognized_harness_is_neutral_in_the_cost_facts_of_a_shared_report(self):
+        event = dict(obs('r', iso(30), quota=five_hour(120)), harness='private-harness-xyz')
+        hits = limits.limit_hits([], [event], TABLE)
+        self.assertEqual(hits[0]['harness'], 'private-harness-xyz')
+        facts = insights.cost_facts([obs('a', iso(1), 1000)], TABLE, hits=hits)
+        fact = next(f for f in facts['facts'] if f['id'] == 'limit_hits')
+        self.assertEqual(fact['values']['limits'], [{'limit': 'five_hour', 'harness': 'other', 'count': 1}])
+        self.assertNotIn('private-harness-xyz', json.dumps(facts) + insights.render_text(facts))
+        shared = report.build_report([obs('a', iso(1), 1000)], {}, redact=True, limit_hits=hits, now=datetime(2026, 9, 5, tzinfo=UTC))
+        self.assertNotIn('private-harness-xyz', json.dumps(shared))
+
+    def test_stored_oversized_window_duration_never_crashes(self):
+        import contextlib
+        import io
+        from tokenatlas.__main__ import main
+        from tokenatlas.history import _encode, normalize
+        quota = {'limit_id': 'codex', 'plan_type': 'pro', 'reached': 'rate_limit_reached', 'windows': [
+            {'slot': 'primary', 'minutes': 10 ** 400, 'used_percent': 100.0, 'resets_at': iso(500)},
+            {'slot': 'secondary', 'minutes': 'x', 'used_percent': 100.0, 'resets_at': None}]}
+        record = why.AttributionRecord(harness='codex', provider='openai', timestamp=T0, session_id='c1', call_id='bad', model='gpt-5.6-luna',
+                                       effort=None, project='app', entrypoint='cli', thread_kind='main', agent='main',
+                                       fresh_input=10, cache_read=0, cache_write=0, output=5, reasoning=0,
+                                       raw_usage={'input_tokens': 10, 'cached_input_tokens': 0, 'cache_write_input_tokens': 0, 'output_tokens': 5})
+        item = normalize(record, 'm')
+        item['quota'] = quota  # bypass normalize's validation, as an older database or an import would
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / 'h.sqlite3'
+            with History(db) as h:
+                h._insert(h.connection, _encode(item))
+                h.connection.commit()
+                hits = limits.limit_hits(h.records(), [], TABLE)
+            self.assertEqual((len(hits), hits[0]['window_minutes'], hits[0]['window']), (1, None, None))
+            def run(*args):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    return main(['--db', str(db), *args])
+            self.assertEqual(run('top', '--json'), 0)
+            self.assertEqual(run('report', '--html', str(Path(tmp) / 'r.html')), 0)
+            self.assertEqual(run('insights', '--json'), 0)
+
+    def test_omitted_type_is_neutral_unless_the_window_is_below_full(self):
+        def cx(id, minute, reached, percent):
+            quota = {'limit_id': 'codex', 'plan_type': 'plus', 'reached': reached,
+                     'windows': [{'slot': 'primary', 'minutes': 300, 'used_percent': percent, 'resets_at': iso(100)}]}
+            return obs(id, iso(minute), 1000, harness='codex', provider='openai', session='c1', turn='ct', quota=quota)
+        still_full = [cx('1', 1, 'rate_limit_reached', 100.0), cx('2', 2, None, 100.0), cx('3', 3, 'rate_limit_reached', 100.0)]
+        self.assertEqual(len(limits.limit_hits(still_full, [], TABLE)), 1)
+        recovered = [cx('1', 1, 'rate_limit_reached', 100.0), cx('2', 2, None, 40.0), cx('3', 3, 'rate_limit_reached', 100.0)]
+        self.assertEqual(len(limits.limit_hits(recovered, [], TABLE)), 2)
+
+    def test_synthetic_parent_still_anchors_the_assignment_of_a_subagent(self):
+        parent = dict(obs('m', iso(1), 400000, turn='t1'), id_synthetic=True)
+        subs = [dict(obs(f's{i}', iso(10 + i), 400000, turn=None), thread_kind='subagent', parent_session='s1', agent='a1') for i in range(2)]
+        later = obs('l', iso(30), 1000, turn='t2')
+        universe = [parent, later, *subs]
+        facts = insights.cost_facts([later, subs[1]], TABLE, big_turn=1.0, universe=universe)
+        big = next(f for f in facts['facts'] if f['id'] == 'big_turns')['values']
+        self.assertEqual(big['turns'], 2)  # t1 is anchored by the ambiguous parent, whose own tokens are not counted
+        payload = report.build_report([later, subs[1]], {}, redact=True, universe=universe, now=datetime(2026, 9, 5, tzinfo=UTC))
+        self.assertEqual(len(set(payload['columns']['prompt'])), 2)
+
+
 class Template(unittest.TestCase):
     def test_turn_row_variables_are_declared(self):
         # The script is strict: assigning to an undeclared name throws on the first attributed turn and the report never initializes.

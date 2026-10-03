@@ -18,6 +18,7 @@ from tokenatlas import credits as credit_rates, energy, limits, pricing, prompts
 I18N = Path(__file__).with_name('report_i18n.json')
 BIG_TURN = 50.0
 TOP_MODELS, ALTERNATIVES, MIN_SHARE = 5, 3, 0.10
+PUBLIC_HARNESS = frozenset(('claude', 'codex', 'pi', 'opencode'))  # the only harness names an aggregate fact may carry; an imported snapshot can name any
 PARTS = ('input', 'cache_write', 'cache_read', 'output')
 PREMIUM = ('speed=fast', 'service_tier=fast', 'service_tier=priority')  # flex is a discount, not a premium
 COMMON = ('ins_a_list', 'ins_a_scope')
@@ -75,7 +76,7 @@ def _limit_hits(hits, start, end):
     for h in hits or ():
         at = prompts._t(h['at'])
         if (start is None or at >= start) and (end is None or at < end):
-            key = (limits.label(h['window_minutes'], limits.public_reached(h['reached'])) or 'unknown', h['harness'])
+            key = (limits.label(h['window_minutes'], limits.public_reached(h['reached'])) or 'unknown', h['harness'] if h['harness'] in PUBLIC_HARNESS else 'other')
             counts[key] = counts.get(key, 0) + 1
     if not counts:
         return []
@@ -111,8 +112,9 @@ def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=Non
     # The report's own classification (template aggregate): an observation with a synthetic (ambiguous) identity is not counted in any total;
     # an incomplete one is counted and its totals are lower bounds.
     clean = [r for r in records if not r.get('id_synthetic')]
-    if universe is not None and 'assigned' not in memo:
-        base = [r for r in universe if not r.get('id_synthetic')]
+    if 'assigned' not in memo:
+        # The cards assign over every observation (an ambiguous identity still carries its turn's structure); only the numbers exclude it.
+        base = universe if universe is not None else records
         full = {prompts.ident(r): a for r, a in zip(base, prompts.assign_prompts(base))}
         memo['assigned'] = {id(r): full.get(prompts.ident(r)) for r in clean}
     window = [r for r in records if (start is None or prompts._t(r['ts']) >= start) and (end is None or prompts._t(r['ts']) < end)]

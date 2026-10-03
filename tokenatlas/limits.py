@@ -5,7 +5,7 @@ window is only what these logs contain: usage on claude.ai, ChatGPT or other mac
 list prices in USD; a request without a complete USD price is counted as unpriced, never guessed."""
 from datetime import datetime, timedelta
 
-from tokenatlas import prompts
+from tokenatlas import prompts, why
 
 PROVIDER = {'claude': 'anthropic', 'codex': 'openai'}
 TOP = 3
@@ -26,9 +26,25 @@ def _iso(value):
         return None
 
 
+def _windows(quota):
+    """The quota's windows, re-validated at the point of use (stored or imported data may predate the validators): a dict with an integer duration of
+    1..527040 minutes and a finite used_percent; anything else is skipped."""
+    out = []
+    for w in (quota or {}).get('windows') or []:
+        if not isinstance(w, dict):
+            continue
+        minutes, used = w.get('minutes'), w.get('used_percent')
+        if isinstance(minutes, bool) or not isinstance(minutes, int) or not 0 < minutes <= why.MAX_WINDOW_MINUTES:
+            continue
+        if isinstance(used, bool) or not isinstance(used, (int, float)) or used != used or used in (float('inf'), float('-inf')):
+            continue
+        out.append(w)
+    return out
+
+
 def _window(quota):
     """The window that was hit: the one with the highest used_percent (the first on a tie), or None."""
-    windows = [w for w in (quota or {}).get('windows') or [] if isinstance(w, dict)]
+    windows = _windows(quota)
     return max(windows, key=lambda w: w.get('used_percent') or 0) if windows else None
 
 
@@ -39,7 +55,7 @@ def _scope(row):
 
 def _hit_window(quota):
     """The window a Codex hit names: the only window at 100 % or more, else None (an unknown type with no single full window names none)."""
-    full = [w for w in (quota or {}).get('windows') or [] if isinstance(w, dict) and (w.get('used_percent') or 0) >= 100]
+    full = [w for w in _windows(quota) if w['used_percent'] >= 100]
     return full[0] if len(full) == 1 else None
 
 
@@ -93,8 +109,11 @@ def limit_hits(records, events, table):
         if episode and at - episode['last'] > timedelta(minutes=episode['minutes'] or 300):
             episode = open_[account] = None
         if not reached:
-            if episode and record['session'] in episode['sessions']:
-                episode = open_[account] = None
+            # Recovery needs positive evidence from a session that reported the episode: the episode's own window (same duration) is now below 100 %.
+            # An omitted type with the window still full is neutral. An episode with no window (credits) has nothing to contradict, so the omission counts.
+            below = any(w['minutes'] == episode['minutes'] and w['used_percent'] < 100 for w in _windows(quota)) if episode and episode['minutes'] else True
+            if episode and record['session'] in episode['sessions'] and below:
+                open_[account] = None
             continue
         if episode and episode['reached'] == reached and (not minutes or not episode['minutes'] or minutes == episode['minutes']):
             episode['sessions'].add(record['session'])
