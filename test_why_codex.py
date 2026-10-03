@@ -376,6 +376,119 @@ class CodexServiceTierTests(unittest.TestCase):
         self.assertEqual(price_observation(dict(base, tariff=None), table)["status"], "assumed")
 
 
+def _quota_call(timestamp, n, rate_limits="__missing__"):
+    row = _tokens(timestamp, n, {"input_tokens": 10 * n, "output_tokens": n}, {"input_tokens": 10 * n, "output_tokens": n})
+    if rate_limits != "__missing__":
+        row["payload"]["rate_limits"] = rate_limits
+    return row
+
+
+def _window(used=4.0, minutes=10080, resets=1791580407):
+    return {"used_percent": used, "window_minutes": minutes, "resets_at": resets}
+
+
+def _limits(primary=None, secondary=None, **extra):
+    return {"limit_id": "codex", "limit_name": None, "primary": primary, "secondary": secondary,
+            "credits": {"has_credits": True, "unlimited": False, "balance": "60284.72"},
+            "individual_limit": None, "spend_control_reached": None, "plan_type": "pro",
+            "rate_limit_reached_type": None, **extra}
+
+
+class CodexQuotaTests(unittest.TestCase):
+    def _collect(self, rows):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_rollout(root / "rollout-quota.jsonl", [_meta()] + rows)
+            return why.collect_codex(root, datetime(2026, 9, 3, tzinfo=timezone.utc), datetime(2027, 1, 1, tzinfo=timezone.utc))
+
+    def _quota(self, limits):
+        records = self._collect([_quota_call("2026-09-03T09:01:00Z", 1, limits)])
+        self.assertEqual(len(records), 1)
+        return records[0].quota
+
+    def test_weekly_only(self):
+        quota = self._quota(_limits(primary=_window()))
+        self.assertEqual(quota, {"limit_id": "codex", "plan_type": "pro", "reached": None, "windows": [
+            {"slot": "primary", "minutes": 10080, "used_percent": 4.0, "resets_at": "2026-10-09T21:13:27+00:00"}]})
+
+    def test_resets_at_is_utc_iso(self):
+        quota = self._quota(_limits(primary=_window(resets=0.5 + 1700000000)))
+        self.assertEqual(quota["windows"][0]["resets_at"], "2023-11-14T22:13:20.500000+00:00")
+
+    def test_five_hour_and_weekly(self):
+        quota = self._quota(_limits(primary=_window(12, 300, 1791000000), secondary=_window(40.5, 10080)))
+        self.assertEqual([(w["slot"], w["minutes"], w["used_percent"]) for w in quota["windows"]],
+                         [("primary", 300, 12.0), ("secondary", 10080, 40.5)])
+
+    def test_secondary_null_and_overshoot_kept(self):
+        quota = self._quota(_limits(primary=_window(104)))
+        self.assertEqual([w["slot"] for w in quota["windows"]], ["primary"])
+        self.assertEqual(quota["windows"][0]["used_percent"], 104.0)
+
+    def test_missing_rate_limits_is_none(self):
+        self.assertIsNone(self._quota("__missing__"))
+        self.assertIsNone(self._quota(None))
+        self.assertIsNone(self._quota("junk"))
+        self.assertIsNone(self._quota(_limits()))
+
+    def test_malformed_windows_are_dropped(self):
+        bad = [_window("4"), _window(-1), _window(float("nan")), _window(float("inf")), _window(True),
+               {"used_percent": 4, "resets_at": 1791580407}, _window(4, 0), _window(4, -5), _window(4, True),
+               _window(4, 60.5), _window(4, "300"), "x", 5]
+        for window in bad:
+            with self.subTest(window=window):
+                self.assertIsNone(self._quota(_limits(primary=window)))
+        quota = self._quota(_limits(primary=_window("4"), secondary=_window(7, 10080)))
+        self.assertEqual([w["slot"] for w in quota["windows"]], ["secondary"])
+
+    def test_missing_or_bad_reset_keeps_window_without_reset(self):
+        for resets in (None, "soon", -1, 0, True, float("nan"), 1e30):
+            with self.subTest(resets=resets):
+                quota = self._quota(_limits(primary=_window(resets=resets)))
+                self.assertIsNone(quota["windows"][0]["resets_at"])
+
+    def test_reached_type_is_kept_even_without_windows(self):
+        quota = self._quota(_limits(rate_limit_reached_type="workspace_owner_credits_depleted"))
+        self.assertEqual(quota, {"limit_id": "codex", "plan_type": "pro", "reached": "workspace_owner_credits_depleted", "windows": []})
+
+    def test_credits_and_other_account_state_are_not_stored(self):
+        quota = self._quota(_limits(primary=_window(), limit_name="Secret name", individual_limit={"x": 1},
+                                    spend_control_reached=True))
+        self.assertEqual(set(quota), {"limit_id", "plan_type", "reached", "windows"})
+        self.assertNotIn("60284", json.dumps(quota))
+        self.assertNotIn("Secret", json.dumps(quota))
+
+    def test_hostile_strings_are_dropped(self):
+        quota = self._quota(_limits(primary=_window(), plan_type={"a": 1}, limit_id="x" * 100))
+        self.assertIsNone(quota["plan_type"])
+        self.assertIsNone(quota["limit_id"])
+
+    def test_repeated_cumulative_snapshot_is_one_record(self):
+        first = _quota_call("2026-09-03T09:01:00Z", 1, _limits(primary=_window(4)))
+        again = _quota_call("2026-09-03T09:01:05Z", 1, _limits(primary=_window(5)))
+        records = self._collect([first, again])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].quota["windows"][0]["used_percent"], 4.0)  # the replayed snapshot is skipped before parsing
+
+    def test_repeat_without_rate_limits_keeps_earlier_quota(self):
+        first = _quota_call("2026-09-03T09:01:00Z", 1, _limits(primary=_window(4)))
+        again = _quota_call("2026-09-03T09:01:05Z", 1)
+        records = self._collect([first, again])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].quota["windows"][0]["used_percent"], 4.0)
+
+    def test_rate_limit_only_event_creates_no_record(self):
+        row = {"timestamp": "2026-09-03T09:00:00Z", "type": "event_msg",
+               "payload": {"type": "token_count", "info": None, "rate_limits": _limits(primary=_window())}}
+        self.assertEqual(self._collect([row]), [])
+
+    def test_other_harness_records_have_no_quota(self):
+        self.assertIsNone(why.AttributionRecord(
+            harness="claude", provider="a", timestamp=datetime(2026, 9, 3, tzinfo=timezone.utc), session_id="s", call_id="c",
+            model="m", effort="e", project="p", entrypoint="x", thread_kind="main", agent="main",
+            fresh_input=1, cache_read=0, cache_write=0, output=0, reasoning=0).quota)
+
+
 class CodexHostileMetadataTests(unittest.TestCase):
     def test_non_string_metadata_is_never_persisted(self):
         secret = {"prompt": "SECRET"}

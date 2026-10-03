@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The project fol
 
 ## [Unreleased]
 
+### Added
+
+- Codex: the history keeps the plan quota from each `token_count` event on the usage observation (#89), as a new `quota` field: plan and limit id, a reached-limit type if any, and per window (5-hour or weekly) the used percentage, window length and reset time. Nothing visible changes yet; later features can use it to show a turn's share of the limit. The credit balance and other account state are not stored. Existing Codex histories are re-read once.
+
 ## [1.11.0] - 2026-10-02
 
 ### Added

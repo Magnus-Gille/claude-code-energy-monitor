@@ -128,6 +128,7 @@ class AttributionRecord:
     id_synthetic: bool = False
     output_final: bool | None = None
     tariff: dict | None = None
+    quota: dict | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -421,6 +422,38 @@ def _codex_tariff(settings: object) -> dict | None:
     if not tier:
         return None
     return {"service_tier": _CODEX_TIERS.get(tier.lower(), tier.lower())}
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _quota_window(slot: str, value: object) -> dict | None:
+    window = _mapping(value)
+    used, minutes = _number(window.get("used_percent")), window.get("window_minutes")
+    if used is None or used < 0 or isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
+        return None
+    resets, resets_at = _number(window.get("resets_at")), None
+    if resets is not None and resets > 0:
+        try:
+            resets_at = datetime.fromtimestamp(resets, timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            resets_at = None
+    return {"slot": slot, "minutes": minutes, "used_percent": used, "resets_at": resets_at}
+
+
+def _codex_quota(value: object) -> dict | None:
+    """Compact quota snapshot from a token_count rate_limits object: limit windows and plan only. The credit balance, limit name
+    and other account state are never kept. None when there is neither a valid window nor a reached-limit type."""
+    limits = _mapping(value)
+    windows = [w for slot in ("primary", "secondary") if (w := _quota_window(slot, limits.get(slot))) is not None]
+    reached = _meta_text(limits.get("rate_limit_reached_type"), limit=64)
+    if not windows and reached is None:
+        return None
+    return {"limit_id": _meta_text(limits.get("limit_id"), limit=64), "plan_type": _meta_text(limits.get("plan_type"), limit=64),
+            "reached": reached, "windows": windows}
 
 
 def _explicit_turn_id(row: dict, message: dict) -> str | None:
@@ -829,6 +862,7 @@ def collect_codex(
                 "raw_usage": raw_usage,
                 "id_synthetic": id_synthetic,
                 "tariff": tariff,
+                "quota": _codex_quota(payload.get("rate_limits")),
             }
             existing = calls.get(key)
             if existing is None:
@@ -840,6 +874,8 @@ def collect_codex(
                     existing.get("raw_usage", {}), raw_usage
                 )
                 existing["tariff"] = _merge_tariff(existing.get("tariff"), tariff, timestamp >= existing["timestamp"])
+                existing["quota"] = candidate["quota"] or existing.get("quota") if timestamp >= existing["timestamp"] \
+                    else existing.get("quota") or candidate["quota"]
                 if timestamp >= existing["timestamp"]:
                     existing.update({
                         field: candidate[field]

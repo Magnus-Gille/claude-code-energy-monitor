@@ -7,6 +7,7 @@ cannot delete history. Only token counters and attribution metadata are retained
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -23,7 +24,7 @@ from tokenatlas import why
 OBSERVATION_VERSION = 1  # the 'v' field inside observation dicts
 SCHEMA_VERSION = 2  # PRAGMA user_version of the SQLite layout
 COLLECTOR_VERSION = 5
-HARNESS_REVISION = {'pi': 1, 'codex': 2, 'claude': 1}  # bump to force a re-read of one harness's files only (appended to its fingerprint)
+HARNESS_REVISION = {'pi': 1, 'codex': 3, 'claude': 1}  # bump to force a re-read of one harness's files only (appended to its fingerprint)
 FIELDS = ('fresh_input', 'cache_read', 'cache_write', 'output')
 ALL_FIELDS = FIELDS + ('reasoning',)
 
@@ -81,6 +82,31 @@ def clean_usage(raw):
         result['iteration_snapshots'] = [clean_usage({'iterations': snapshot})['iterations']
             for snapshot in raw['iteration_snapshots'] if isinstance(snapshot, list)]
     return result
+
+
+def _clean_quota(value):
+    """Re-validate a quota snapshot (never trust input): bounded text, known slots, sane windows; anything else is dropped."""
+    if not isinstance(value, dict):
+        return None
+    windows = []
+    for w in value.get('windows') if isinstance(value.get('windows'), list) else []:
+        if not isinstance(w, dict) or w.get('slot') not in ('primary', 'secondary'):
+            continue
+        used, minutes, resets = w.get('used_percent'), w.get('minutes'), w.get('resets_at')
+        if (isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used) or used < 0
+                or isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0):
+            continue
+        try:
+            resets = datetime.fromisoformat(resets).astimezone(timezone.utc).isoformat() if isinstance(resets, str) else None
+        except ValueError:
+            resets = None
+        windows.append({'slot': w['slot'], 'minutes': minutes, 'used_percent': float(used), 'resets_at': resets})
+    text = why._meta_text
+    reached = text(value.get('reached'), limit=64)
+    if not windows and reached is None:
+        return None
+    return {'limit_id': text(value.get('limit_id'), limit=64), 'plan_type': text(value.get('plan_type'), limit=64),
+            'reached': reached, 'windows': windows}
 
 
 def normalize(record, machine):
@@ -177,6 +203,7 @@ def normalize(record, machine):
         'cwd': text(getattr(record, 'cwd', None), limit=4096),
         'turn_id': text(getattr(record, 'turn_id', None)),
         'turn_confidence': getattr(record, 'turn_confidence', 'absent'), 'tariff': tariff,
+        'quota': _clean_quota(getattr(record, 'quota', None)),
         'tokens': tokens, 'raw_usage': raw, 'duration_ms': None,
         'accounting_basis': 'request_top_level', 'billing_verified': False,
         'warnings': sorted(set(warnings)), 'complete': not warnings,
@@ -215,6 +242,7 @@ def merge_observations(a, b, authoritative_turns=False):
         # Only a re-read of the owning copy speaks for the request's turn.
         result['turn_id'], result['turn_confidence'] = b.get('turn_id'), b.get('turn_confidence')
     result['tariff'] = {**(other.get('tariff') or {}), **(winner.get('tariff') or {})} or None
+    result['quota'] = winner.get('quota') or other.get('quota')  # whole object, never a field merge
     flags = [x.get('output_final') for x in (a, b)]
     output_final = True if True in flags else False if False in flags else None
     raw = merge_usage(a['raw_usage'], b['raw_usage'])
@@ -226,7 +254,7 @@ def merge_observations(a, b, authoritative_turns=False):
         project=result['project_label'], project_id=result['project_id'], cwd=result['cwd'],
         entrypoint=result['origin'], thread_kind=result['thread_kind'], agent=result['agent'],
         parent_session_id=result['parent_session'], turn_id=result['turn_id'],
-        turn_confidence=result['turn_confidence'], tariff=result.get('tariff'), harness_version=result['harness_version'],
+        turn_confidence=result['turn_confidence'], tariff=result.get('tariff'), quota=result.get('quota'), harness_version=result['harness_version'],
         session_started_at=(datetime.fromisoformat(result['session_started_at'])
                             if result.get('session_started_at') else None),
         raw_usage=raw, id_synthetic=result['id_synthetic'], output_final=output_final)
@@ -240,8 +268,8 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MICRO = timedelta(microseconds=1)
 _REFS = ('id', 'machine', 'harness', 'provider', 'harness_version', 'collector', 'source_type', 'session',
          'parent_session', 'session_started_at', 'thread_kind', 'agent', 'origin', 'model', 'effort',
-         'project_id', 'project_label', 'cwd', 'turn_id', 'turn_confidence', 'tariff', 'warnings', 'confidence')
-_JSON_REFS = ('tariff', 'warnings', 'confidence')
+         'project_id', 'project_label', 'cwd', 'turn_id', 'turn_confidence', 'tariff', 'warnings', 'confidence', 'quota')
+_JSON_REFS = ('tariff', 'warnings', 'confidence', 'quota')
 _FLAGS = ('id_synthetic', 'complete', 'output_final')
 _TOKENS = ALL_FIELDS
 _CONSTANTS = (('v', OBSERVATION_VERSION), ('kind', 'usage_observation'), ('duration_ms', None),
@@ -338,7 +366,7 @@ def _encode(item, key=None):
     for name in _REFS:
         value = item.get(name)
         if name in _JSON_REFS:
-            value = None if name == 'tariff' and value is None else _compact(value)
+            value = None if name in ('tariff', 'quota') and value is None else _compact(value)
         elif value is not None and type(value) is not str:
             raise ValueError(f'observation field {name} must be text or null')
         refs.append(value)
@@ -366,9 +394,10 @@ def _decode(row):
     packed, extra = rest[n + len(_TOKENS):]
     item = {'v': OBSERVATION_VERSION, 'kind': 'usage_observation', 'id': refs['id'],
             'id_synthetic': bool(flags['id_synthetic']), 'ts': _ts_text(ts_us)}
-    for name in _REFS[1:-3]:
+    for name in _REFS[1:-4]:
         item[name] = refs[name]
     item['tariff'] = None if refs['tariff'] is None else json.loads(refs['tariff'])
+    item['quota'] = None if refs['quota'] is None else json.loads(refs['quota'])
     item.update(tokens=tokens, raw_usage=_unpack_raw(packed, extra), duration_ms=None,
                 accounting_basis='request_top_level', billing_verified=False,
                 warnings=json.loads(refs['warnings']), complete=bool(flags['complete']),
@@ -419,8 +448,10 @@ class History:
                 'CREATE TABLE IF NOT EXISTS imports (harness TEXT, root TEXT, data TEXT, PRIMARY KEY(harness,root))',
             ):
                 c.execute(sql)
-            if not any(r['name'] == 'tariff' for r in c.execute('PRAGMA table_info(observations)')):
-                c.execute('ALTER TABLE observations ADD COLUMN tariff INTEGER')  # additive within schema 2
+            have = {r['name'] for r in c.execute('PRAGMA table_info(observations)')}
+            for column in ('tariff', 'quota'):
+                if column not in have:
+                    c.execute(f'ALTER TABLE observations ADD COLUMN {column} INTEGER')  # additive within schema 2
             if migrate:
                 self._migrate_v1(c)
             c.execute('INSERT OR IGNORE INTO meta VALUES (?,?)', ('machine', 'm-' + uuid.uuid4().hex))
@@ -703,7 +734,7 @@ class History:
                 raise ValueError(f'unsupported snapshot schema version {version}')
             if not found:
                 raise ValueError('snapshot has no machine id')
-            with History(copy) as source:  # migrates v1 and adds the tariff column on the copy only
+            with History(copy) as source:  # migrates v1 and adds the tariff and quota columns on the copy only
                 machine, items = source.machine, source.records()
         result = dict(harness='import', root=label, source_machine=machine, observations_seen=len(items),
                       new=0, merged=0, status='ok', last_attempt=utcnow())

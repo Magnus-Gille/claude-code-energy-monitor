@@ -66,7 +66,7 @@ class HistoryTests(unittest.TestCase):
     def test_codex_revision_changes_fingerprint_and_forces_one_reread(self):
         import tokenatlas.history as history
         from test_why_codex import _write_rollout,_meta,_context,_tokens,_tier
-        self.assertEqual(history.HARNESS_REVISION.get('codex'), 2)
+        self.assertEqual(history.HARNESS_REVISION.get('codex'), 3)
         source=self.root/'logs/rollout-one.jsonl'
         counts={'input_tokens':10,'cached_input_tokens':0,'cache_write_input_tokens':0,'output_tokens':2}
         _write_rollout(source,[_meta(),_context('2026-09-03T10:00:00Z','model','high','/work/project'),
@@ -87,6 +87,28 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],0)
             self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],1)
             self.assertEqual([r['tariff'] for r in h.records()],[{'service_tier':'fast'}])
+
+    def test_codex_revision_3_rereads_once_and_adds_quota(self):
+        import tokenatlas.history as history
+        from test_why_codex import _write_rollout,_meta,_context,_quota_call,_limits,_window
+        source=self.root/'logs/rollout-quota.jsonl'
+        _write_rollout(source,[_meta(),_context('2026-09-03T10:00:00Z','model','high','/work/project'),
+            _quota_call('2026-09-03T10:00:01Z',1,_limits(primary=_window(4,10080,1791580407)))])
+        # Revision 2 is the old collector, which never read rate_limits: the stored observation has no quota.
+        with patch.dict(history.HARNESS_REVISION,clear=False),patch('tokenatlas.why._codex_quota',return_value=None):
+            history.HARNESS_REVISION['codex']=2
+            with History(self.db) as h:
+                self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],0)
+                self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],1)
+                self.assertEqual([r['quota'] for r in h.records()],[None])
+        with History(self.db) as h:
+            self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],0)
+            self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],1)  # unchanged logs: nothing re-read, no new rows
+            records=h.records()
+            self.assertEqual(len(records),1)
+            self.assertEqual(records[0]['quota']['windows'][0]['resets_at'],'2026-10-09T21:13:27+00:00')
+            self.assertEqual(h.refresh('codex',source.parent)['files_skipped'],1)
+            self.assertEqual(len(h.records()),1)
 
     def test_zero_or_empty_partial_usage_is_retained_as_unknown(self):
         for usage in ({'output_tokens': 0}, {}):
@@ -764,6 +786,59 @@ class HistoryStorageTests(unittest.TestCase):
             self.assertEqual(h.records(), before)
             self.assertEqual({r['tariff'] for r in h.records()}, {None})
             self.assertEqual(h.connection.execute('PRAGMA user_version').fetchone()[0], 2)
+
+    def test_quota_round_trips_is_revalidated_and_merges_whole(self):
+        quota={'limit_id':'codex','plan_type':'pro','reached':None,'windows':[
+            {'slot':'primary','minutes':300,'used_percent':12.0,'resets_at':'2026-10-09T21:13:27+00:00'}]}
+        item=normalize(record(quota=quota),'m')
+        self.assertEqual(item['quota'],quota)
+        self.assertEqual(_decode(_encode(item)),item)
+        self.assertIsNone(normalize(record(),'m')['quota'])
+        hostile=dict(quota,credits={'balance':'1'},windows=quota['windows']+[{'slot':'x','minutes':1,'used_percent':1,'resets_at':None},
+            {'slot':'secondary','minutes':True,'used_percent':1,'resets_at':None},
+            {'slot':'secondary','minutes':60,'used_percent':float('nan'),'resets_at':None}])
+        self.assertEqual(normalize(record(quota=hostile),'m')['quota'],quota)
+        self.assertIsNone(normalize(record(quota='junk'),'m')['quota'])
+        self.assertIsNone(normalize(record(quota={'windows':[],'reached':None}),'m')['quota'])
+        other=dict(quota,plan_type='team',windows=[dict(quota['windows'][0],used_percent=50.0)])
+        later=normalize(record(quota=other,timestamp=datetime(2026,9,3,11,tzinfo=timezone.utc)),'m')
+        bare=normalize(record(timestamp=datetime(2026,9,3,12,tzinfo=timezone.utc)),'m')
+        for pair in ((item,later),(later,item)):
+            self.assertEqual(merge_observations(*pair)['quota'],other)
+        for pair in ((item,bare),(bare,item)):
+            self.assertEqual(merge_observations(*pair)['quota'],quota)
+
+    def test_v2_database_without_quota_column_gains_it_and_keeps_records(self):
+        path = self.root / 'h.sqlite3'
+        with History(path) as h:
+            h.refresh('claude', self.root / 'none')
+            for item in _synthetic_items()[:3]:
+                h._insert(h.connection, _encode(dict(item, quota=None)))
+            before = h.records()
+        connection = sqlite3.connect(str(path))
+        try:
+            connection.execute('ALTER TABLE observations DROP COLUMN quota')
+        except sqlite3.OperationalError:
+            self.skipTest('SQLite without DROP COLUMN')
+        self.assertNotIn('quota', [r[1] for r in connection.execute('PRAGMA table_info(observations)')])
+        connection.commit(); connection.close()
+        with History(path) as h:
+            self.assertIn('quota', [r[1] for r in h.connection.execute('PRAGMA table_info(observations)')])
+            self.assertEqual(h.records(), before)
+            self.assertEqual({r['quota'] for r in h.records()}, {None})
+            self.assertEqual(h.connection.execute('PRAGMA user_version').fetchone()[0], 2)
+
+    def test_snapshot_import_keeps_quota(self):
+        quota={'limit_id':'codex','plan_type':'pro','reached':'workspace_owner_credits_depleted','windows':[
+            {'slot':'secondary','minutes':10080,'used_percent':101.0,'resets_at':None}]}
+        item=normalize(record('q1',harness='codex',provider='openai',quota=quota,raw_usage={'input_tokens':1}),'m-remote')
+        with History(self.root/'remote.sqlite3') as remote:
+            remote._insert(remote.connection,_encode(item))
+            remote.connection.commit()
+            remote.snapshot(self.root/'remote.snap')
+        with History(self.root/'local.sqlite3') as local:
+            self.assertEqual(local.import_snapshot(self.root/'remote.snap','laptop')['new'],1)
+            self.assertEqual([r['quota'] for r in local.records()],[quota])
 
     def test_codec_refuses_fields_it_cannot_restore(self):
         item = _synthetic_items()[0]
