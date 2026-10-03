@@ -479,8 +479,8 @@ class InterruptedTurns(unittest.TestCase):
         rows = [ob('a', '00', turn='t1', out=10), dict(ob('b', '05', turn='t1', out=10), flags=['interrupted']),
                 dict(ob('c', '07', turn='t1', out=10), flags=['interrupted']), ob('d', '20', turn='t2', out=10)]
         got = {p['turn_id']: p for p in top_prompts(rows, TABLE, k=5)['prompts']}
-        self.assertEqual((got['t1']['interrupted'], got['t1']['interrupted_at']), (True, rows[1]['ts']))
-        self.assertEqual((got['t2']['interrupted'], got['t2']['interrupted_at']), (False, None))
+        self.assertEqual((got['t1']['interrupted'], got['t1']['stopped_request_at']), (True, rows[1]['ts']))
+        self.assertEqual((got['t2']['interrupted'], got['t2']['stopped_request_at']), (False, None))
 
     def test_a_flagged_subagent_request_marks_the_parent_turn(self):
         rows = [ob('a', '00', turn='t1', out=10), dict(ob('s', '01', kind='subagent', parent='s', agent='x', out=5), flags=['interrupted'])]
@@ -493,7 +493,7 @@ class InterruptedTurns(unittest.TestCase):
         res = top_prompts(rows, TABLE, k=5)
         lines = render_top(res).splitlines()
         self.assertEqual([l.endswith(' · interrupted') for l in lines[1:3]], [True, False])
-        self.assertIn('"interrupted_at"', json.dumps(res['prompts'][0]))
+        self.assertIn('"stopped_request_at"', json.dumps(res['prompts'][0]))
 
 
 if __name__ == '__main__':

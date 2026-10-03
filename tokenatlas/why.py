@@ -15,7 +15,7 @@ import os
 import re
 import sqlite3
 import stat
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -1057,6 +1057,7 @@ def collect_opencode(
     finally:
         connection.close()
     records = []
+    aborts: list[tuple[str, str | None, str | None]] = []  # (session, turn, own call id): an abort usually carries no tokens, so it is read before the token guards
     for row in rows:
         try:
             data = json.loads(row["data"])
@@ -1070,6 +1071,9 @@ def collect_opencode(
             continue
         if data.get("role") != "assistant":
             continue
+        if _mapping(data.get("error")).get("name") == "MessageAbortedError":
+            aborts.append((_meta_text(row["session_id"], default="unknown"), _meta_text(_first_text(data, "parentID", "parentId")),
+                           str(row["id"]) if row["id"] else None))
         usage = data.get("tokens")
         if not isinstance(usage, dict):
             if diagnostics is not None:
@@ -1116,8 +1120,19 @@ def collect_opencode(
             turn_confidence="observed" if turn_id else "absent", parent_session_id=parent,
             harness_version=str(row["version"]) if row["version"] is not None else None,
             raw_usage=raw_usage, id_synthetic=not bool(row["id"]),
-            flags=[INTERRUPTED] if _mapping(data.get("error")).get("name") == "MessageAbortedError" else None, **values,
+            **values,
         ))
+    if aborts:
+        by_id = {r.call_id: i for i, r in enumerate(records)}
+        flagged: set[int] = set()
+        for session, turn, own in aborts:
+            if own in by_id:  # the aborted message itself carries usage
+                flagged.add(by_id[own])
+                continue
+            same = [i for i, r in enumerate(records) if turn and r.session_id == session and r.turn_id == turn]
+            if same:  # the last retained request of the same turn was the one running
+                flagged.add(max(same, key=lambda i: (records[i].timestamp, records[i].call_id)))
+        records = [replace(r, flags=[INTERRUPTED]) if i in flagged else r for i, r in enumerate(records)]
     return sorted(records, key=lambda item: (item.timestamp, item.session_id, item.call_id))
 
 

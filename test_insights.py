@@ -697,5 +697,14 @@ class InterruptedTurnsFact(unittest.TestCase):
             self.assertNotIn('wasted', texts[lang]['ins_a_interrupted'].lower())
 
 
+class InterruptedDisclosures(unittest.TestCase):
+    def test_incomplete_request_outside_the_interrupted_turns_makes_the_share_a_lower_bound(self):
+        a = dict(ob('a1', '2026-09-03T10:00:00+00:00', model='gpt-a', fresh=100000, session='s', turn='t1'), flags=['interrupted'])
+        b = dict(ob('b1', '2026-09-03T10:10:00+00:00', model='gpt-a', fresh=100000, session='s', turn='t2'), complete=False)
+        v = by_id(cost_facts([a, b], TABLE))['interrupted_turns']['values']
+        self.assertTrue(v['lower_bound'])
+        self.assertEqual(v['lower_bound_requests'], 1)
+
+
 if __name__ == '__main__':
     unittest.main()

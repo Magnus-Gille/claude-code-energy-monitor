@@ -109,7 +109,7 @@ def top_prompts(records, table, k=5, by='cost', keep=None, credit_table=None):
             'subagent_requests': len(subs), 'subagents': len({(r['session'], r.get('agent')) for r in subs}),
             'tokens': tokens, 'total_tokens': sum(tokens[c] for c in CLASSES if c != 'reasoning'),
             'cost': sum(priced) if priced else None, 'cost_complete': len(priced) == len(costs),
-            'interrupted': bool(stopped), 'interrupted_at': min(stopped, key=_t) if stopped else None,
+            'interrupted': bool(stopped), 'stopped_request_at': min(stopped, key=_t) if stopped else None,
             'credits': sum(owed) if None not in owed else None, 'credits_lower_bound': any(not r.get('complete', True) for r in rows),
             'resume': resume_command(harness, session, head.get('cwd'))})  # validated and quoted; Claude needs the directory
     if by == 'cost':

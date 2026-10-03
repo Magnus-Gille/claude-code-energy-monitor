@@ -345,7 +345,7 @@ def _interrupted(records, inside, scope, memo, total):
     never guessed. Omitted when no turn in the window was interrupted."""
     if 'assigned' not in memo:
         memo['assigned'] = {id(r): a for r, a in zip(records, prompts.assign_prompts(records))}
-    turns, used = {}, []
+    turns = {}
     for r in inside:
         found = memo['assigned'][id(r)]
         if found:
@@ -359,10 +359,7 @@ def _interrupted(records, inside, scope, memo, total):
     stopped = [t for t in turns.values() if t[0]]
     if not stopped:
         return []
-    for r in inside:
-        found = memo['assigned'][id(r)]
-        if found and turns[found[:3]][0] and memo[id(r)][2] is not None:
-            used.append(memo[id(r)])
+    used = [memo[id(r)] for r in inside if memo[id(r)][2] is not None]  # the share's denominator is every priced request, so its disclosures are too
     cost = sum(t[1] for t in stopped)
     return [_fact('interrupted_turns', dict(count=len(stopped), cost=cost, priced_cost=total, share=_share(cost, total),
                                             unpriced_turns=sum(1 for t in stopped if not t[2]), partly_priced_turns=sum(1 for t in stopped if 0 < t[2] < t[3]), **scope),

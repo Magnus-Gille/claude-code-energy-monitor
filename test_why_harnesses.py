@@ -192,5 +192,49 @@ class InterruptedFlagTests(unittest.TestCase):
         self.assertEqual(got, {"m1": ["interrupted"], "m2": None, "m3": None})
 
 
+    def _opencode(self, entries):
+        """entries: (id, turn parentID, completed ms, tokens or None, error name or None); returns {call id: flags}."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "opencode.db"
+            connection = create_opencode_db(db)
+            connection.execute("INSERT INTO session VALUES (?,?,?,?,?,?,?)", ("s", "p", None, "/work/app", "1", 1, 2))
+            for name, turn, ms, tokens, error in entries:
+                data = {"role": "assistant", "providerID": "openai", "modelID": "m", "parentID": turn,
+                        "time": {"created": ms, "completed": ms}}
+                if tokens is not None:
+                    data["tokens"] = tokens
+                if error:
+                    data["error"] = {"name": error}
+                connection.execute("INSERT INTO message VALUES (?,?,?,?,?)", (name, "s", ms, ms, json.dumps(data)))
+            connection.commit()
+            connection.close()
+            return {r.call_id: r.flags for r in why.collect_opencode(db, START, END)}
+
+    BILLED = {"input": 1, "output": 2, "cache": {"read": 0, "write": 0}}
+    ZERO = {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+    T0 = 1788429600000
+
+    def test_opencode_zero_usage_abort_flags_the_last_billed_request_of_its_turn(self):
+        got = self._opencode([("m1", "u1", self.T0, self.BILLED, None), ("m2", "u1", self.T0 + 1000, self.BILLED, None),
+                              ("m3", "u1", self.T0 + 2000, self.ZERO, "MessageAbortedError"),
+                              ("m4", "u2", self.T0 + 3000, self.BILLED, None)])
+        self.assertEqual(got, {"m1": None, "m2": ["interrupted"], "m4": None})
+
+    def test_opencode_abort_without_usage_flags_the_last_billed_request_of_its_turn(self):
+        got = self._opencode([("m1", "u1", self.T0, self.BILLED, None), ("m2", "u1", self.T0 + 1000, None, "MessageAbortedError")])
+        self.assertEqual(got, {"m1": ["interrupted"]})
+
+    def test_opencode_abort_with_no_earlier_request_in_the_turn_flags_nothing(self):
+        got = self._opencode([("m1", "u1", self.T0, self.BILLED, None), ("m2", "u2", self.T0 + 1000, self.ZERO, "MessageAbortedError")])
+        self.assertEqual(got, {"m1": None})
+
+    def test_pi_zero_usage_abort_flags_the_last_record_of_its_turn(self):
+        first = pi_message("e2", "r1", "2026-09-03T10:00:02Z", self.U)
+        aborted = pi_message("e3", "r2", "2026-09-03T10:00:03Z", {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0})
+        aborted["message"]["stopReason"] = "aborted"
+        got = self.collect_pi([self.user("e1", "2026-09-03T10:00:01Z"), first, aborted])
+        self.assertEqual(got, {"r1": ["interrupted"]})
+
+
 if __name__ == "__main__":
     unittest.main()
