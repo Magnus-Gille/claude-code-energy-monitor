@@ -823,6 +823,55 @@ class RoundEleven(unittest.TestCase):
         self.assertEqual(len(limits.limit_hits([], events(6), TABLE)), 2)
 
 
+class WindowFull(unittest.TestCase):
+    @staticmethod
+    def cx(id, minute, percent, session='c1', reached=None, minutes=300, resets=500):
+        quota = {'limit_id': 'codex', 'plan_type': 'plus', 'reached': reached,
+                 'windows': [{'slot': 'primary', 'minutes': minutes, 'used_percent': percent, 'resets_at': iso(resets)}]}
+        r = obs(id, iso(minute), 1000, harness='codex', provider='openai', session=session, turn='ct', quota=quota)
+        r['model'] = 'gpt-5.6-luna'
+        return r
+
+    def test_a_window_reaching_full_is_a_hit_and_lasts_while_it_stays_full(self):
+        recs = [self.cx('1', 1, 99.0), self.cx('2', 2, 100.0), self.cx('3', 3, 100.0), self.cx('4', 4, 40.0, resets=800), self.cx('5', 5, 100.0, resets=800)]
+        hits = limits.limit_hits(recs, [], TABLE)
+        self.assertEqual([(h['at'], h['reached'], h['window_minutes']) for h in hits], [(iso(2), 'window_full', 300), (iso(5), 'window_full', 300)])
+        self.assertEqual(hits[0]['turn'], ('codex', 'c1', 'ct'))
+        self.assertEqual(hits[0]['window']['start'], iso(2 - 300))  # the trailing window, own harness only
+        self.assertEqual(limits.badge(hits[0]), 'Hit the 5-hour limit')
+        weekly = limits.limit_hits([self.cx('1', 1, 99.0, minutes=10080), self.cx('2', 2, 100.0, minutes=10080)], [], TABLE)
+        self.assertEqual((weekly[0]['window_minutes'], limits.badge(weekly[0])), (10080, 'Hit the weekly limit'))
+
+    def test_a_stale_lower_reading_from_another_session_does_not_end_it(self):
+        recs = [self.cx('1', 1, 100.0, 'A'), self.cx('2', 2, 98.0, 'B'), self.cx('3', 3, 100.0, 'A')]
+        self.assertEqual(len(limits.limit_hits(recs, [], TABLE)), 1)
+        own = [self.cx('1', 1, 100.0, 'A'), self.cx('2', 2, 98.0, 'A', resets=800), self.cx('3', 3, 100.0, 'A', resets=800)]
+        self.assertEqual(len(limits.limit_hits(own, [], TABLE)), 2)
+        late = [self.cx('1', 1, 100.0, 'A'), self.cx('2', 1 + 301, 100.0, 'A', resets=900)]
+        self.assertEqual(len(limits.limit_hits(late, [], TABLE)), 2)  # a gap longer than the window ends it
+
+    def test_flapping_readings_of_one_window_instance_are_one_hit(self):
+        recs = [self.cx('1', 1, 100.0), self.cx('2', 2, 97.0), self.cx('3', 3, 100.0), self.cx('4', 4, 96.0), self.cx('5', 5, 100.0)]  # one reset time
+        self.assertEqual(len(limits.limit_hits(recs, [], TABLE)), 1)
+
+    def test_a_reached_type_and_a_full_window_together_are_one_hit(self):
+        together = [self.cx('1', 1, 100.0, reached='rate_limit_reached')]
+        hits = limits.limit_hits(together, [], TABLE)
+        self.assertEqual([(h['reached'], h['window_minutes']) for h in hits], [('rate_limit_reached', 300)])
+        window_first = [self.cx('1', 1, 100.0), self.cx('2', 2, 100.0, reached='rate_limit_reached')]
+        hits = limits.limit_hits(window_first, [], TABLE)
+        self.assertEqual([(h['at'], h['reached']) for h in hits], [(iso(1), 'rate_limit_reached')])
+        type_first = [self.cx('1', 1, 100.0, reached='rate_limit_reached'), self.cx('2', 2, 100.0)]
+        self.assertEqual(len(limits.limit_hits(type_first, [], TABLE)), 1)
+
+    def test_window_full_is_public_and_counted_by_window_length(self):
+        hits = limits.limit_hits([self.cx('1', 1, 99.0), self.cx('2', 2, 100.0)], [], TABLE)
+        facts = insights.cost_facts([], TABLE, hits=hits)
+        self.assertEqual(next(f for f in facts['facts'] if f['id'] == 'limit_hits')['values']['limits'], [{'limit': 'five_hour', 'harness': 'codex', 'count': 1}])
+        payload = report.build_report([self.cx('1', 1, 99.0)], {}, redact=True, limit_hits=hits, now=datetime(2026, 9, 5, tzinfo=UTC))
+        self.assertEqual(payload['limit_hits'][0]['reached'], 'window_full')
+
+
 class Template(unittest.TestCase):
     def test_turn_row_variables_are_declared(self):
         # The script is strict: assigning to an undeclared name throws on the first attributed turn and the report never initializes.

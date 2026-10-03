@@ -12,7 +12,7 @@ TOP = 3
 RETRY_GAP = timedelta(minutes=10)  # rejections without a reset time belong to one hit only within this gap
 # The only limit types a shared report or the cost facts may name; any other string is neutral ("other").
 PUBLIC_REACHED = frozenset(('five_hour', 'seven_day', 'rate_limit_reached', 'workspace_owner_credits_depleted', 'workspace_member_credits_depleted',
-                            'workspace_owner_usage_limit_reached', 'workspace_member_usage_limit_reached'))
+                            'workspace_owner_usage_limit_reached', 'workspace_member_usage_limit_reached', 'window_full'))
 
 
 def public_reached(reached):
@@ -113,6 +113,8 @@ def limit_hits(records, events, table):
             claude[key] = hit
         recent[key[:2]] = (hit, at)
         found.append(hit)
+    wdone = {}  # window series -> reset times of the window instances already reported (a reset time names one window instance)
+    wopen = {}  # (harness, limit id, plan, window minutes) -> the open window-full episode: last time at 100 %, sessions that reported it, its hit
     open_ = {}  # (harness, limit id) -> the open episode: reached type, window minutes, last reached time, sessions that reported it
     series = sorted([*records, *(e for e in events if (e.get('quota') or {}).get('status') == 'event')], key=lambda r: r['ts'])  # usage quotas and quota events, in time order
     for record in series:
@@ -124,6 +126,35 @@ def limit_hits(records, events, table):
         window = None if reached and 'credits' in reached else _hit_window(quota)
         account = (record['harness'], quota.get('limit_id'))  # consecutive per harness and limit, never across them
         at, minutes = prompts._t(record['ts']), window and window.get('minutes')
+        # A time window that crosses from below 100 % to 100 % or more is a hit of its own: Codex does not name a reached type when a window fills.
+        # It lasts while the window stays full; a lower reading proves recovery only from a session that reported it full (a stale one from
+        # another session is no evidence), or the episode ends after a gap longer than the window. Simultaneous with a reached-type episode
+        # for the same window it is one hit.
+        for w in _windows(quota):
+            m, wkey = w['minutes'], (record['harness'], quota.get('limit_id'), quota.get('plan_type'), w['minutes'])
+            we = wopen.get(wkey)
+            if we and at - we['last'] > timedelta(minutes=m):
+                we = wopen[wkey] = None
+            if w['used_percent'] >= 100:
+                if we:
+                    we['sessions'].add(record['session'])
+                    we['last'] = at
+                    continue
+                ep = open_.get(account)
+                matched = bool(reached) or (ep and not ep['credits'] and (ep['minutes'] == m or m in ep['cands']))  # a named type owns the hit
+                hit = None
+                reset = _iso(w['resets_at'])
+                # Readings of one window instance can flap around 100 % (several sessions, accounts or rolling estimates): the same reset time is the same hit.
+                seen_reset = reset is not None and any(abs(reset - r) <= RETRY_GAP for r in wdone.get(wkey, ()))
+                if not matched and not seen_reset:
+                    hit = dict(harness=record['harness'], at=record['ts'], reached='window_full', window_minutes=m, resets_at=w['resets_at'],
+                               retries=1, rolling=True, _row=record, **_scope(record))
+                    found.append(hit)
+                    if reset is not None:
+                        wdone.setdefault(wkey, []).append(reset)
+                wopen[wkey] = dict(last=at, sessions={record['session']}, hit=hit)
+            elif we and record['session'] in we['sessions']:
+                wopen[wkey] = None
         episode = open_.get(account)
         # An episode is one hit. It ends on recovery reported by a session that itself reported the reached state in it (a stale null from another
         # session proves nothing), on a gap longer than its window, or when a different window is named. A reset time only slides, so its
@@ -150,10 +181,19 @@ def limit_hits(records, events, table):
             if not episode['credits']:  # a later observation may supply the window the episode started without
                 episode['cands'] |= {w['minutes'] for w in _windows(quota) if w['used_percent'] >= 100}
             continue
-        found.append(dict(harness=record['harness'], at=record['ts'], reached=reached, window_minutes=minutes or None,
-                          resets_at=window.get('resets_at') if window else None, retries=1, rolling=True, _row=record, **_scope(record)))
         credits = 'credits' in reached
         cands = set() if credits else {w['minutes'] for w in _windows(quota) if w['used_percent'] >= 100}
+        upgraded = None  # a window-full hit already open for this window becomes this reached-type hit: one hit, not two
+        for m in ({minutes} if minutes else set()) | cands:
+            we = wopen.get((record['harness'], quota.get('limit_id'), quota.get('plan_type'), m))
+            if we and we['hit'] is not None and we['hit']['reached'] == 'window_full':
+                upgraded = we['hit']
+                break
+        if upgraded is not None:
+            upgraded['reached'] = reached
+        else:
+            found.append(dict(harness=record['harness'], at=record['ts'], reached=reached, window_minutes=minutes or None,
+                              resets_at=window.get('resets_at') if window else None, retries=1, rolling=True, _row=record, **_scope(record)))
         open_[account] = dict(reached=reached, minutes=minutes or None, cands=cands, credits=credits, last=at, sessions={record['session']})
     if not found:
         return []  # the usual case: skip the turn assignment over the whole history
@@ -254,7 +294,7 @@ def mark_turns(items, hits):
 def badge(hit):
     """English words for a turn card: names the window by its length."""
     name = label(hit['window_minutes'], hit['reached'])
-    return {'five_hour': 'Hit the 5-hour limit', 'weekly': 'Hit the weekly limit'}.get(name) or f'Hit a limit ({name})' if name else 'Hit a limit'
+    return {'five_hour': 'Hit the 5-hour limit', 'weekly': 'Hit the weekly limit'}.get(name) or (f'Hit a limit ({name})' if name and name != 'window_full' else 'Hit a limit')
 
 
 def scope_hits(hits, records, harness=None, start=None, end=None, project=None, session=None, turn=None, model=None, effort=None, provider=None, agent=None, universe=None):
