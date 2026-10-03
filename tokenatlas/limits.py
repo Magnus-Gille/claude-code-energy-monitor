@@ -113,11 +113,14 @@ def limit_hits(records, events, table):
             claude[key] = hit
         recent[key[:2]] = (hit, at)
         found.append(hit)
-    # Codex: one open episode per series, updated independently by every observation that carries evidence for it. A series is a time window
-    # (harness, limit id, plan, window minutes) or a named type that names no window (e.g. credit exhaustion: harness, limit id, plan, type).
-    # An episode is one hit, at its earliest observation. A named reached type that identifies full windows only upgrades the label of those
-    # windows' episodes; it never suppresses or hides another series.
-    ser = {}   # series key -> open episode {hit, sessions that reported it, last full/on time, latest reset time}
+    # Codex. Time-window series own all episode state: a series is (harness, limit id, plan, window minutes) and its episode is one hit, at its
+    # earliest observation. It opens when the window is full, closes on a reading below 100 % from a session that reported it full, on a gap
+    # longer than the window, or on a new reset instance. A non-credit named reached type is only a label: with full windows it labels their
+    # episodes; with none it labels an open window episode of the scope, else opens a provisional "unknown window" episode that migrates into
+    # the first window series that becomes full (keeping its time and turn). Credit exhaustion is an independent series with no window.
+    # Observations with missing or empty windows are neutral for window series.
+    ser = {}   # window and credits series -> open episode {hit, sessions that reported it, last full/on time, latest reset time}
+    prov = {}  # scope -> the provisional unknown-window episode {hit, reached, sessions, last}
     done = {}  # window series -> reset times of the window instances already reported (a reset time names one window instance)
     series = sorted([*records, *(e for e in events if (e.get('quota') or {}).get('status') == 'event')], key=lambda r: r['ts'])  # usage quotas and quota events, in time order
     for record in series:
@@ -126,13 +129,9 @@ def limit_hits(records, events, table):
             continue  # a record without quota says nothing about a limit and leaves every series alone
         reached, session, at = quota.get('reached'), record['session'], prompts._t(record['ts'])
         scope = (record['harness'], quota.get('limit_id'), quota.get('plan_type'))  # never across harnesses, limits or plans
-        full = []  # window series that are full in this observation
         windows = _windows(quota)
-        opened = set()  # window series whose episode this observation opened
-        named = scope + ('named', reached) if reached else None
-        named_ep = ser.get(named) if named else None  # a named episode already open for this type
-        joins = named_ep is not None and 'credits' not in reached  # a non-credit type's windows join it (no second hit); a credits series is independent
-        full_w = {}
+        credits = bool(reached) and 'credits' in reached
+        full, opened, full_w = [], set(), {}  # window series full in this observation; those it opened; their windows
         for w in windows:
             m, key, reset = w['minutes'], scope + ('window', w['minutes']), _iso(w['resets_at'])
             ep = ser.get(key)
@@ -148,8 +147,19 @@ def limit_hits(records, events, table):
                     ep['last'], ep['reset'] = at, reset or ep['reset']
                     continue
                 hit = None
+                p = prov.get(scope)
+                if p and not opened and p['hit'] is not None:
+                    # The provisional episode migrates into the first window that becomes full: its time and turn stay, it learns the window.
+                    hit, p['hit']['window_minutes'], p['hit']['resets_at'] = p['hit'], m, w['resets_at']
+                    ep_sessions = p['sessions'] | {session}
+                    prov.pop(scope)
+                    if reset is not None:
+                        done.setdefault(key, []).append(reset)
+                    ser[key] = dict(hit=hit, sessions=ep_sessions, last=at, reset=reset)
+                    opened.add(key)
+                    continue
                 # Readings of one window instance can flap around 100 % (several sessions, accounts or rolling estimates): the same reset time is the same hit.
-                if not joins and not (reset is not None and any(abs(reset - r) <= RETRY_GAP for r in done.get(key, ()))):
+                if not (reset is not None and any(abs(reset - r) <= RETRY_GAP for r in done.get(key, ()))):
                     hit = dict(harness=record['harness'], at=record['ts'], reached='window_full', window_minutes=m, resets_at=w['resets_at'],
                                retries=1, rolling=True, _row=record, **_scope(record))
                     found.append(hit)
@@ -159,32 +169,49 @@ def limit_hits(records, events, table):
                 opened.add(key)
             elif ep and session in ep['sessions']:
                 ser[key] = None  # recovery: a reading below 100 % from a session that reported the window full
-        # A named type that names no full window (credit exhaustion, an unknown type with no full window) is a series of its own; one that does
-        # attaches to the full windows' episodes. Another type, or none, from a session that reported it is recovery.
+        # Recovery of the other series: a credits series (or the provisional episode) ends when a participating session reports another type, or none;
+        # the provisional episode also ends on a reading with windows where none is full.
         for key, ep in list(ser.items()):
-            # (a non-credit type is judged by its windows: recovery needs a reading with windows where none is full)
-            if ep and key[:3] == scope and key[3] == 'named' and key[4] != reached and session in ep['sessions'] and ('credits' in key[4] or (windows and not full)):
+            if ep and key[:3] == scope and key[3] == 'credits' and key[4] != reached and session in ep['sessions']:
                 ser[key] = None
-        if named_ep:
-            named_ep['sessions'].add(session)
-            named_ep['last'] = at
-            hit = named_ep['hit']
-            # Later evidence in the same episode that uniquely identifies the window fills it in on the existing hit (its time and turn stay).
-            if joins and len(full) == 1 and hit is not None and hit['window_minutes'] is None:
-                hit['window_minutes'], hit['resets_at'] = full_w[full[0]]['minutes'], full_w[full[0]]['resets_at']
-        if reached and not named_ep and (not full or 'credits' in reached):
-            hit = dict(harness=record['harness'], at=record['ts'], reached=reached, window_minutes=None, resets_at=None, retries=1, rolling=True,
-                       _row=record, **_scope(record))
-            found.append(hit)
-            ser[named] = dict(hit=hit, sessions={session}, last=at, reset=None)
-        elif reached and 'credits' not in reached:
-            # The type labels the windows it was reported with. A window that fills later, while the type already labels another window's open
-            # episode, is its own crossing and keeps the neutral label.
-            labelled = any(ser[k] and ser[k]['hit'] and ser[k]['hit']['reached'] == reached and k not in opened for k in ser if k[:3] == scope and k[3] == 'window')
-            for key in full:
-                hit = ser[key]['hit']
-                if hit is not None and hit['reached'] == 'window_full' and not (labelled and key in opened):
-                    hit['reached'] = reached
+        p = prov.get(scope)
+        if p and session in p['sessions'] and (p['reached'] != reached or (windows and not full)):
+            prov.pop(scope)
+            p = None
+        if credits:
+            key = scope + ('credits', reached)
+            ep = ser.get(key)
+            if ep:
+                ep['sessions'].add(session)
+                ep['last'] = at
+            else:
+                hit = dict(harness=record['harness'], at=record['ts'], reached=reached, window_minutes=None, resets_at=None, retries=1, rolling=True,
+                           _row=record, **_scope(record))
+                found.append(hit)
+                ser[key] = dict(hit=hit, sessions={session}, last=at, reset=None)
+        elif reached:
+            open_windows = [k for k, e in ser.items() if e and k[:3] == scope and k[3] == 'window']
+            if full:
+                # The type labels the windows it was reported with. A window that fills later, while the type already labels another window's open
+                # episode, is its own crossing and keeps the neutral label.
+                labelled = any(ser[k]['hit'] and ser[k]['hit']['reached'] == reached and k not in opened for k in open_windows)
+                for key in full:
+                    hit = ser[key]['hit']
+                    if hit is not None and hit['reached'] == 'window_full' and not (labelled and key in opened):
+                        hit['reached'] = reached
+            elif open_windows:
+                for key in open_windows:  # no full window in this observation: label an open episode, create no state
+                    hit = ser[key]['hit']
+                    if hit is not None and hit['reached'] == 'window_full':
+                        hit['reached'] = reached
+            elif p:
+                p['sessions'].add(session)
+                p['last'] = at
+            else:
+                hit = dict(harness=record['harness'], at=record['ts'], reached=reached, window_minutes=None, resets_at=None, retries=1, rolling=True,
+                           _row=record, **_scope(record))
+                found.append(hit)
+                prov[scope] = dict(hit=hit, reached=reached, sessions={session}, last=at)
     if not found:
         return []  # the usual case: skip the turn assignment over the whole history
     found.sort(key=lambda h: h['at'])

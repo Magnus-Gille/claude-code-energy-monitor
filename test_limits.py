@@ -744,9 +744,9 @@ class RoundTen(unittest.TestCase):
         earlier['model'] = 'gpt-5.6-luna'
         ranked = limits.limit_hits([earlier, *recs], [], TABLE)[0]['window']
         self.assertEqual([t['turn'][2] for t in ranked['top']], ['early'])
-        # with no window ever supplied, an omitted type proves nothing for a time-window episode
+        # a provisional (unknown-window) episode ends when a participating session reports no type
         none = [self.cx('1', 1, 'rate_limit_reached', []), self.cx('2', 2, None, []), self.cx('3', 3, 'rate_limit_reached', [])]
-        self.assertEqual(len(limits.limit_hits(none, [], TABLE)), 1)
+        self.assertEqual(len(limits.limit_hits(none, [], TABLE)), 2)
 
     def test_claude_retries_with_and_without_a_reset_are_one_hit(self):
         with_reset, without = five_hour(120), dict(five_hour(120), windows=[], resets_at=None)
@@ -974,6 +974,27 @@ class OneStatePerSeries(RoundEleven):
         self.assertEqual(len(self.hits(h)), 1)
         gap = self.history(self.calls((1, self.snap(100.0, hours=3)), (400, self.snap(100.0, hours=12))))
         self.assertEqual(len(self.hits(gap)), 2)
+
+    def test_provisional_episode_migrates_into_the_first_full_window(self):
+        weekly = lambda p: self.w(p, 10080, 900)
+        recs = [self.cx('1', 1, 'rate_limit_reached', []), self.cx('2', 2, 'rate_limit_reached', [self.w(100.0)]),
+                self.cx('3', 3, 'rate_limit_reached', [self.w(100.0), weekly(100.0)])]
+        hits = limits.limit_hits(recs, [], TABLE)
+        self.assertEqual([(h['at'], h['window_minutes'], h['reached']) for h in hits],
+                         [(iso(1), 300, 'rate_limit_reached'), (iso(3), 10080, 'window_full')])  # migrated hit keeps its time; the later weekly crossing is its own
+        gap = [self.cx('1', 1, 'rate_limit_reached', []), self.cx('2', 2, 'rate_limit_reached', [self.w(100.0)]),
+               self.cx('3', 400, 'rate_limit_reached', [self.w(100.0, resets=900)])]
+        self.assertEqual(len(limits.limit_hits(gap, [], TABLE)), 2)
+
+    def test_empty_windows_are_neutral_for_a_window_series(self):
+        recs = [self.cx('1', 1, 'rate_limit_reached', [self.w(100.0)]), self.cx('2', 2, 'rate_limit_reached', []),
+                self.cx('3', 3, 'rate_limit_reached', [self.w(100.0)])]
+        self.assertEqual(len(limits.limit_hits(recs, [], TABLE)), 1)
+
+    def test_a_new_window_instance_with_unchanged_state_is_retained_by_the_collector(self):
+        h = self.history(self.calls((1, self.snap(100.0, hours=5 / 60)), (6, self.snap(100.0, hours=400 / 60))))
+        self.assertEqual(len(h.limit_events()), 1)
+        self.assertEqual(len(self.hits(h)), 2)
 
     def test_a_credits_episode_never_coalesces_with_a_time_window(self):
         credits = 'workspace_owner_credits_depleted'

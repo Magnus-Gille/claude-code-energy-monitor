@@ -454,9 +454,26 @@ def _quota_window(slot: str, value: object) -> dict | None:
 
 
 def _note_full(last_full: dict, scope: tuple, quota: dict, timestamp: datetime) -> None:
+    """Remember, per full window, the time and the reset of the latest retained full evidence."""
     for w in quota.get("windows") or ():
         if (w.get("used_percent") or 0) >= 100:
-            last_full[scope + (w["minutes"],)] = timestamp
+            last_full[scope + (w["minutes"],)] = (timestamp, parse_iso_timestamp(w.get("resets_at")))
+
+
+def _full_evidence_due(last_full: dict, scope: tuple, quota: dict, timestamp: datetime) -> bool:
+    """A still-full window needs a retained reading when the last retained full evidence is older than half the window, or when its reset moved on
+    by more than half the window past the old reset and the time is past that old reset (a new window instance, which the detector must see)."""
+    for w in quota.get("windows") or ():
+        if (w.get("used_percent") or 0) < 100:
+            continue
+        kept = last_full.get(scope + (w["minutes"],))
+        if kept is None:
+            continue
+        half = timedelta(minutes=w["minutes"] / 2)
+        reset = parse_iso_timestamp(w.get("resets_at"))
+        if timestamp - kept[0] > half or (reset and kept[1] and timestamp >= kept[1] and reset - kept[1] > half):
+            return True
+    return False
 
 
 def _quota_state(quota: dict) -> tuple:
@@ -836,7 +853,7 @@ def collect_codex(
         tariff: dict | None = None  # latest thread_settings.service_tier in this file, until it changes
         last_call: tuple[str, str] | None = None  # latest record of the current turn, flagged by a turn_aborted event
         last_quota: dict = {}  # (limit id, plan) -> (reached type, windows at 100 %) of the latest quota seen in this file, for quota-only transitions
-        last_full: dict = {}  # (limit id, plan, window minutes) -> time of the latest full reading seen in this file, for keep-alive events
+        last_full: dict = {}  # (limit id, plan, window minutes) -> (time, reset) of the latest retained full evidence in this file, for checkpoint events
         harness_version = _first_text(meta_payload, "cli_version", "version")
         originator = _meta_text(meta_payload.get("originator"), source, thread_source, default=originator)
 
@@ -908,9 +925,7 @@ def collect_codex(
                 # Besides transitions, a checkpoint event is kept whenever the last retained full evidence for a still-full window (a usage record's
                 # quota counts) is older than half the window: retained evidence is then never farther apart than the window while readings continue,
                 # so a real gap (no readings for longer than the window) is the only thing the detector can see as an expiry.
-                stale = any(
-                    timestamp - last_full.get(scope + (w["minutes"],), timestamp) > timedelta(minutes=w["minutes"] / 2)
-                    for w in quota.get("windows") or () if (w.get("used_percent") or 0) >= 100)
+                stale = _full_evidence_due(last_full, scope, quota, timestamp)
                 if state == last_quota.get(scope, (None, frozenset())) and not stale:
                     return
                 last_quota[scope] = state
