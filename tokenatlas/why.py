@@ -453,6 +453,11 @@ def _quota_window(slot: str, value: object) -> dict | None:
     return {"slot": slot, "minutes": minutes, "used_percent": used, "resets_at": resets_at}
 
 
+def _quota_state(quota: dict) -> tuple:
+    """What a quota-only transition compares: the reached type and whether any window is at 100 % or more."""
+    return (quota.get("reached"), any((w.get("used_percent") or 0) >= 100 for w in quota.get("windows") or ()))
+
+
 def _codex_quota(value: object) -> dict | None:
     """Compact quota snapshot from a token_count rate_limits object: limit windows and plan only. The credit balance, limit name
     and other account state are never kept. None when there is neither a valid window, a reached-limit type, a limit id nor a plan."""
@@ -823,6 +828,7 @@ def collect_codex(
         counter_segment = 0
         tariff: dict | None = None  # latest thread_settings.service_tier in this file, until it changes
         last_call: tuple[str, str] | None = None  # latest record of the current turn, flagged by a turn_aborted event
+        last_quota: tuple = (None, False)  # (reached type, a window at 100 %) of the latest quota seen in this file, for quota-only transitions
         harness_version = _first_text(meta_payload, "cli_version", "version")
         originator = _meta_text(meta_payload.get("originator"), source, thread_source, default=originator)
 
@@ -881,7 +887,38 @@ def collect_codex(
             info = _mapping(payload.get("info"))
             usage = info.get("last_token_usage")
             timestamp = parse_iso_timestamp(row.get("timestamp"))
+
+            def quota_event() -> None:
+                """A token_count that produces no usage record (quota-only, repeated counters, zero tokens) still reports the account's limits: keep a
+                zero-token quota event when they changed since the last quota in this file (reached type, or a window crossing 100 %), so the moment a
+                limit is reached (the requests then fail and carry no usage) and its recovery are not lost."""
+                nonlocal last_quota
+                quota = _codex_quota(payload.get("rate_limits"))
+                if quota is None or timestamp is None:
+                    return
+                state = _quota_state(quota)
+                if state == last_quota:
+                    return
+                last_quota = state
+                thread_kind, agent, parent_session_id = _codex_thread(source, thread_source)
+                ordinal = row.get("ordinal")
+                identity = ordinal if ordinal is not None else _stable_hash({"timestamp": row.get("timestamp"), "quota": quota})
+                if has_session_meta:
+                    call_id, synthetic = f"{session_id}:{identity}:quota", ordinal is None
+                else:
+                    call_id, synthetic = "synthetic:" + _stable_hash({"timestamp": row.get("timestamp"), "ordinal": ordinal, "quota": quota}), True
+                calls.setdefault((provider, call_id), {
+                    "timestamp": timestamp, "session_id": session_id, "call_id": call_id, "model": "unknown", "effort": "unknown",
+                    "project": _project_name(cwd), "project_id": str(cwd) if isinstance(cwd, str) and cwd else "unknown",
+                    "cwd": cwd if isinstance(cwd, str) else None, "turn_id": current_turn_id, "turn_confidence": turn_confidence,
+                    "parent_session_id": parent_session_id, "harness_version": harness_version, "entrypoint": originator,
+                    "thread_kind": thread_kind, "agent": agent, "fresh_input": 0, "cache_read": 0, "cache_write": 0, "output": 0, "reasoning": 0,
+                    "raw_usage": {"input_tokens": 0, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 0,
+                                  "reasoning_output_tokens": 0},
+                    "id_synthetic": synthetic, "tariff": None, "quota": {**quota, "status": "event"}})
+
             if not isinstance(usage, dict) or timestamp is None:
+                quota_event()
                 continue
             cumulative = _mapping(info.get("total_token_usage"))
             if cumulative:
@@ -892,6 +929,7 @@ def collect_codex(
                     )
                 )
                 if signature == last_total_signature:
+                    quota_event()
                     continue
                 if last_total_signature is not None and any(
                     new < old for new, old in zip(signature, last_total_signature)
@@ -909,6 +947,7 @@ def collect_codex(
                 and not _raw_usage_requires_record(raw_usage,
                     ('input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens'))
             ):
+                quota_event()
                 continue
             thread_kind, agent, parent_session_id = _codex_thread(source, thread_source)
             ordinal = row.get("ordinal")
@@ -956,6 +995,8 @@ def collect_codex(
                 "tariff": tariff,
                 "quota": _codex_quota(payload.get("rate_limits")),
             }
+            if candidate["quota"] is not None:
+                last_quota = _quota_state(candidate["quota"])
             existing = calls.get(key)
             if existing is None:
                 calls[key] = candidate

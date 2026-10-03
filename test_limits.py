@@ -746,6 +746,83 @@ class RoundTen(unittest.TestCase):
         self.assertEqual(len(limits.limit_hits([], far, TABLE)), 2)
 
 
+class RoundEleven(unittest.TestCase):
+    def history(self, rows):
+        from test_why_codex import _meta, _write_rollout
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        _write_rollout(root / 'codex' / 'rollout-c.jsonl', [_meta('c1'), *rows])
+        h = History(root / 'h.sqlite3').__enter__()
+        self.addCleanup(h.__exit__, None, None, None)
+        h.refresh('codex', root / 'codex')
+        return h
+
+    @staticmethod
+    def snap(percent, reached=None):
+        from test_why_codex import _limits, _window
+        return _limits(primary=_window(percent, 300, int((T0 + timedelta(hours=3)).timestamp())), **({'rate_limit_reached_type': reached} if reached else {}))
+
+    @staticmethod
+    def calls(*specs):
+        """Token-count rows with the same cumulative counters (unchanged) and distinct ordinals, one per (minute, snapshot)."""
+        from test_why_codex import _quota_call
+        rows = []
+        for i, (minute, snapshot) in enumerate(specs):
+            row = _quota_call(stamp(minute), 1, snapshot)
+            row['ordinal'] = 100 + i
+            rows.append(row)
+        return rows
+
+    def hits(self, h):
+        return limits.limit_hits(h.records(), h.limit_events(), TABLE)
+
+    def test_unchanged_counters_with_a_reached_snapshot_are_one_hit(self):
+        from test_why_codex import _quota_call
+        h = self.history([_quota_call(stamp(1), 1, self.snap(60.0)), _quota_call(stamp(2), 1, self.snap(100.0, 'rate_limit_reached'))])
+        self.assertEqual(len(h.records()), 1)
+        events = h.limit_events()
+        self.assertEqual([(e['quota']['status'], e['model']) for e in events], [('event', None)])
+        self.assertEqual([x['tokens']['output'] for x in events], [0])
+        hits = self.hits(h)
+        self.assertEqual((len(hits), hits[0]['harness'], hits[0]['window_minutes']), (1, 'codex', 300))
+
+    def test_quota_only_event_with_no_info_is_one_hit(self):
+        from test_why_codex import _quota_call
+        quota_only = {'timestamp': stamp(2), 'type': 'event_msg', 'payload': {'type': 'token_count', 'info': None,
+                                                                              'rate_limits': self.snap(100.0, 'rate_limit_reached')}}
+        h = self.history([_quota_call(stamp(1), 1, self.snap(60.0)), quota_only])
+        self.assertEqual(len(self.hits(h)), 1)
+        self.assertEqual({r['id'] for r in h.records()}, {r['id'] for r in h.records() if not r['quota'] or r['quota'].get('status') != 'event'})
+
+    def test_recovery_with_unchanged_counters_between_two_exhaustions_is_two_hits(self):
+        from test_why_codex import _quota_call
+        h = self.history(self.calls((1, self.snap(60.0)), (2, self.snap(100.0, 'rate_limit_reached')), (3, self.snap(10.0)),
+                                    (4, self.snap(100.0, 'rate_limit_reached'))))
+        self.assertEqual(len(h.limit_events()), 3)
+        self.assertEqual(len(self.hits(h)), 2)
+
+    def test_no_transition_adds_no_records(self):
+        from test_why_codex import _quota_call
+        h = self.history(self.calls((1, self.snap(60.0)), (2, self.snap(61.0)), (3, self.snap(62.0)), (4, self.snap(100.0, 'rate_limit_reached')),
+                                    (5, self.snap(100.0, 'rate_limit_reached'))))
+        self.assertEqual(len(h.limit_events()), 1)  # only the transition to reached; the repeats and the 60 -> 62 drift add nothing
+        self.assertEqual(len(h.records()), 1)
+
+    def test_statusline_cache_ignores_codex_quota_events(self):
+        from tokenatlas import statusline
+        from test_why_codex import _quota_call
+        h = self.history([_quota_call(stamp(1), 1, self.snap(60.0)), _quota_call(stamp(2), 1, self.snap(100.0, 'rate_limit_reached'))])
+        cache = statusline.build_cache(h, T0 + timedelta(hours=1))
+        self.assertEqual(sum(d['requests'] for d in cache['days'].values()), 1)
+
+    def test_resetless_claude_retry_after_the_known_reset_is_a_new_hit(self):
+        without = dict(five_hour(0), windows=[], resets_at=None)
+        events = lambda minute: [obs('a', iso(4), quota=five_hour(5)), obs('b', iso(minute), quota=without)]
+        self.assertEqual(len(limits.limit_hits([], events(4.5), TABLE)), 1)
+        self.assertEqual(len(limits.limit_hits([], events(6), TABLE)), 2)
+
+
 class Template(unittest.TestCase):
     def test_turn_row_variables_are_declared(self):
         # The script is strict: assigning to an undeclared name throws on the first attributed turn and the report never initializes.

@@ -83,6 +83,8 @@ def limit_hits(records, events, table):
     claude, recent = {}, {}  # by reset time; and, for events without one, the latest hit per (harness, type) with its last event time
     for event in events:
         quota = event.get('quota') or {}
+        if quota.get('status') != 'rejected':
+            continue  # Codex quota events feed the episode detector below
         window = _window(quota)
         resets = (window.get('resets_at') if window else None) or _reset(quota.get('resets_at'))
         at = prompts._t(event['ts'])
@@ -92,7 +94,9 @@ def limit_hits(records, events, table):
         hit = claude.get(key) if resets is not None else None
         if hit is None:
             known = recent.get(key[:2])
-            if known and at - known[1] <= RETRY_GAP and (resets is None or known[0]['resets_at'] is None or known[0]['resets_at'] == resets):
+            known_reset = known and _iso(known[0]['resets_at'])
+            if known and at - known[1] <= RETRY_GAP and (resets is None or known[0]['resets_at'] is None or known[0]['resets_at'] == resets) \
+                    and not (resets is None and known_reset and at >= known_reset):  # a resetless retry only belongs to a hit before its known reset
                 hit = known[0]
         if hit is not None:
             hit['retries'] += 1
@@ -110,7 +114,8 @@ def limit_hits(records, events, table):
         recent[key[:2]] = (hit, at)
         found.append(hit)
     open_ = {}  # (harness, limit id) -> the open episode: reached type, window minutes, last reached time, sessions that reported it
-    for record in records:
+    series = sorted([*records, *(e for e in events if (e.get('quota') or {}).get('status') == 'event')], key=lambda r: r['ts'])  # usage quotas and quota events, in time order
+    for record in series:
         quota = record.get('quota') or {}
         reached = quota.get('reached')
         if quota.get('status') == 'rejected' or not quota:

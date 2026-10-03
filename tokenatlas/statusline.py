@@ -53,7 +53,7 @@ def build_cache(history, now=None):
     finally:
         if began:c.rollback()
     for ts_us, provider, model, *tokens, complete, reasoning, quota in rows:
-        if quota and not any(tokens) and not reasoning and (json.loads(quota) or {}).get('status') == 'rejected':continue  # a limit event (history.is_limit_event) is no request
+        if quota and not any(tokens) and not reasoning and (json.loads(quota) or {}).get('status') in ('rejected', 'event'):continue  # a limit event (history.is_limit_event) is no request
         day = datetime.fromtimestamp(ts_us // 1_000_000).date()  # the machine's local zone
         if not first <= day <= today:continue
         bucket = days.setdefault(day.isoformat(), dict.fromkeys(COUNTERS, 0))
