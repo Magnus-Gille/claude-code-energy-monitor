@@ -115,8 +115,10 @@ def limit_hits(records, events, table):
             threads.setdefault(prompts._thread(r), []).append((prompts._t(r['ts']), tuple(assigned[id(r)][:3])))
     for found_turns in threads.values():
         found_turns.sort(key=lambda x: x[0])
+    pending = []
     for hit in found:
         row = hit.pop('_row')
+        pending.append((hit, row))
         turn = assigned.get(id(row))
         hit['turn'] = tuple(turn[:3]) if turn else (row['harness'], row['session'], row['turn_id']) if row.get('turn_id') else None
         bound = threads.get(prompts._thread(row)) if not turn and row.get('thread_kind') == 'subagent' else None
@@ -124,7 +126,18 @@ def limit_hits(records, events, table):
             at = prompts._t(row['ts'])
             before = [x for x in bound if x[0] <= at]
             hit['turn'] = (before[-1] if before else bound[0])[1]
+            hit['_bound'] = True
         hit['window'] = _fill(hit, records, assigned, table)
+    # A subagent whose first request was rejected has no usage to bind it: resolve it with the same assignment over usage plus those rejections,
+    # in a side computation, so the usage assignments above (and the cards) are untouched.
+    loose = [(hit, row) for hit, row in pending if row.get('thread_kind') == 'subagent' and not hit.get('_bound')]
+    if loose:
+        side = prompts.assign_prompts([*records, *(row for _, row in loose)])[len(records):]
+        for (hit, _), turn in zip(loose, side):
+            if turn and turn[3] == 'rolled_up':
+                hit['turn'] = tuple(turn[:3])
+    for hit in found:
+        hit.pop('_bound', None)
     return found
 
 

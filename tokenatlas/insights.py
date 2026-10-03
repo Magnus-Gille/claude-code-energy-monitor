@@ -97,11 +97,13 @@ def _share(part, whole):
     return part / whole if whole else None
 
 
-def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=None, memo=None, credit_table=None, hits=None):
+def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=None, memo=None, credit_table=None, hits=None, universe=None):
     """{'window', 'requests', 'priced_requests', 'unpriced_requests', 'facts': [...]} over observations with start <= ts < end.
     `name(provider, model)` maps a model to its displayed name (the shared report passes its redaction; default: the model itself).
     `memo`, a dict reused across calls with the same records and table, only saves repeated price lookups; it never changes a result.
     `credit_table` (default: the packaged credits.json) is the rate card behind the ChatGPT credit-equivalent fact.
+    `universe` (the whole history's records, for a filtered report) is the basis of the turn assignment, so turn facts agree with the report's cards:
+    only the selected observations are summed, but a request keeps the turn the whole history gives it.
     `hits` (limits.limit_hits) adds the limit_hits fact: how many hits fall in the window, by limit; omitted when there are none."""
     memo = {} if memo is None else memo
     name = name or (lambda provider, model: model)
@@ -109,6 +111,10 @@ def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=Non
     # The report's own classification (template aggregate): an observation with a synthetic (ambiguous) identity is not counted in any total;
     # an incomplete one is counted and its totals are lower bounds.
     clean = [r for r in records if not r.get('id_synthetic')]
+    if universe is not None and 'assigned' not in memo:
+        base = [r for r in universe if not r.get('id_synthetic')]
+        full = {prompts.ident(r): a for r, a in zip(base, prompts.assign_prompts(base))}
+        memo['assigned'] = {id(r): full.get(prompts.ident(r)) for r in clean}
     window = [r for r in records if (start is None or prompts._t(r['ts']) >= start) and (end is None or prompts._t(r['ts']) < end)]
     inside = [r for r in window if not r.get('id_synthetic')]
     ctx = dict(ambiguous=len(window) - len(inside), incomplete=sum(1 for r in inside if not r.get('complete', True)),

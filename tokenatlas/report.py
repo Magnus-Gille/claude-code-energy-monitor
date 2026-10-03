@@ -186,7 +186,7 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
     display = lambda provider, model: metadata('model', model, {'provider': provider})
     memo = {}
     # one captured `now` is the exclusive end of the 30-day window: later-dated observations are not 'the last 30 days'
-    windows = [dict(id=wid, **insights.public(insights.cost_facts(records, table, start, end, name=display, memo=memo, credit_table=credit_table, hits=limit_hits)))
+    windows = [dict(id=wid, **insights.public(insights.cost_facts(records, table, start, end, name=display, memo=memo, credit_table=credit_table, hits=limit_hits, universe=universe)))
                for wid, start, end in (('30d', now - timedelta(days=INSIGHT_DAYS), now), ('all', None, None))]
     # the page's energy card (filter-following) sums tokens x per-class constant x a multiplier per (provider, model); only Claude tiers have one
     # (the rest is unweighted, multiplier 1), keyed by the provider and model names as the rows carry them (after redaction)

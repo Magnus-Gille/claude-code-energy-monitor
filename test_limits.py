@@ -554,6 +554,47 @@ class SingleAssignment(unittest.TestCase):
         self.assertIsNone(payload['limit_hits'][0]['prompt'])  # the rejection-only turn has no card
 
 
+class RoundSeven(unittest.TestCase):
+    def test_subagent_whose_first_request_is_rejected_gets_the_parent_turn(self):
+        main = obs('m', iso(1), 1000, turn='t1')
+        event = dict(obs('r', iso(6), turn=None, quota=five_hour(120)), thread_kind='subagent', agent='a9', parent_session='s1')
+        hits = limits.limit_hits([main], [event], TABLE)
+        self.assertEqual(hits[0]['turn'], ('claude', 's1', 't1'))
+        payload = report.build_report([main], {}, limit_hits=hits, now=datetime(2026, 9, 5, tzinfo=UTC))
+        self.assertEqual(payload['limit_hits'][0]['prompt'], 0)  # the badge's card: the parent turn
+        item = {'harness': 'claude', 'session': 's1', 'turn_id': 't1'}
+        limits.mark_turns([item], hits)
+        self.assertIn('limit_hit', item)
+
+    def test_window_without_bounds_is_told_apart_from_an_unknown_duration(self):
+        page = (Path(report.__file__).with_name('report_template.html')).read_text(encoding='utf-8')
+        self.assertIn("t(h.window_minutes?'lh_nobounds':'lh_nowindow')", page)
+        i18n = json.loads(Path(report.__file__).with_name('report_i18n.json').read_text(encoding='utf-8'))
+        self.assertIn('start is unknown', i18n['en']['lh_nobounds'])
+        self.assertIn('start är okänd', i18n['sv']['lh_nobounds'])
+        no_reset = dict(five_hour(120), resets_at=None)
+        no_reset['windows'] = [dict(no_reset['windows'][0], resets_at=None)]
+        hit = limits.limit_hits([obs('a', iso(1), 1000)], [obs('r', iso(30), quota=no_reset)], TABLE)[0]
+        self.assertEqual((hit['window_minutes'], hit['window']), (300, None))  # known duration, no bounds -> "start is unknown"
+        unknown = dict(five_hour(120), reached='mystery', windows=[])
+        hit = limits.limit_hits([obs('a', iso(1), 1000)], [obs('r', iso(30), quota=unknown)], TABLE)[0]
+        self.assertEqual((hit['window_minutes'], hit['window']), (None, None))  # unknown duration
+
+    def test_filtered_cards_and_facts_agree_on_a_cut_subagent_thread(self):
+        main = dict(obs('m', iso(1), 400000, turn='t1'))
+        subs = [dict(obs(f's{i}', iso(10 + i), 400000, turn=None), thread_kind='subagent', parent_session='s1', agent='a1') for i in range(2)]
+        later = obs('l', iso(30), 1000, turn='t2')
+        universe = [main, later, *subs]
+        selected = [later, subs[1]]  # a filter that cuts the thread: its first request is out, the rest still belongs to t1
+        payload = report.build_report(selected, {}, redact=True, universe=universe, now=datetime(2026, 9, 5, tzinfo=UTC))
+        cards = set(payload['columns']['prompt'])
+        self.assertEqual(len(cards), 2)
+        facts = insights.cost_facts(selected, TABLE, big_turn=1.0, universe=universe)
+        big = next(f for f in facts['facts'] if f['id'] == 'big_turns')['values']
+        self.assertEqual(big['turns'], 2)  # t1 (the subagent request) and t2
+        self.assertNotIn('big_turns', {f['id'] for f in insights.cost_facts(selected, TABLE, big_turn=1.0)['facts']})  # without the universe the subagent has no turn
+
+
 class Template(unittest.TestCase):
     def test_turn_row_variables_are_declared(self):
         # The script is strict: assigning to an undeclared name throws on the first attributed turn and the report never initializes.
