@@ -46,14 +46,14 @@ class HistoryTests(unittest.TestCase):
 
     def test_claude_revision_changes_fingerprint_and_forces_one_reread(self):
         import tokenatlas.history as history
-        self.assertEqual(history.HARNESS_REVISION.get('claude'), 1)
+        self.assertEqual(history.HARNESS_REVISION.get('claude'), 2)
         source=self.root/'logs/a.jsonl';write_claude(source)
         with patch.dict(history.HARNESS_REVISION,clear=False):
             history.HARNESS_REVISION.pop('claude')
             old=History.fingerprint(source,harness='claude')
         new=History.fingerprint(source,harness='claude')
         self.assertNotEqual(old,new)
-        self.assertEqual(History.fingerprint(source,harness='opencode'),History.fingerprint(source))
+        self.assertNotEqual(History.fingerprint(source,harness='opencode'),History.fingerprint(source))
         with patch.dict(history.HARNESS_REVISION,clear=False):
             history.HARNESS_REVISION.pop('claude')
             with History(self.db) as h:
@@ -66,7 +66,7 @@ class HistoryTests(unittest.TestCase):
     def test_codex_revision_changes_fingerprint_and_forces_one_reread(self):
         import tokenatlas.history as history
         from test_why_codex import _write_rollout,_meta,_context,_tokens,_tier
-        self.assertEqual(history.HARNESS_REVISION.get('codex'), 3)
+        self.assertEqual(history.HARNESS_REVISION.get('codex'), 4)
         source=self.root/'logs/rollout-one.jsonl'
         counts={'input_tokens':10,'cached_input_tokens':0,'cache_write_input_tokens':0,'output_tokens':2}
         _write_rollout(source,[_meta(),_context('2026-09-03T10:00:00Z','model','high','/work/project'),
@@ -840,6 +840,66 @@ class HistoryStorageTests(unittest.TestCase):
         with History(self.root/'local.sqlite3') as local:
             self.assertEqual(local.import_snapshot(self.root/'remote.snap','laptop')['new'],1)
             self.assertEqual([r['quota'] for r in local.records()],[quota])
+
+    def _interrupted_log(self, name='logs/a.jsonl'):
+        source=self.root/name;write_claude(source)
+        with source.open('a') as f:
+            f.write(json.dumps({'type':'user','uuid':'stop-1','message':{'role':'user','content':[{'type':'text','text':'[Request interrupted by user]'}]}})+'\n')
+        return source
+
+    def test_flags_round_trip_normalize_and_merge_as_a_union(self):
+        stopped=normalize(record(flags=['interrupted','b','interrupted']),'m')
+        self.assertEqual(stopped['flags'],['b','interrupted'])
+        self.assertEqual(_decode(_encode(stopped)),stopped)
+        plain=normalize(record(),'m')
+        self.assertIsNone(plain['flags']);self.assertEqual(_decode(_encode(plain)),plain)
+        later=normalize(record(flags=['x'],timestamp=datetime(2026,9,3,11,tzinfo=timezone.utc)),'m')
+        for pair in ((stopped,plain),(plain,stopped),(stopped,later),(later,stopped)):
+            merged=merge_observations(*pair)
+            self.assertEqual(merged['flags'],sorted(set(pair[0]['flags'] or ())|set(pair[1]['flags'] or ())) or None)
+        self.assertEqual(merge_observations(plain,plain)['flags'],None)
+
+    def test_refresh_stores_the_interrupt_flag_and_an_unchanged_refresh_adds_nothing(self):
+        source=self._interrupted_log()
+        with History(self.root/'mine.sqlite3') as h:
+            h.refresh('claude',source.parent)
+            self.assertEqual([r['flags'] for r in h.records()],[['interrupted']])
+            before=h.connection.execute('SELECT count(*) FROM observations').fetchone()[0]
+            h.refresh('claude',source.parent);os.utime(source,(1,1));h.refresh('claude',source.parent)
+            self.assertEqual(h.connection.execute('SELECT count(*) FROM observations').fetchone()[0],before)
+            self.assertEqual([r['flags'] for r in h.records()],[['interrupted']])
+
+    def test_v2_database_without_flags_column_gains_it_and_keeps_records(self):
+        path=self.root/'h.sqlite3';source=self._interrupted_log()
+        with History(path) as h:
+            h.refresh('claude',source.parent);before=h.records()
+        connection=sqlite3.connect(str(path))
+        try:
+            connection.execute('ALTER TABLE observations DROP COLUMN flags')
+        except sqlite3.OperationalError:
+            self.skipTest('SQLite without DROP COLUMN')
+        connection.commit();connection.close()
+        with History(path) as h:
+            self.assertIn('flags',[r[1] for r in h.connection.execute('PRAGMA table_info(observations)')])
+            self.assertEqual({r['flags'] and tuple(r['flags']) for r in h.records()},{None})
+            self.assertEqual(len(h.records()),len(before))
+
+    def test_snapshot_import_keeps_flags_and_old_snapshots_import(self):
+        source=self._interrupted_log('src/a.jsonl');snap=self.root/'snap.sqlite3';old=self.root/'old.sqlite3'
+        with History(self.root/'other.sqlite3') as other:
+            other.refresh('claude',source.parent);other.snapshot(snap);other.snapshot(old)
+        raw=sqlite3.connect(str(old))
+        try:
+            raw.execute('ALTER TABLE observations DROP COLUMN flags')
+        except sqlite3.OperationalError:
+            self.skipTest('SQLite without DROP COLUMN')
+        raw.commit();raw.close()
+        with History(self.root/'mine.sqlite3') as h:
+            self.assertEqual(h.import_snapshot(snap,'laptop')['new'],1)
+            self.assertEqual([r['flags'] for r in h.records()],[['interrupted']])
+        with History(self.root/'third.sqlite3') as h:
+            self.assertEqual(h.import_snapshot(old,'laptop')['new'],1)
+            self.assertEqual([r['flags'] for r in h.records()],[None])
 
     def test_codec_refuses_fields_it_cannot_restore(self):
         item = _synthetic_items()[0]

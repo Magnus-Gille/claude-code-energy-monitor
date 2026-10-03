@@ -142,5 +142,55 @@ class OpenCodeAttributionTests(unittest.TestCase):
         self.assertNotIn("PRIVATE", json.dumps(record.raw_usage))
 
 
+
+class InterruptedFlagTests(unittest.TestCase):
+    U = {"input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0}
+
+    @staticmethod
+    def user(entry_id, ts):
+        return {"type": "message", "id": entry_id, "timestamp": ts, "message": {"role": "user", "content": "go"}}
+
+    def collect_pi(self, messages):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.jsonl"
+            write_pi_session(path, "s", "2026-09-03T10:00:00Z", "/work/app", messages)
+            return {r.call_id: r.flags for r in why.collect_pi(Path(tmp), START, END)}
+
+    def test_pi_aborted_assistant_message_flags_its_record(self):
+        aborted = pi_message("e2", "r1", "2026-09-03T10:00:02Z", self.U)
+        aborted["message"]["stopReason"] = "aborted"
+        ok = pi_message("e4", "r2", "2026-09-03T10:00:05Z", self.U)
+        ok["message"]["stopReason"] = "stop"
+        got = self.collect_pi([self.user("e1", "2026-09-03T10:00:01Z"), aborted,
+                               self.user("e3", "2026-09-03T10:00:04Z"), ok])
+        self.assertEqual(got, {"r1": ["interrupted"], "r2": None})
+
+    def test_pi_aborted_without_usage_flags_the_last_record_of_its_turn(self):
+        first = pi_message("e2", "r1", "2026-09-03T10:00:02Z", self.U)
+        aborted = {"type": "message", "id": "e3", "timestamp": "2026-09-03T10:00:03Z",
+                   "message": {"role": "assistant", "stopReason": "aborted", "content": ""}}
+        got = self.collect_pi([self.user("e1", "2026-09-03T10:00:01Z"), first, aborted])
+        self.assertEqual(got, {"r1": ["interrupted"]})
+
+    def test_opencode_message_aborted_error_flags_the_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "opencode.db"
+            connection = create_opencode_db(db)
+            connection.execute("INSERT INTO session VALUES (?,?,?,?,?,?,?)", ("s", "p", None, "/work/app", "1", 1, 2))
+            for name, error in (("m1", {"name": "MessageAbortedError", "data": {"message": "x"}}),
+                                ("m2", {"name": "APIError"}), ("m3", None)):
+                data = {"role": "assistant", "providerID": "openai", "modelID": "m",
+                        "time": {"created": 1788429600000, "completed": 1788429601000},
+                        "tokens": {"input": 1, "output": 2, "cache": {"read": 0, "write": 0}}}
+                if error:
+                    data["error"] = error
+                connection.execute("INSERT INTO message VALUES (?,?,?,?,?)",
+                                   (name, "s", 1788429600000, 1788429601000, json.dumps(data)))
+            connection.commit()
+            connection.close()
+            got = {r.call_id: r.flags for r in why.collect_opencode(db, START, END)}
+        self.assertEqual(got, {"m1": ["interrupted"], "m2": None, "m3": None})
+
+
 if __name__ == "__main__":
     unittest.main()

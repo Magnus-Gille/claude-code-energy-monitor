@@ -70,7 +70,7 @@ def encode_columns(rows):
                 id=ids, id_prefix='Observation ' if ids and all(isinstance(i, (int, type(None))) for i in ids) else None,
                 tokens={k: [r['tokens'][k] for r in rows] for k in ALL_FIELDS},
                 prompt=[r['prompt'] for r in rows], price=price, price_classes=[list(v) for v in classes], credit=credit, credit_classes=[list(v) for v in credit_classes],
-                cw1h=[r['cw1h'] for r in rows], complete=[int(r['complete']) for r in rows], id_synthetic=[int(r['id_synthetic']) for r in rows])
+                cw1h=[r['cw1h'] for r in rows], complete=[int(r['complete']) for r in rows], interrupted=[int(r['interrupted']) for r in rows], id_synthetic=[int(r['id_synthetic']) for r in rows])
 
 
 COVERAGE_FIELDS = ('observations', 'first_event', 'last_event', 'missing_source_files',
@@ -168,6 +168,7 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
                                   labels.get(record.get('project_id'), UNKNOWN_PROJECT)),
                    tokens={key: record['tokens'].get(key) for key in ALL_FIELDS},
                    complete=bool(record['complete']), id_synthetic=bool(record['id_synthetic']),
+                   interrupted='interrupted' in (record.get('flags') or ()),
                    warnings=[metadata('Varning', x) for x in record.get('warnings', [])])
         rows.append(row)
     coverage = {key: source_status.get(key) for key in COVERAGE_FIELDS}

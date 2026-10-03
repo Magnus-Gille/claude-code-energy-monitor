@@ -350,5 +350,60 @@ class ClaudeMetadataReviewTests(unittest.TestCase):
         record = self.collect({"proj/dir-session/subagents/agent-a1.jsonl": [row]})[0]
         self.assertEqual(record.parent_session_id, "explicit")
 
+
+def _user_row(timestamp, uuid, content, **overrides):
+    return {"type": "user", "uuid": uuid, "timestamp": timestamp, "sessionId": "session-main",
+            "message": {"role": "user", "content": content}, **overrides}
+
+
+class ClaudeInterruptTests(unittest.TestCase):
+    USAGE = {"input_tokens": 1, "output_tokens": 2}
+
+    def collect(self, files):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, rows in files.items():
+                _write_jsonl(root / name, rows)
+            return {r.call_id: r for r in why.collect_claude(
+                root, datetime(2026, 9, 3, tzinfo=timezone.utc), datetime(2026, 9, 4, tzinfo=timezone.utc))}
+
+    def test_both_marker_variants_flag_the_running_request(self):
+        for marker in ("[Request interrupted by user]", "[Request interrupted by user for tool use]"):
+            with self.subTest(marker=marker):
+                for content in ([{"type": "text", "text": marker}], marker):
+                    got = self.collect({"p/s.jsonl": [
+                        _user_row("2026-09-03T10:00:00Z", "u1", "do it"),
+                        _claude_row("2026-09-03T10:00:01Z", "r1", self.USAGE),
+                        _claude_row("2026-09-03T10:00:02Z", "r2", self.USAGE),
+                        _user_row("2026-09-03T10:00:03Z", "u2", content)]})
+                    self.assertEqual({k: r.flags for k, r in got.items()}, {"r1": None, "r2": ["interrupted"]})
+
+    def test_marker_before_any_request_in_the_turn_flags_nothing(self):
+        got = self.collect({"p/s.jsonl": [
+            _user_row("2026-09-03T10:00:00Z", "u1", "first"),
+            _claude_row("2026-09-03T10:00:01Z", "r1", self.USAGE),
+            _user_row("2026-09-03T10:00:02Z", "u2", "second"),
+            _user_row("2026-09-03T10:00:03Z", "u3", "[Request interrupted by user]")]})
+        self.assertEqual({k: r.flags for k, r in got.items()}, {"r1": None})
+
+    def test_marker_in_a_subagent_file_flags_the_subagent_request(self):
+        # Claude Code writes the marker into the stopped subagent's file; the flag rolls up to the parent turn.
+        got = self.collect({"p/sess/subagents/agent-a1.jsonl": [
+            _claude_row("2026-09-03T10:00:01Z", "r1", self.USAGE, agentId="a1"),
+            _claude_row("2026-09-03T10:00:02Z", "r2", self.USAGE, agentId="a1"),
+            _user_row("2026-09-03T10:00:03Z", "u2", "[Request interrupted by user for tool use]")]})
+        self.assertEqual({k: r.flags for k, r in got.items()}, {"r1": None, "r2": ["interrupted"]})
+
+    def test_interrupted_then_followed_up_keeps_the_flag_on_the_first_turn(self):
+        got = self.collect({"p/s.jsonl": [
+            _user_row("2026-09-03T10:00:00Z", "u1", "do it"),
+            _claude_row("2026-09-03T10:00:01Z", "r1", self.USAGE),
+            _user_row("2026-09-03T10:00:02Z", "u2", "[Request interrupted by user]"),
+            _user_row("2026-09-03T10:00:03Z", "u3", "no, do it differently"),
+            _claude_row("2026-09-03T10:00:04Z", "r2", self.USAGE)]})
+        self.assertEqual({k: (r.turn_id, r.flags) for k, r in got.items()},
+                         {"r1": ("u1", ["interrupted"]), "r2": ("u3", None)})
+
+
 if __name__ == "__main__":
     unittest.main()

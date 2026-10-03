@@ -323,6 +323,25 @@ class PayloadV2Tests(unittest.TestCase):
 PROMPT_CARD_COLUMNS = ('prompt', 'price', 'price_classes', 'cw1h', 'credit', 'credit_classes')
 SIZE_LIMIT_20K = 700_000  # measured ~311 KB (was ~9 MB as v1 JSON); margin for dictionary growth
 
+
+class InterruptedBadge(unittest.TestCase):
+    def test_column_marks_flagged_rows_and_shared_reports_keep_no_ids(self):
+        rows = [observation('a'), observation('b', flags=['interrupted'], ts='2026-10-25T00:31:00+00:00')]
+        for redact in (False, True):
+            report = build_report(rows, {}, redact=redact)
+            self.assertEqual(report['columns']['interrupted'], [0, 1])
+            if redact:
+                self.assertNotIn('private-turn', json.dumps(report))
+
+    def test_template_renders_the_badge_and_both_languages_have_the_text(self):
+        root = Path(__file__).parent / 'tokenatlas'
+        template = (root / 'report_template.html').read_text(encoding='utf-8')
+        self.assertIn("t('pr_interrupted')", template)
+        self.assertIn('interrupted:rs.some(r=>r.interrupted)', template)
+        texts = json.loads((root / 'report_i18n.json').read_text(encoding='utf-8'))
+        self.assertEqual((texts['sv']['pr_interrupted'], texts['en']['pr_interrupted']), ('Avbruten', 'Interrupted'))
+
+
 if __name__ == '__main__':
     unittest.main()
 

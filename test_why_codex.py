@@ -515,5 +515,51 @@ class CodexHostileMetadataTests(unittest.TestCase):
         self.assertEqual((record.provider, record.model, record.effort, record.entrypoint),
                          ("openai", "unknown", "unknown", "unknown"))
 
+
+def _event(timestamp, kind, **payload):
+    return {"timestamp": timestamp, "type": "event_msg", "payload": {"type": kind, **payload}}
+
+
+class CodexTurnAbortedTests(unittest.TestCase):
+    def collect(self, rows):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_rollout(root / "rollout-abort.jsonl", [_meta()] + rows)
+            return {r.call_id: r for r in why.collect_codex(
+                root, datetime(2026, 9, 3, tzinfo=timezone.utc), datetime(2026, 9, 4, tzinfo=timezone.utc))}
+
+    @staticmethod
+    def call(minute, n, turn=None):
+        usage = {"input_tokens": 10 * n, "output_tokens": n}
+        row = _tokens(f"2026-09-03T09:{minute:02d}:00Z", n, usage, {"input_tokens": 10 * n, "output_tokens": n})
+        if turn:
+            row["payload"]["turn_id"] = turn
+        return row
+
+    def test_turn_aborted_flags_only_the_last_record_of_that_turn(self):
+        got = self.collect([
+            _event("2026-09-03T09:00:00Z", "task_started", turn_id="t1"), self.call(1, 1, "t1"), self.call(2, 2, "t1"),
+            _event("2026-09-03T09:03:00Z", "turn_aborted", turn_id="t1"),
+            _event("2026-09-03T09:04:00Z", "task_started", turn_id="t2"), self.call(5, 3, "t2"),
+            _event("2026-09-03T09:06:00Z", "task_complete", turn_id="t2")])
+        self.assertEqual({k.split(":")[1]: (r.turn_id, r.flags) for k, r in got.items()},
+                         {"1": ("t1", None), "2": ("t1", ["interrupted"]), "3": ("t2", None)})
+
+    def test_abort_without_a_request_in_its_turn_flags_nothing(self):
+        got = self.collect([
+            _event("2026-09-03T09:00:00Z", "task_started", turn_id="t1"), self.call(1, 1, "t1"),
+            _event("2026-09-03T09:02:00Z", "task_complete", turn_id="t1"),
+            _event("2026-09-03T09:03:00Z", "task_started", turn_id="t2"),
+            _event("2026-09-03T09:04:00Z", "turn_aborted", turn_id="t2")])
+        self.assertEqual([r.flags for r in got.values()], [None])
+
+    def test_abort_without_turn_ids_flags_the_last_record_of_the_legacy_turn(self):
+        got = self.collect([
+            _event("2026-09-03T09:00:00Z", "task_started"), self.call(1, 1),
+            _event("2026-09-03T09:02:00Z", "turn_aborted"),
+            _event("2026-09-03T09:03:00Z", "task_started"), self.call(4, 2)])
+        self.assertEqual({k.split(":")[1]: r.flags for k, r in got.items()}, {"1": ["interrupted"], "2": None})
+
+
 if __name__ == "__main__":
     unittest.main()

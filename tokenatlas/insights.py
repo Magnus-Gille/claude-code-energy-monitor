@@ -135,9 +135,10 @@ def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=Non
     facts += _context(rows)
     if k and total > 0:
         facts += _long(priced, table, k) + _turns(clean, inside, big_turn, scope, memo) + _subagents(priced, total, k) + _tiers(priced, table, k)
+    facts += _interrupted(clean, inside, scope, memo, total)
     facts += _credits(inside, credit_table or credit_rates.packaged(), name)
     facts += _energy(inside)
-    order = ('model_share', 'price_comparison', 'cost_parts', 'context_size', 'long_context_premium', 'big_turns', 'subagent_share', 'premium_tiers', 'credits', 'energy')
+    order = ('model_share', 'price_comparison', 'cost_parts', 'context_size', 'long_context_premium', 'big_turns', 'interrupted_turns', 'subagent_share', 'premium_tiers', 'credits', 'energy')
     facts = [_finish(f, ctx) for f in sorted(facts, key=lambda f: order.index(f['id']))]
     return {'window': {'start': start and start.isoformat(), 'end': end and end.isoformat()}, **{k_: scope[k_] for k_ in ('requests', 'priced_requests', 'unpriced_requests')},
             'ambiguous_requests': ctx['ambiguous'], 'incomplete_requests': ctx['incomplete'], 'price_table': {'retrieved_on': ctx['retrieved']}, 'big_turn': big_turn, 'facts': facts}
@@ -338,6 +339,37 @@ def _credits(inside, ctable, name):
                   credit_url=ctable['source_url'], credit_retrieved=ctable['retrieved_on'], credit_fast=ctable['fast_multiplier'])]
 
 
+def _interrupted(records, inside, scope, memo, total):
+    """Turns the user stopped (an observation of the turn carries the 'interrupted' flag, which the harness logged): how many, what their requests
+    cost at list prices and the share of all priced cost in the window. A turn without a priced request is counted but adds no cost; it is
+    never guessed. Omitted when no turn in the window was interrupted."""
+    if 'assigned' not in memo:
+        memo['assigned'] = {id(r): a for r, a in zip(records, prompts.assign_prompts(records))}
+    turns, used = {}, []
+    for r in inside:
+        found = memo['assigned'][id(r)]
+        if found:
+            t = turns.setdefault(found[:3], [False, 0.0, 0, 0])  # interrupted, cost, priced requests, requests
+            t[0] = t[0] or 'interrupted' in (r.get('flags') or ())
+            t[3] += 1
+            cost = memo[id(r)][2]
+            if cost is not None:
+                t[1] += cost
+                t[2] += 1
+    stopped = [t for t in turns.values() if t[0]]
+    if not stopped:
+        return []
+    for r in inside:
+        found = memo['assigned'][id(r)]
+        if found and turns[found[:3]][0] and memo[id(r)][2] is not None:
+            used.append(memo[id(r)])
+    cost = sum(t[1] for t in stopped)
+    return [_fact('interrupted_turns', dict(count=len(stopped), cost=cost, priced_cost=total, share=_share(cost, total),
+                                            unpriced_turns=sum(1 for t in stopped if not t[2]), partly_priced_turns=sum(1 for t in stopped if 0 < t[2] < t[3]), **scope),
+                  'ins_interrupted_turns_c', (*COMMON, 'ins_a_turn_window', 'ins_a_turn_lower', 'ins_a_unattributed', 'ins_a_interrupted'),
+                  provenance='computed', used=used)]
+
+
 def _turns(records, inside, big_turn, scope, memo):
     """Turn costs as prompts.top_prompts defines them (assign_prompts over all records; a turn's cost is the sum of its priced requests inside the
     window, a turn without a priced request has none), without building its per-turn detail: that is what makes 200k observations affordable."""
@@ -419,6 +451,13 @@ def _lines(f):
     if i == 'big_turns':
         return [f"turns costing >= {_usd_text(v['threshold'])}: {v['count']:,} of {v['turns']:,} turns with a priced request",
                 f"their cost: {u(v['cost'])} of {u(v['attributed_cost'])} ({_pct(v['share'])})", f"median requests per such turn: {_num(v['median_requests'])}"]
+    if i == 'interrupted_turns':
+        out = [f"turns interrupted by the user: {v['count']:,}", f"their cost: {u(v['cost'])}" + (f" ({_pct(v['share'])} of {u(v['priced_cost'])} priced cost)" if v['share'] is not None else '')]
+        if v['unpriced_turns']:
+            out.append(f"without a priced request (no cost counted): {v['unpriced_turns']:,}")
+        if v['partly_priced_turns']:
+            out.append(f"with some unpriced requests (cost is a lower bound): {v['partly_priced_turns']:,}")
+        return out
     if i == 'subagent_share':
         return [f"cost from subagents: {u(v['subagent_cost'])} of {u(v['total_cost'])} ({_pct(v['share'])})", f"requests from subagents: {v['subagent_requests']:,} of {v['priced_requests']:,} priced"]
     if i == 'energy':

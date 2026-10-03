@@ -129,6 +129,7 @@ class AttributionRecord:
     output_final: bool | None = None
     tariff: dict | None = None
     quota: dict | None = None
+    flags: list | None = None  # sorted short labels observed on the request, e.g. ['interrupted']; None when none
 
     @property
     def total_tokens(self) -> int:
@@ -487,6 +488,27 @@ def _claude_injected_only(content) -> bool:
     return bool(joined) and (joined.startswith("[Request interrupted by user") or bool(_SYSTEM_REMINDERS_ONLY.fullmatch(joined)))
 
 
+INTERRUPTED = "interrupted"
+
+
+def _claude_interrupt_marker(row: dict) -> bool:
+    """True for the user row Claude Code writes when the user stops a request ("[Request interrupted by user]", or "... for tool use")."""
+    if row.get("type") != "user":
+        return False
+    content = _mapping(row.get("message")).get("content", row.get("content"))
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, list):
+        texts = [i.get("text", "") for i in content if isinstance(i, dict) and i.get("type") == "text"]
+    else:
+        return False
+    return any(isinstance(t, str) and t.lstrip().startswith("[Request interrupted by user") for t in texts)
+
+
+def _flag_list(keys: set, key) -> list | None:
+    return [INTERRUPTED] if key in keys else None
+
+
 def _is_genuine_user_row(row: dict) -> bool:
     if row.get("type") not in {"user", "user_message"} and _mapping(row.get("message")).get("role") != "user":
         return False
@@ -529,6 +551,7 @@ def collect_claude(
     contain placeholder output counts, so every token field uses its maximum.
     """
     calls: dict[str, dict] = {}
+    interrupted: set[str] = set()
     for path in _paths_for(root, "*.jsonl", start, paths):
         try:
             parts = path.relative_to(root).parts
@@ -544,12 +567,17 @@ def collect_claude(
         fallback_project = _claude_project_fallback(path, root)
         cowork = path.is_relative_to(COWORK_SESSIONS)
         last_user_turn: str | None = None
+        last_request: str | None = None  # latest request of the current turn in this file: the one running when the user stops
         for line_number, row in _read_json_lines(path, strict=strict):
             message = _mapping(row.get("message"))
             usage = message.get("usage")
             timestamp = parse_iso_timestamp(row.get("timestamp"))
             row_uuid = _first_text(row, "uuid", "id")
+            # Main-thread transcripts rarely carry the marker; a stopped subagent's file does, and its flag rolls up to the parent turn.
+            if last_request is not None and _claude_interrupt_marker(row):
+                interrupted.add(last_request)
             if _is_genuine_user_row(row):
+                last_request = None
                 last_user_turn = _meta_text(row_uuid) or _stable_hash({
                     "session": row.get("sessionId"),
                     "timestamp": row.get("timestamp"),
@@ -578,6 +606,7 @@ def collect_claude(
                 })
                 id_synthetic = True
             key = str(request_id)
+            last_request = key
             values = {
                 "fresh_input": _nonnegative_int(usage.get("input_tokens")),
                 "cache_read": _nonnegative_int(usage.get("cache_read_input_tokens")),
@@ -662,6 +691,7 @@ def collect_claude(
             ("project", fallback_project), ("project_id", fallback_id),
         ):
             values.setdefault(name, default)
+        values["flags"] = _flag_list(interrupted, call_id)
         records.append(
             AttributionRecord(
                 harness="claude", provider="anthropic", call_id=call_id, **values
@@ -718,6 +748,7 @@ def collect_codex(
     independent sessions emit identical events.
     """
     calls: dict[tuple[str, str], dict] = {}
+    interrupted: set[tuple[str, str]] = set()
     for path in _paths_for(root, "rollout-*.jsonl", start, paths):
         rows = list(_read_json_lines(path, strict=strict))
         meta_payload = next(
@@ -742,6 +773,7 @@ def collect_codex(
         last_total_signature = None
         counter_segment = 0
         tariff: dict | None = None  # latest thread_settings.service_tier in this file, until it changes
+        last_call: tuple[str, str] | None = None  # latest record of the current turn, flagged by a turn_aborted event
         harness_version = _first_text(meta_payload, "cli_version", "version")
         originator = _meta_text(meta_payload.get("originator"), source, thread_source, default=originator)
 
@@ -779,15 +811,21 @@ def collect_codex(
             if row_type != "event_msg" or payload.get("type") != "token_count":
                 event_type = payload.get("type")
                 if row_type == "event_msg" and event_type in _CODEX_TURN_END:
+                    if event_type == "turn_aborted" and last_call is not None \
+                            and calls[last_call]["turn_id"] == current_turn_id:
+                        interrupted.add(last_call)
+                    last_call = None
                     seen_explicit = False  # explicitness is per turn: a legacy-style turn may follow in the same file
                     continue
                 if explicit_turn or seen_explicit:
                     continue
                 if event_type == "task_started":
+                    last_call = None
                     current_turn_id = pending_turn_id = None
                     turn_confidence = "absent"
                 elif (row_type == "event_msg" and event_type in {"user_message", "user_input"}) or (
                         row_type == "response_item" and event_type == "message" and payload.get("role") == "user"):
+                    last_call = None
                     current_turn_id = pending_turn_id = _meta_text(_codex_user_event_identity(row, payload))
                     turn_confidence = "derived" if current_turn_id else "absent"
                 continue
@@ -890,8 +928,9 @@ def collect_codex(
                             "entrypoint", "thread_kind", "agent",
                         )
                     })
+            last_call = key
     records = [
-        AttributionRecord(harness="codex", provider=provider, **values)
+        AttributionRecord(harness="codex", provider=provider, **values, flags=_flag_list(interrupted, (provider, values["call_id"])))
         for (provider, _), values in calls.items()
         if start <= values["timestamp"] < end
     ]
@@ -908,6 +947,7 @@ def collect_pi(
 ) -> list[AttributionRecord]:
     """Collect Pi response usage and deduplicate copied fork history."""
     calls: dict[tuple[str, str], dict] = {}
+    interrupted: set[tuple[str, str]] = set()
     for path in _paths_for(root, "*.jsonl", start, paths):
         rows = list(_read_json_lines(path, strict=strict))
         session = next((row for _, row in rows if row.get("type") == "session"), {})
@@ -918,12 +958,18 @@ def collect_pi(
         harness_version = str(version) if isinstance(version, int) and not isinstance(version, bool) \
             else _meta_text(version, limit=64)
         last_user_turn: str | None = None
+        last_call: tuple[str, str] | None = None  # latest record of the current turn
         for _, row in rows:
             message = _mapping(row.get("message"))
             usage = message.get("usage")
             if row.get("type") == "message" and _is_genuine_user_row(row):
                 last_user_turn = _meta_text(row.get("id"))
-            if row.get("type") != "message" or message.get("role") != "assistant" or not isinstance(usage, dict):
+                last_call = None
+            is_assistant = row.get("type") == "message" and message.get("role") == "assistant"
+            aborted = is_assistant and message.get("stopReason") == "aborted"
+            if not is_assistant or not isinstance(usage, dict):
+                if aborted and last_call is not None:  # stopped before any usage was written: the turn's last request was running
+                    interrupted.add(last_call)
                 continue
             timestamp = parse_iso_timestamp(row.get("timestamp") or message.get("timestamp"))
             if timestamp is None:
@@ -945,6 +991,8 @@ def collect_pi(
             }
             if sum(values[field] for field in ("fresh_input", "cache_read", "cache_write", "output")) <= 0 \
                     and not _raw_usage_requires_record(raw_usage, ("input", "cacheRead", "cacheWrite", "output")):
+                if aborted and last_call is not None:
+                    interrupted.add(last_call)
                 continue
             candidate = {
                 "timestamp": timestamp, "session_id": session_id, "call_id": call_id,
@@ -958,6 +1006,9 @@ def collect_pi(
                 **values,
             }
             key = (provider, call_id)
+            last_call = key
+            if aborted:
+                interrupted.add(key)
             existing = calls.get(key)
             if existing is None:
                 calls[key] = candidate
@@ -973,7 +1024,7 @@ def collect_pi(
     for (provider, _), values in calls.items():
         values["session_started_at"] = values.pop("session_started")
         if start <= values["timestamp"] < end:
-            records.append(AttributionRecord(harness="pi", provider=provider, **values))
+            records.append(AttributionRecord(harness="pi", provider=provider, flags=_flag_list(interrupted, (provider, values["call_id"])), **values))
     return sorted(records, key=lambda item: (item.timestamp, item.session_id, item.call_id))
 
 
@@ -1064,7 +1115,8 @@ def collect_opencode(
             agent=_meta_text(data.get("agent"), default="unknown"), turn_id=turn_id,
             turn_confidence="observed" if turn_id else "absent", parent_session_id=parent,
             harness_version=str(row["version"]) if row["version"] is not None else None,
-            raw_usage=raw_usage, id_synthetic=not bool(row["id"]), **values,
+            raw_usage=raw_usage, id_synthetic=not bool(row["id"]),
+            flags=[INTERRUPTED] if _mapping(data.get("error")).get("name") == "MessageAbortedError" else None, **values,
         ))
     return sorted(records, key=lambda item: (item.timestamp, item.session_id, item.call_id))
 

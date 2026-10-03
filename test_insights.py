@@ -653,5 +653,49 @@ class Cli(Base):
         self.assertEqual(self.insights('--start', '2026-09-03T10:30:00')[0], 2)
 
 
+
+class InterruptedTurnsFact(unittest.TestCase):
+    def rows(self, flagged=True):
+        a = ob('a1', '2026-09-03T10:00:00+00:00', model='gpt-a', fresh=100000, session='s', turn='t1')
+        a2 = ob('a2', '2026-09-03T10:01:00+00:00', model='gpt-a', fresh=100000, session='s', turn='t1')
+        if flagged:
+            a2['flags'] = ['interrupted']
+        b = ob('b1', '2026-09-03T10:10:00+00:00', model='gpt-a', fresh=200000, session='s', turn='t2')
+        return [a, a2, b]
+
+    def test_count_cost_and_share_are_computed_from_list_prices(self):
+        f = by_id(cost_facts(self.rows(), TABLE))['interrupted_turns']
+        v = f['values']
+        self.assertEqual((v['count'], v['unpriced_turns'], v['partly_priced_turns']), (1, 0, 0))
+        self.assertAlmostEqual(v['cost'], 0.4)  # 200k fresh at $2/M
+        self.assertAlmostEqual(v['priced_cost'], 0.8)
+        self.assertAlmostEqual(v['share'], 0.5)
+        self.assertEqual(f['provenance'], 'computed')
+        text = insights.render_text(cost_facts(self.rows(), TABLE))
+        self.assertIn('turns interrupted by the user: 1', text)
+        self.assertNotIn('wasted', text.lower())
+
+    def test_omitted_when_nothing_was_interrupted(self):
+        self.assertNotIn('interrupted_turns', by_id(cost_facts(self.rows(False), TABLE)))
+
+    def test_unpriced_turn_is_counted_and_adds_no_cost(self):
+        rows = self.rows() + [dict(ob('m1', '2026-09-03T11:00:00+00:00', model='mystery', fresh=5000, session='s', turn='t3'), flags=['interrupted'])]
+        v = by_id(cost_facts(rows, TABLE))['interrupted_turns']['values']
+        self.assertEqual((v['count'], v['unpriced_turns']), (2, 1))
+        self.assertAlmostEqual(v['cost'], 0.4)
+
+    def test_window_restricts_the_turns(self):
+        res = cost_facts(self.rows(), TABLE, datetime(2026, 9, 3, 10, 5, tzinfo=timezone.utc), None)
+        self.assertNotIn('interrupted_turns', by_id(res))  # the flagged request is before the window
+
+    def test_texts_exist_in_both_languages(self):
+        texts = json.loads(insights.I18N.read_text(encoding='utf-8'))
+        for lang in ('sv', 'en'):
+            for key in ('ins_interrupted_turns', 'ins_interrupted_turns_c', 'ins_a_interrupted', 'ins_l_intcount', 'ins_l_intcost',
+                        'ins_v_intcost', 'ins_l_intunpriced', 'ins_l_intpartly', 'pr_interrupted'):
+                self.assertTrue(texts[lang].get(key), (lang, key))
+            self.assertNotIn('wasted', texts[lang]['ins_a_interrupted'].lower())
+
+
 if __name__ == '__main__':
     unittest.main()

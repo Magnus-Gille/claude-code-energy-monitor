@@ -7,6 +7,7 @@ All notable changes to this project are documented in this file. The project fol
 ### Added
 
 - Codex: the history keeps the plan quota from each `token_count` event on the usage observation (#89), as a new `quota` field: plan and limit id, a reached-limit type if any, and per window (5-hour or weekly) the used percentage, window length and reset time. Nothing visible changes yet; later features can use it to show a turn's share of the limit. The credit balance and other account state are not stored. Existing Codex histories are re-read once.
+- Interrupted turns (#96): the collectors record when the user stopped a request, as the harness logged it (Claude Code `[Request interrupted by user` rows, Codex `turn_aborted`, Pi `stopReason: "aborted"`, OpenCode `MessageAbortedError`) in a new observation field `flags` (`["interrupted"]`, additive column within schema 2). A turn with a flagged request is `interrupted` (with `interrupted_at`) in `tokenatlas top` (text ` · interrupted`, and `--json`), gets an "Interrupted" / "Avbruten" badge on the costliest turns in the report, and an `interrupted_turns` cost fact (number of turns, their list-price cost and share of priced cost; unpriced turns are counted, never guessed) in `tokenatlas insights` and the report. It is a label, not a verdict: an interrupt can be a correct early stop. Existing Claude, Codex, Pi and OpenCode histories are re-read once.
 
 ## [1.11.0] - 2026-10-02
 

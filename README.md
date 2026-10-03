@@ -225,6 +225,7 @@ A turn is your initiating input plus everything it caused, including follow-up i
 time and parent session). Turns are ranked by list-price cost (unpriced last, and any non-USD price counts as unpriced) or by tokens; cost is API-equivalent,
 `n/a` when unpriced and `≥` when only partly priced. The HTML report has a matching "Dyraste turerna" / "Costliest turns" card
 that follows the report filters and has an "Inputs" column (the number of inputs in the turn, `–` when unknown).
+A turn the user stopped (the harness logged an interrupt) is marked `· interrupted` in `top` (and `interrupted`/`interrupted_at` in `--json`), has an "Interrupted" badge in the report, and `tokenatlas insights` counts such turns and their list-price cost; an interrupt can be a correct early stop, so it is a label, not a verdict.
 
 Prompt text is never stored in the history database and never in snapshots or imports. Only if you run
 `top --keep-text` does TokenAtlas write `top-prompts.json` next to the history (mode 0600, written atomically).
