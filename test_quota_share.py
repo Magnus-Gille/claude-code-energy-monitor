@@ -1,6 +1,9 @@
 """Share of the weekly / 5-hour limit per turn and per window (issue #90)."""
+import json
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from tokenatlas import limits, pricing, prompts, quota_share as qs
 
@@ -616,7 +619,7 @@ class Surfaces(unittest.TestCase):
         self.assertEqual(i18n['sv']['qs_obs'], '~{n} % av {w}')
         self.assertEqual(i18n['sv']['qs_w_week'], 'veckogränsen')
         self.assertEqual(i18n['en']['qs_est'], '≈ {n}% of {w} (estimate)')
-        self.assertEqual(i18n['en']['qw_title'], 'Codex limit windows')
+        self.assertEqual(i18n['en']['qw_title'], 'Limit windows')
         self.assertIn('id="quota-windows" class="hidden"', page)
 
     def test_shared_report_has_no_ids_or_text(self):
@@ -627,7 +630,7 @@ class Surfaces(unittest.TestCase):
             self.assertNotIn(f'"{secret}"', blob)
         self.assertEqual(set(payload['quota_windows'][0]), {'harness', 'account', 'minutes', 'resets_at', 'start', 'peak_percent', 'peak_at', 'hit',
                                                             'snapshots', 'cost', 'unpriced_requests', 'uncertain_requests', 'lower_bound'})
-        self.assertEqual(set(next(iter(payload['quota_shares'].values()))), {'minutes', 'label', 'percent', 'shared_with'})
+        self.assertEqual(set(next(iter(payload['quota_shares'].values()))), {'harness', 'minutes', 'label', 'percent', 'shared_with'})
 
     def test_a_subagent_only_filter_keeps_the_quota_fact_equal_to_the_card(self):
         from tokenatlas import report
@@ -685,7 +688,7 @@ class Surfaces(unittest.TestCase):
         self.assertEqual(([x['percent'] for x in fact['values']['turns']], fact['values']['observed_turns'], fact['provenance']), ([9.0, 2.0], 2, 'computed'))
         self.assertNotIn('total_percent', fact['values'])
         result = insights.cost_facts(recs, TABLE, quota=got)
-        self.assertIn('your 2 costliest Codex turns used ~9% and ~2% of their weekly limit windows', insights.render_text(result))
+        self.assertIn('your 2 costliest turns used ~9% and ~2% of their weekly limit windows', insights.render_text(result))
         self.assertFalse(any(f['id'] == 'quota_share' for f in insights.cost_facts(recs, TABLE)['facts']))
         self.assertFalse(any(f['id'] == 'quota_share' for f in insights.cost_facts(recs, TABLE, quota={})['facts']))
 
@@ -695,6 +698,328 @@ class Surfaces(unittest.TestCase):
         got = qs.turn_shares(recs, qs.snapshots_from_records(recs), TABLE)
         fact = next(f for f in insights.cost_facts(recs, TABLE, quota=got)['facts'] if f['id'] == 'quota_share')
         self.assertEqual([x['percent'] for x in fact['values']['turns']], [2.0])
+
+
+def creq(id, ts, turn='c1', session='cs1', out=1000, **kw):
+    """A Claude request: as req, from the Claude harness."""
+    return dict(req(id, ts, turn=turn, session=session, out=out, **kw), harness='claude', provider='anthropic', model='claude-opus-4-8')
+
+
+def cline_row(minutes, five=None, seven=None, session='cs1', resets=RESET, resets5=RESET5, seconds=0):
+    return dict(ts=iso(minutes, seconds), session=session, five_hour=None if five is None else dict(used_percent=five, resets_at=resets5),
+               seven_day=None if seven is None else dict(used_percent=seven, resets_at=resets))
+
+
+def cline(*args, **kw):
+    return json.dumps(cline_row(*args, **kw))
+
+
+class ClaudeSnapshots(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / 'claude-quota.jsonl'
+
+    def write(self, *lines):
+        self.path.write_text('\n'.join(lines) + '\n')
+
+    def test_readings_map_to_the_turn_of_the_latest_request_of_the_session(self):
+        recs = [creq('a', iso(0)), creq('b', iso(10), turn='c2'), creq('c', iso(11), turn='c2', session='other', parent_session=None)]
+        self.write(cline(0, 5, 10), cline(1, 5, 10), cline(12, 7, 12), cline(30, 8, 13, session='nobody'))
+        got = qs.claude_snapshots(self.path, recs, prompts.assign_prompts(recs))
+        self.assertEqual([(s['window'][0], s['turn'], s['i'], s['at']) for s in got][:4],
+                         [(300, ('claude', 'cs1', 'c1'), 0, prompts._t(iso(0))), (10080, ('claude', 'cs1', 'c1'), 0, prompts._t(iso(0))),
+                          (300, ('claude', 'cs1', 'c1'), 0, prompts._t(iso(0))), (10080, ('claude', 'cs1', 'c1'), 0, prompts._t(iso(0)))])
+        late = [s for s in got if s['at'] == prompts._t(iso(10))]  # the reading at minute 12 belongs to the request at minute 10
+        self.assertEqual({s['turn'] for s in late}, {('claude', 'cs1', 'c2')})
+        stray = [s for s in got if s['who'] == ('claude', 'nobody', None)]
+        self.assertEqual(({s['turn'] for s in stray}, {s['i'] for s in stray}), ({None}, {None}))  # no request of that session: unattributed
+        self.assertTrue(all((s['harness'], s['account'], s['plan_type']) == ('claude', 'claude', None) for s in got))
+
+    def test_an_idle_session_reading_is_not_placed_at_an_old_request(self):
+        recs = [creq('a', iso(0))]
+        self.write(cline(60, 5, 10))
+        got = qs.claude_snapshots(self.path, recs, prompts.assign_prompts(recs))
+        self.assertEqual({(s['turn'], s['i'], s['t'], s['at']) for s in got}, {(None, None, prompts._t(iso(60)), None)})
+
+    def test_a_claude_turn_alone_gets_an_observed_share(self):
+        recs = [creq('a', iso(1)), creq('b', iso(5))]
+        self.write(cline(0, 4, 10, session='cs0'), cline(2, 5, 11), cline(6, 7, 14))
+        snaps = qs.snapshots_from_records(recs, claude=self.path)
+        by = qs.turn_shares(recs, snaps, TABLE)
+        week, five = by[('claude', 'cs1', 'c1')][10080], by[('claude', 'cs1', 'c1')][300]
+        self.assertEqual((week['label'], qs.value(week), five['label'], qs.value(five)), ('observed', 4.0, 'observed', 3.0))
+        self.assertEqual(qs.text(qs.largest(by)[('claude', 'cs1', 'c1')]), '~4% of weekly Claude limit')
+        self.assertEqual(qs.line(qs.as_json(five), 'claude'), '~3% of 5-hour Claude limit')
+        windows = qs.windows(snaps, records=recs, cost_of=lambda r: 1.0)
+        self.assertEqual({(w['harness'], w['minutes'], w['peak_percent'], w['cost']) for w in windows}, {('claude', 300, 7.0, 2.0), ('claude', 10080, 14.0, 2.0)})
+
+    def test_two_claude_sessions_share_a_step_and_estimate(self):
+        recs = [creq('a', iso(0), turn='c1', session='s1', out=1_000_000), creq('b', iso(10), turn='c1', session='s1', out=1_000_000),
+                creq('c', iso(0), turn='c2', session='s2', out=1_000_000), creq('d', iso(10), turn='c2', session='s2', out=1_000_000)]
+        self.write(cline(-5, 0, 0, session='before'), cline(0, 1, 1, session='s1'), cline(0, 1, 1, session='s2'), cline(11, 5, 5, session='s1'), cline(11, 5, 5, session='s2'))
+        by = qs.turn_shares(recs, qs.snapshots_from_records(recs, claude=self.path), TABLE)
+        self.assertEqual([by[k][10080]['label'] for k in (('claude', 's1', 'c1'), ('claude', 's2', 'c2'))], ['estimate', 'estimate'])
+
+    def test_malformed_lines_are_skipped_and_counted(self):
+        self.write(cline(0, 5, 10), 'not json', '[1]', json.dumps({'ts': 'bad', 'five_hour': {'used_percent': 1, 'resets_at': RESET5}}),
+                   json.dumps({'ts': iso(1), 'five_hour': {'used_percent': float('nan'), 'resets_at': RESET5}}),
+                   json.dumps({'ts': iso(1), 'session': 3, 'five_hour': {'used_percent': 1, 'resets_at': RESET5}}), '', cline(2, 6, 11))
+        rows, bad = qs.read_claude(self.path)
+        self.assertEqual((len(rows), bad), (2, 5))
+
+    def test_an_absent_file_changes_nothing(self):
+        recs = history_records()
+        missing = self.path.with_name('none.jsonl')
+        self.assertEqual(qs.read_claude(missing), ([], 0))
+        a, b = qs.snapshots_from_records(recs), qs.snapshots_from_records(recs, claude=missing)
+        self.assertEqual((list(a), a.requests, a.bearing), (list(b), b.requests, b.bearing))
+        self.assertEqual(qs.compute([creq('a', iso(0))], TABLE, claude=missing), ([], {}))
+        self.assertIsNone(qs.claude_token(missing))
+
+    def test_codex_and_claude_are_separate_series(self):
+        recs = [*history_records(), creq('a', iso(1)), creq('b', iso(5))]
+        self.write(cline(0, 4, 10, session='before'), cline(2, 5, 11), cline(6, 7, 14))
+        snaps, got = qs.compute(recs, TABLE, claude=self.path)
+        self.assertEqual({s['harness'] for s in snaps}, {'claude', 'codex'})
+        self.assertEqual(qs.value(got[('claude', 'cs1', 'c1')]), 4.0)
+        self.assertEqual(qs.value(got[('codex', 's2', 't2')]), 9.0)
+
+    def test_a_reading_keeps_its_own_time_and_a_request_in_between_makes_the_step_shared(self):
+        recs = [creq('a1', iso(1), turn='c1', session='A'), creq('b', iso(2), turn='c2', session='B', out=1000), creq('a2', iso(3), turn='c1', session='A')]
+        self.write(cline(0, 10, 10, session='before'), cline(1, 15, 15, session='A'), cline(3, 20, 20, session='A'))
+        snaps = qs.snapshots_from_records(recs, claude=self.path)
+        self.assertEqual({s['t'] for s in snaps if s['who'][1] == 'A'}, {prompts._t(iso(1)), prompts._t(iso(3))})
+        by = qs.turn_shares(recs, snaps, TABLE)
+        share = by[('claude', 'A', 'c1')][10080]
+        self.assertEqual(share['label'], 'estimate')  # B ran in between: not observed
+        self.assertLess(qs.value(share), 10.0)
+
+    def test_a_lone_turn_with_a_delayed_reading_is_still_observed(self):
+        recs = [creq('a1', iso(1)), creq('a2', iso(3))]
+        self.write(cline(0, 10, 10, session='before'), cline(1, 12, 12, seconds=20), cline(3, 15, 15, seconds=20))
+        by = qs.turn_shares(recs, qs.snapshots_from_records(recs, claude=self.path), TABLE)
+        share = by[('claude', 'cs1', 'c1')][10080]
+        self.assertEqual((share['label'], qs.value(share), share['observed']['before'], share['observed']['after']), ('observed', 5.0, 10.0, 15.0))
+
+    def test_sessionless_readings_do_not_break_counter_splitting(self):
+        recs = [creq('a', iso(1), session='s1'), creq('b', iso(2), session='s2', turn='c2'), creq('c', iso(3), session='s1')]
+        lines = []
+        for m in range(0, 6):
+            lines.append(json.dumps(dict(cline_row(m, 50 + 20 * (m % 2), 50 + 20 * (m % 2), session='s1' if m % 3 == 0 else 'x'), **({'session': None} if m % 2 else {}))))
+        self.write(*lines)
+        snaps, got = qs.compute(recs, TABLE, claude=self.path)  # must not raise
+        self.assertTrue(snaps)
+        from tokenatlas import insights, report
+        report.build_report(recs, {}, now=datetime(2026, 9, 5, tzinfo=timezone.utc), claude_quota=self.path)
+        qs.turn_shares(recs, snaps, TABLE)
+        insights.cost_facts(recs, TABLE, quota=qs.turn_shares(recs, snaps, TABLE))
+
+    def test_several_readings_after_one_request_count_its_cost_once(self):
+        recs = [creq('a', iso(1))]
+        self.write(cline(0, 1, 1, session='before'), cline(1, 2, 2, seconds=5), cline(1, 3, 3, seconds=10), cline(1, 4, 4, seconds=15))
+        snaps = qs.snapshots_from_records(recs, claude=self.path)
+        week = next(w for w in qs.windows(snaps, records=recs, cost_of=lambda r: 1.0) if w['minutes'] == 10080)
+        self.assertEqual((week['cost'], week['unpriced_requests']), (1.0, 0))
+        none = next(w for w in qs.windows(snaps, records=recs, cost_of=lambda r: None) if w['minutes'] == 10080)
+        self.assertEqual((none['cost'], none['unpriced_requests']), (None, 1))
+
+    def test_fractional_seconds_are_kept(self):
+        recs = [creq('a', (T0 + timedelta(minutes=1, milliseconds=200)).isoformat())]
+        row = dict(ts=(T0 + timedelta(minutes=1, milliseconds=700)).isoformat(), session='cs1', five_hour=None, seven_day=dict(used_percent=3, resets_at=RESET))
+        self.write(json.dumps(row))
+        got = qs.claude_snapshots(self.path, recs, prompts.assign_prompts(recs))
+        self.assertEqual((got[0]['i'], got[0]['t'] - got[0]['at']), (0, timedelta(milliseconds=500)))
+
+    def test_delayed_readings_conserve_the_movement_between_them(self):
+        recs = [creq('a1', iso(1)), creq('a2', iso(1, 10))]  # requests at 60 s and 70 s; readings at 80 s and 90 s
+        self.write(cline(0, 0, 0, session='before'), cline(1, 10, 10, seconds=20), cline(1, 20, 20, seconds=30))
+        by = qs.turn_shares(recs, qs.snapshots_from_records(recs, claude=self.path), TABLE)
+        share = by[('claude', 'cs1', 'c1')][10080]
+        self.assertEqual(qs.value(share), 20.0)  # the whole movement, not the first 10 (an estimate: its first request has no reading of its own)
+
+    def test_repeated_readings_after_one_request_give_the_turn_the_whole_movement(self):
+        recs = [creq('a', iso(1))]
+        self.write(cline(0, 0, 0, session='before'), cline(1, 5, 5, seconds=5), cline(1, 12, 12, seconds=10), cline(1, 20, 20, seconds=15))
+        by = qs.turn_shares(recs, qs.snapshots_from_records(recs, claude=self.path), TABLE)
+        share = by[('claude', 'cs1', 'c1')][10080]
+        self.assertEqual((share['label'], qs.value(share), share['observed']['after']), ('observed', 20.0, 20.0))
+
+    def test_staggered_delayed_readings_of_two_turns_add_up_to_the_movement(self):
+        recs = [creq('a1', iso(1), turn='c1', session='A', out=1_000_000), creq('a2', iso(5), turn='c1', session='A', out=1_000_000),
+                creq('b1', iso(3), turn='c2', session='B', out=1_000_000), creq('b2', iso(7), turn='c2', session='B', out=1_000_000)]
+        self.write(cline(0, 0, 0, session='before'), cline(1, 4, 4, seconds=30, session='A'), cline(3, 9, 9, seconds=30, session='B'),
+                   cline(5, 14, 14, seconds=30, session='A'), cline(7, 20, 20, seconds=30, session='B'))
+        by = qs.turn_shares(recs, qs.snapshots_from_records(recs, claude=self.path), TABLE)
+        total = sum(qs.value(by[k][10080]) for k in (('claude', 'A', 'c1'), ('claude', 'B', 'c2')))
+        self.assertAlmostEqual(total, 20.0)
+
+    def test_a_reading_of_a_window_that_began_after_the_request_does_not_attach_to_it(self):
+        recs = [creq('a', iso(0))]
+        old5, new5 = (T0 + timedelta(hours=2)).isoformat(), (T0 + timedelta(hours=5, minutes=30)).isoformat()  # the new window began at T0 + 30 min
+        self.write(cline(0, 90, 50, seconds=30, resets5=old5), cline(1, 5, 51, resets5=new5))
+        snaps = qs.snapshots_from_records(recs, claude=self.path)
+        five = [s for s in snaps if s['window'][0] == 300]
+        self.assertEqual([(s['used_percent'], s['i']) for s in five], [(90, 0), (5, None)])
+        self.assertEqual([s['i'] for s in snaps if s['window'][0] == 10080], [0, 0])  # the weekly window is the same one
+        windows = qs.windows(snaps, records=recs, cost_of=lambda r: 1.0)
+        self.assertEqual(sorted(w['cost'] or 0 for w in windows if w['minutes'] == 300), [0, 1.0])  # one cost allocation per window length
+        self.assertEqual([w['cost'] for w in windows if w['minutes'] == 10080], [1.0])
+
+    def test_change_only_recording_does_not_understate_the_window_cost(self):
+        recs = [creq('a1', iso(1)), creq('a2', iso(3)), creq('a3', iso(5)), creq('a4', iso(30))]  # a2 and a4 have no reading: the value did not change
+        self.write(cline(0, 4, 10, session='before'), cline(1, 5, 11, seconds=5), cline(5, 6, 12, seconds=5))
+        snaps = qs.snapshots_from_records(recs, claude=self.path)
+        for w in qs.windows(snaps, records=recs, cost_of=lambda r: 1.0):
+            self.assertEqual((w['cost'], w['unpriced_requests']), (4.0, 0), w['minutes'])
+
+    def test_an_expired_reading_followed_by_a_fresh_one_attaches_the_request_to_one_window(self):
+        recs = [creq('a', iso(10))]
+        expired5, fresh5 = (T0 + timedelta(minutes=5)).isoformat(), (T0 + timedelta(hours=5)).isoformat()  # the old window ended before the request
+        self.write(cline(10, 90, 50, seconds=5, resets5=expired5), cline(10, 4, 50, seconds=10, resets5=fresh5))
+        snaps = qs.snapshots_from_records(recs, claude=self.path)
+        five = {s['used_percent']: s['i'] for s in snaps if s['window'][0] == 300}
+        self.assertEqual(five, {90: None, 4: 0})
+        windows = qs.windows(snaps, records=recs, cost_of=lambda r: 1.0)
+        self.assertEqual(sum(w['cost'] or 0 for w in windows if w['minutes'] == 300), 1.0)  # not $2
+
+    def test_a_request_exactly_at_a_reset_belongs_to_the_new_window_only(self):
+        recs = [creq('a', iso(10))]
+        old5, new5 = iso(10), (T0 + timedelta(hours=5, minutes=10)).isoformat()  # the old window ends at the request, the new one starts there
+        self.write(cline(10, 90, 50, seconds=5, resets5=old5), cline(10, 4, 50, seconds=10, resets5=new5))
+        snaps = qs.snapshots_from_records(recs, claude=self.path)
+        self.assertEqual({s['used_percent']: s['i'] for s in snaps if s['window'][0] == 300}, {90: None, 4: 0})
+        windows = qs.windows(snaps, records=recs, cost_of=lambda r: 1.0)
+        self.assertEqual([w['cost'] or 0 for w in windows if w['minutes'] == 300].count(1.0), 1)  # one membership per window length
+        self.assertEqual(sum(w['cost'] or 0 for w in windows if w['minutes'] == 300), 1.0)
+        # the window's first instant is inside it
+        self.write(cline(10, 4, 50, seconds=5, resets5=(T0 + timedelta(hours=5, minutes=10)).isoformat()))
+        self.assertEqual([s['i'] for s in qs.snapshots_from_records(recs, claude=self.path) if s['window'][0] == 300], [0])
+
+
+class ClaudeSurfaces(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / 'claude-quota.jsonl'
+        self.path.write_text('\n'.join([cline(0, 4, 10, session='cs0'), cline(2, 5, 11), cline(6, 7, 14)]) + '\n')
+        self.recs = [creq('0', iso(-5), turn='c0', session='cs0'), creq('a', iso(1)), creq('b', iso(5))]
+
+    def test_report_payload_has_it_and_the_shared_report_no_session_ids(self):
+        from tokenatlas import report
+        payload = report.build_report(self.recs, {}, now=datetime(2026, 9, 5, tzinfo=timezone.utc), claude_quota=self.path)
+        shares = [v for v in payload['quota_shares'].values() if v['harness'] == 'claude']
+        self.assertEqual(sorted((v['minutes'], v['percent'], v['label']) for v in shares if v['percent']), [(10080, 4.0, 'observed')])
+        self.assertEqual({w['harness'] for w in payload['quota_windows']}, {'claude'})
+        text = json.dumps(payload)
+        for secret in ('cs1', 'cs0', 'claude:cs1'):
+            self.assertNotIn(secret, text)
+        none = report.build_report(self.recs, {}, now=datetime(2026, 9, 5, tzinfo=timezone.utc))
+        self.assertNotIn('quota_shares', none)
+
+    def test_an_imported_harness_name_is_pseudonymized_in_a_shared_report(self):
+        from tokenatlas import report
+        recs = [dict(r, harness='evil-harness/secret') for r in history_records()]
+        shared = report.build_report(recs, {}, now=datetime(2026, 9, 5, tzinfo=timezone.utc))
+        self.assertNotIn('evil-harness', json.dumps(shared['quota_shares']) + json.dumps(shared['quota_windows']))  # (the context_size fact names harnesses itself, outside this change)
+        private = report.build_report(recs, {}, redact=False, now=datetime(2026, 9, 5, tzinfo=timezone.utc))
+        self.assertEqual({v['harness'] for v in private['quota_shares'].values()}, {'evil-harness/secret'})
+        known = report.build_report(history_records(), {}, now=datetime(2026, 9, 5, tzinfo=timezone.utc))
+        self.assertEqual({v['harness'] for v in known['quota_shares'].values()}, {'codex'})
+
+    def test_top_and_insights_pick_it_up(self):
+        from tokenatlas import insights, prompts
+        top = prompts.top_prompts(self.recs, TABLE, 5)['prompts']
+        qs.mark_turns(top, qs.compute(self.recs, TABLE, claude=self.path)[1])
+        by = {p['turn_id']: p['quota_share'] for p in top}
+        self.assertEqual((by['c1']['window_minutes'], by['c1']['delta_percent'], by['c1']['label']), (10080, 4.0, 'observed'))
+        self.assertEqual(qs.line(by['c1'], 'claude'), '~4% of weekly Claude limit')
+        got = qs.turn_shares(self.recs, qs.snapshots_from_records(self.recs, claude=self.path), TABLE)
+        fact = next(f for f in insights.cost_facts(self.recs, TABLE, quota=got)['facts'] if f['id'] == 'quota_share')
+        self.assertEqual([x['percent'] for x in fact['values']['turns']], [4.0])
+
+
+class ClaudeCli(unittest.TestCase):
+    """The commands read claude-quota.jsonl next to the history database."""
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.db = self.dir / 'history.sqlite3'
+        self.recs = [creq('0', iso(-5), turn='c0', session='cs0'), creq('a', iso(1)), creq('b', iso(5))]
+
+    def call(self, *args):
+        import contextlib, io
+        from unittest import mock
+        from tokenatlas import __main__ as cli
+        from tokenatlas.history import History
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(History, 'records', lambda history, *a, **k: list(self.recs)), mock.patch.object(History, 'limit_events', lambda history: []), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(['--db', str(self.db), *args])
+        return code, out.getvalue(), err.getvalue()
+
+    def prepare(self, quota=True):
+        from tokenatlas.history import History
+        with History(self.db):
+            pass
+        if quota:
+            (self.dir / 'claude-quota.jsonl').write_text('\n'.join([cline(0, 4, 10, session='cs0'), cline(2, 5, 11), cline(6, 7, 14)]) + '\n')
+
+    def test_top_json_shows_a_claude_share_only_with_the_file(self):
+        self.prepare()
+        code, out, _ = self.call('top', '--json')
+        self.assertEqual(code, 0)
+        by = {p['turn_id']: p['quota_share'] for p in json.loads(out)['prompts']}
+        self.assertEqual((by['c1']['window_minutes'], by['c1']['delta_percent'], by['c1']['label']), (10080, 4.0, 'observed'))
+        (self.dir / 'claude-quota.jsonl').unlink()
+        _, out, _ = self.call('top', '--json')
+        self.assertTrue(all(p['quota_share'] is None for p in json.loads(out)['prompts']))
+
+    def test_doctor_reports_the_file_and_whether_recording_is_configured(self):
+        from unittest import mock
+        cfg = self.dir / 'claude'
+        cfg.mkdir()
+        self.prepare(quota=False)
+        with mock.patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': str(cfg)}):
+            _, out, _ = self.call('doctor')
+            off = json.loads(out)['claude_quota']
+            self.assertEqual((off['snapshots_file'], off['snapshots'], off['last_snapshot'], off['recording_configured']), ('absent', 0, None, 'unknown'))
+            (cfg / 'settings.json').write_text(json.dumps({'statusLine': {'type': 'command', 'command': '/bin/tokenatlas statusline'}}))
+            self.assertEqual(json.loads(self.call('doctor')[1])['claude_quota']['recording_configured'], False)
+            (cfg / 'settings.json').write_text(json.dumps({'statusLine': {'type': 'command', 'command': '/bin/tokenatlas statusline --record-quota'}}))
+            self.assertEqual(json.loads(self.call('doctor')[1])['claude_quota']['recording_configured'], True)
+            (cfg / 'settings.json').write_text('{ not json')
+            self.assertEqual(json.loads(self.call('doctor')[1])['claude_quota']['recording_configured'], 'unknown')
+            self.prepare()
+            with open(self.dir / 'claude-quota.jsonl', 'a') as f:
+                f.write('torn\n')
+            on = json.loads(self.call('doctor')[1])['claude_quota']
+        self.assertEqual((on['snapshots_file'], on['snapshots'], on['malformed'], on['last_snapshot']), ('present', 3, 1, prompts._t(iso(6)).isoformat()))
+        self.assertGreater(on['last_snapshot_age'], 0)
+
+    def test_the_whole_percent_note_does_not_claim_claude_reports_whole_percent(self):
+        import json as j
+        texts = j.loads((Path(__file__).parent / 'tokenatlas' / 'report_i18n.json').read_text(encoding='utf-8'))
+        en, sv = texts['en']['ins_a_quota_whole'], texts['sv']['ins_a_quota_whole']
+        self.assertIn('Shares are shown as whole percent', en)
+        self.assertIn('Codex reports whole percent; Claude Code may report fractions', en)
+        self.assertNotIn('counter moves in whole percent', en)
+        self.assertIn('Codex rapporterar hela procent; Claude Code kan rapportera decimaler', sv)
+
+    def test_report_and_open_use_the_file_and_a_change_rebuilds_a_cached_report(self):
+        self.prepare()
+        html = self.dir / 'r.html'
+        code, _, _ = self.call('report', '--html', str(html), '--private', '--if-changed')
+        self.assertEqual(code, 0)
+        first = html.read_text()
+        self.assertIn('claude', first)
+        code, out, _ = self.call('report', '--html', str(html), '--private', '--if-changed')
+        self.assertIn('unchanged', out)
+        with open(self.dir / 'claude-quota.jsonl', 'a') as f:
+            f.write(cline(7, 9, 16) + '\n')
+        _, out, _ = self.call('report', '--html', str(html), '--private', '--if-changed')
+        self.assertNotIn('unchanged', out)
 
 
 if __name__ == '__main__':

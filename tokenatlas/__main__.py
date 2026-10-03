@@ -213,6 +213,38 @@ def _events(events):
     return [e for e in events if (e.get('quota') or {}).get('status')=='event']
 
 
+def _claude_quota(db):
+    """The Claude quota snapshot file next to the history database when it exists (opt-in, `statusline --record-quota`), else None."""
+    path=statusline.quota_path(db)
+    return path if path.is_file() else None
+
+
+def _quota_token(db):
+    from tokenatlas import quota_share
+    return quota_share.claude_token(statusline.quota_path(db))
+
+
+def _quota_status(db):
+    """doctor: Claude quota recording. `recording_configured` is whether the Claude Code settings file names `--record-quota` in the statusline command
+    (true/false, or "unknown" when no settings file can be read or none names tokenatlas); `snapshots_file` is present/absent, with the snapshot count,
+    unreadable lines, the last snapshot and its age."""
+    from tokenatlas import quota_share
+    path=statusline.quota_path(db)
+    configured=statusline.recording_configured()
+    problem=statusline.quota_file_problem(path)
+    out=dict(recording_configured='unknown' if configured is None else configured,settings_file=str(statusline.settings_path()),path=str(path),
+             snapshots_file='present' if path.is_file() else 'absent',file_problem=problem,snapshots=0,malformed=0,last_snapshot=None,last_snapshot_age=None,
+             note='snapshots exist only while a Claude Code UI session is open; claude -p, SDK runs and claude.ai chat are not recorded')
+    if path.is_file():
+        rows,bad=quota_share.read_claude(path)
+        last=max((r[0] for r in rows),default=None)
+        out.update(snapshots=len(rows),malformed=bad,last_snapshot=None if last is None else last.isoformat(),
+                   last_snapshot_age=None if last is None else max(0,int((datetime.now(ZoneInfo('UTC'))-last).total_seconds())))
+    if problem:out['hint']=f'recording is skipped: the snapshot file {problem}'
+    elif configured is not True:out['hint']='to record, add --record-quota to the statusline command (tokenatlas statusline --setup --record-quota)'
+    return out
+
+
 def _counts(contexts):
     """{key: input count}: input counts of private contexts (never given to a shared report); None when there are none."""
     found={k:c['inputs']['count'] for k,c in contexts.items() if isinstance(c.get('inputs'),dict) and isinstance(c['inputs'].get('count'),int)}
@@ -319,7 +351,9 @@ def main(argv=None):
     collect.add_argument('--sync-timeout',type=int,default=600,help='Seconds for the whole remote sync before its process group is killed (default 600).')
     collect.add_argument('--no-report',action='store_true',help='Do not build the report.')
     collect.add_argument('--lang',choices=('auto','sv','en'),default='auto',help='Report language.')
-    commands.add_parser('statusline',help='Claude Code statusline: one line from the stdin payload and the totals cache refresh writes (no network); --setup prints the settings snippet.').add_argument('--setup',action='store_true')
+    status=commands.add_parser('statusline',help='Claude Code statusline: one line from the stdin payload and the totals cache refresh writes (no network); --setup prints the settings snippet; --record-quota (opt in) also records the quota readings.')
+    status.add_argument('--setup',action='store_true')
+    status.add_argument('--record-quota',action='store_true')
     commands.add_parser('doctor',help='Show source availability, import errors and known coverage limits.')
     args=parser.parse_args(argv)
     if args.command=='show':  # before default_db(): show never touches the history, not even its one-time directory move
@@ -400,12 +434,12 @@ def main(argv=None):
                 spec=_spec('redacted' if args.shared else 'local',DEFAULT_TIMEZONE,'day',{},args.lang)
                 if not args.shared:spec['dest']=str(path.absolute())  # a private report names its file: a moved copy is rebuilt, never reused
                 texts,ctx=(None,None) if args.shared else _visible(history,args.db)  # shared reports never read the side file
-                state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts,ctx),datetime.now(ZoneInfo('UTC')).date().isoformat())
+                state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts,ctx),datetime.now(ZoneInfo('UTC')).date().isoformat(),_quota_token(args.db))
                 if path.exists() and read_report_state(path)==state:
                     result={'html':str(path.resolve()),'skipped':True,'reason':'unchanged'}
                 else:
                     records=history.records();events=history.limit_events();hits_all=_hits(history,records,events)  # one read of the limit events serves the hits and the quota windows
-                    payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=None if args.shared else _counts(ctx),limit_hits=hits_all,all_hits=hits_all,quota_events=_events(events))
+                    payload=build_report(records,source_status,DEFAULT_TIMEZONE,redact=args.shared,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=None if args.shared else _counts(ctx),limit_hits=hits_all,all_hits=hits_all,quota_events=_events(events),claude_quota=_claude_quota(args.db))
                     payload['initial_granularity']='day'
                     if not args.shared:payload.update(saved_at=str(path.absolute()),reopen=_reopen(path,args.db,always=True))  # private only: a shared report never carries a local path
                     write_report(path,render_report(payload,state=state))
@@ -439,7 +473,7 @@ def main(argv=None):
                 hits=limits.limit_hits(everything,history.limit_events(),table)  # windows come from the whole history; the CLI filters then pick the hits
                 if filtered:hits=limits.scope_hits(hits,history.records(start,end,args.harness,args.project),args.harness,start,end,args.project,universe=everything)
                 limits.mark_turns(result['prompts'],hits)
-                quota_share.mark_turns(result['prompts'],quota_share.compute(everything,table,only={(p['harness'],p['session'],p['turn_id']) for p in result['prompts']})[1])
+                quota_share.mark_turns(result['prompts'],quota_share.compute(everything,table,only={(p['harness'],p['session'],p['turn_id']) for p in result['prompts']},claude=_claude_quota(args.db))[1])
                 texts,ctx=prompt_store.visible_all(store,everything,table)  # only the global top k: never text or context outside it
                 if kept:result['text_store']=kept
                 if not args.json:
@@ -452,7 +486,7 @@ def main(argv=None):
             elif args.command=='insights':
                 history.connection.execute('BEGIN')
                 table=pricing.load_prices(args.prices);everything=history.records();memo={}
-                result=insights.cost_facts(everything,table,start,end,hits=limits.limit_hits(everything,history.limit_events(),table),quota=quota_share.turn_shares(everything,quota_share.snapshots_from_records(everything),table,insights.memo_cost(table,memo)),memo=memo)
+                result=insights.cost_facts(everything,table,start,end,hits=limits.limit_hits(everything,history.limit_events(),table),quota=quota_share.turn_shares(everything,quota_share.snapshots_from_records(everything,claude=_claude_quota(args.db)),table,insights.memo_cost(table,memo)),memo=memo)
                 if not args.json:
                     print(insights.render_text(result));return 0
             elif args.command=='snapshot':
@@ -464,6 +498,7 @@ def main(argv=None):
                 history.connection.execute('BEGIN')
                 result=history.doctor()
                 # Where each harness is read from now, and why; only the harness variables, never the whole environment.
+                result['claude_quota']=_quota_status(args.db)
                 result['roots']={h:dict(zip(('path','source'),(str(r),src))) for h in ('claude','codex','pi','opencode') for r,src in [why.harness_root(h)]}
             else:
                 history.connection.execute('BEGIN')
@@ -473,7 +508,7 @@ def main(argv=None):
                     spec=_spec('local' if args.private else 'redacted',args.timezone,args.granularity,vars(args),args.lang)
                     if args.private:spec['dest']=str(path.absolute())  # as in open: a private report names its file
                     texts,ctx=_visible(history,args.db) if args.private else (None,None)
-                    state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts,ctx),datetime.now(ZoneInfo('UTC')).date().isoformat())
+                    state=report_state(history.revision,history.machine,spec,coverage_key(source_status),history.revision_token,prompt_store.texts_hash(texts,ctx),datetime.now(ZoneInfo('UTC')).date().isoformat(),_quota_token(args.db))
                     if path.exists() and (args.if_changed or max_age is not None):
                         found=read_report_state(path)
                         age=time.time()-path.stat().st_mtime
@@ -497,7 +532,7 @@ def main(argv=None):
                     universe=history.records() if filtered else records  # the whole history: hits and their turns are computed over it
                     texts,ctx=_visible(history,args.db,universe) if args.private else (None,None)
                     events=history.limit_events();hits_all=_hits(history,universe,events)
-                    payload=build_report(records,source_status,args.timezone,redact=not args.private,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=_counts(ctx) if args.private else None,limit_hits=limits.scope_hits(hits_all,records,args.harness,start,end,args.project,args.session,args.turn,args.model,args.effort,args.provider,args.agent,universe),universe=universe if filtered else None,all_hits=hits_all,quota_events=_events(events))
+                    payload=build_report(records,source_status,args.timezone,redact=not args.private,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=_counts(ctx) if args.private else None,limit_hits=limits.scope_hits(hits_all,records,args.harness,start,end,args.project,args.session,args.turn,args.model,args.effort,args.provider,args.agent,universe),universe=universe if filtered else None,all_hits=hits_all,quota_events=_events(events),claude_quota=_claude_quota(args.db))
                     payload['initial_granularity']=args.granularity
                     if args.private:payload.update(saved_at=str(path.absolute()),reopen=_reopen(path,args.db))  # private only: a shared report never carries a local path
                     write_report(path,render_report(payload,state=state))

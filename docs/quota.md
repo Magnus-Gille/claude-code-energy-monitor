@@ -26,6 +26,20 @@ Sources: support.claude.com articles 11647753 and 11145838; code.claude.com/docs
 the anthropics/claude-code CHANGELOG (v2.1.80 added `rate_limits`); learn.chatgpt.com/docs/pricing;
 openai/codex `codex-rs/protocol` (`RateLimitSnapshot`, `RateLimitWindow`, `RateLimitReachedType`).
 
+## Claude snapshots (opt-in)
+
+Claude Code's payload is only live, so tokenatlas records it when asked: `tokenatlas statusline --record-quota` appends
+`{ts, session, five_hour: {used_percent, resets_at}, seven_day: {...}}` to `claude-quota.jsonl` next to the history, when a
+value changed (0600, pruned to the last 60 days above 5 MB; a failure never changes the status line). A reading is the counter
+after its session's latest request, so the join places it at that request (within 5 minutes; an idle reading belongs to no turn)
+and the shares then follow the same rules as for Codex. Coverage:
+
+- Snapshots exist only while a Claude Code UI session is open and its statusline refreshes. `claude -p`, SDK runs and
+  claude.ai chat are not recorded.
+- The values are account-wide: use on claude.ai, Desktop, Cowork or another machine moves them, and is not in the logs.
+- A window can be absent from the payload, and a value can be stale after a reset while the session is idle.
+- A turn with no reading after its last request is an estimate, not observed.
+
 ## How well does list price predict the percentage?
 
 This was measured on one owner's Codex history (January to October 2026: 379,546 deduplicated `token_count` events
@@ -52,7 +66,7 @@ see (other machines, cloud tasks) and unpriced models (13% of events) account fo
 
 ## Wording rules
 
-- Say "~3% of the weekly Codex limit (observed)" or "≈ 3% (estimate)". Never show decimals for a whole-percent counter.
+- Say "~3% of the weekly Codex limit (observed)" (Claude: "~6% of the 5-hour Claude limit"; sv "5-timmarsgränsen för Claude", "veckogränsen för Claude") or "≈ 3% (estimate)". Never show decimals for a whole-percent counter.
   Show "< 1%" when the counter did not move.
 - Name a window by its length (`window_minutes`, or Claude's `five_hour` / `seven_day`), never by the `primary` /
   `secondary` slot.

@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -249,6 +250,221 @@ class RobustnessTests(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(statusline.run([], db=Path(tempfile.gettempdir()) / 'none' / 'h.sqlite3', stdin=io.StringIO(raw)), 0)
         self.assertEqual(out.getvalue().strip(), 'Opus | 7d:12%')
+
+
+class RecordQuotaTests(Base):
+    def payload(self, five=29, seven=52, session='sess-1'):
+        return {'model': {'display_name': 'Opus 4.8'}, 'session_id': session,
+                'rate_limits': {'five_hour': {'used_percentage': five, 'resets_at': 1790000000}, 'seven_day': {'used_percentage': seven, 'resets_at': 1790500000.0}}}
+
+    def run_line(self, payload, *flags, db=None, now=NOW):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = statusline.run(list(flags), db or self.db, io.StringIO(json.dumps(payload)), now)
+        self.assertEqual(code, 0)
+        return out.getvalue()
+
+    def lines(self):
+        path = self.db.parent / statusline.QUOTA_NAME
+        return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+    def test_nothing_is_written_without_the_flag(self):
+        self.run_line(self.payload())
+        self.assertEqual(sorted(p.name for p in self.db.parent.glob('claude-quota*')) if self.db.parent.exists() else [], [])
+
+    def test_the_flag_appends_a_snapshot_and_keeps_the_output(self):
+        plain = self.run_line(self.payload())
+        recorded = self.run_line(self.payload(), '--record-quota')
+        self.assertEqual(plain, recorded)
+        got = self.lines()
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]['ts'], '2026-10-01T10:00:00+00:00')
+        self.assertEqual(got[0]['session'], 'sess-1')
+        self.assertEqual(got[0]['five_hour'], {'used_percent': 29, 'resets_at': datetime.fromtimestamp(1790000000, timezone.utc).isoformat()})
+        self.assertEqual(got[0]['seven_day']['used_percent'], 52)
+
+    def test_an_unchanged_value_is_not_written_again_even_from_another_session(self):
+        self.run_line(self.payload(), '--record-quota')
+        self.run_line(self.payload(session='other'), '--record-quota')
+        self.assertEqual(len(self.lines()), 1)
+        self.run_line(self.payload(five=30), '--record-quota')
+        self.assertEqual([x['five_hour']['used_percent'] for x in self.lines()], [29, 30])
+
+    def test_an_unreadable_last_file_still_appends(self):
+        self.run_line(self.payload(), '--record-quota')
+        (self.db.parent / statusline.QUOTA_LAST).write_text('not json{')
+        self.run_line(self.payload(), '--record-quota')
+        self.assertEqual(len(self.lines()), 2)
+
+    def test_a_payload_without_limits_or_one_window_is_handled(self):
+        self.run_line({'model': {'display_name': 'X'}}, '--record-quota')
+        self.assertEqual(self.lines(), [])
+        self.run_line({'session_id': 's', 'rate_limits': {'seven_day': {'used_percentage': 3.5, 'resets_at': 1790500000}, 'five_hour': {'used_percentage': 'x'}}}, '--record-quota')
+        got = self.lines()
+        self.assertEqual((got[0]['five_hour'], got[0]['seven_day']['used_percent']), (None, 3.5))
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX modes')
+    def test_the_files_are_private(self):
+        self.run_line(self.payload(), '--record-quota')
+        for name in (statusline.QUOTA_NAME, statusline.QUOTA_LAST):
+            self.assertEqual((self.db.parent / name).stat().st_mode & 0o777, 0o600)
+
+    def test_a_write_failure_keeps_the_output_identical(self):
+        plain = self.run_line(self.payload())
+        blocked = self.root / 'file'
+        blocked.write_text('x')  # the "state directory" is a file: nothing can be created in it
+        self.assertEqual(self.run_line(self.payload(), '--record-quota', db=blocked / 'history.sqlite3'), plain)
+        with mock.patch('os.write', side_effect=OSError('disk full')):
+            self.assertEqual(self.run_line(self.payload(), '--record-quota'), plain)
+
+    def test_pruning_keeps_the_last_sixty_days_above_the_size_limit(self):
+        path = self.db.parent / statusline.QUOTA_NAME
+        path.parent.mkdir(parents=True)
+        old = json.dumps({'ts': '2026-07-01T00:00:00+00:00', 'session': 'a', 'five_hour': None, 'seven_day': {'used_percent': 1, 'resets_at': None}})
+        new = json.dumps({'ts': '2026-09-20T00:00:00+00:00', 'session': 'a', 'five_hour': None, 'seven_day': {'used_percent': 2, 'resets_at': None}})
+        path.write_text('\n'.join([old, new, 'garbage']) + '\n')
+        os.chmod(path, 0o600)
+        with mock.patch.object(statusline, 'QUOTA_MAX_BYTES', 10):
+            self.run_line(self.payload(), '--record-quota')
+        got = self.lines()
+        self.assertEqual([x['ts'][:10] for x in got], ['2026-09-20', '2026-10-01'])
+        self.assertEqual([p.name for p in path.parent.glob('*.tmp')], [])
+        # below the limit nothing is rewritten
+        path.write_text('\n'.join([old, new]) + '\n')
+        os.chmod(path, 0o600)
+        self.run_line(self.payload(five=40), '--record-quota')
+        self.assertEqual(len(self.lines()), 3)
+
+    def test_the_timestamp_keeps_fractional_seconds(self):
+        self.run_line(self.payload(), '--record-quota', now=NOW.replace(microsecond=123456))
+        self.assertEqual(self.lines()[0]['ts'], '2026-10-01T10:00:00.123456+00:00')
+
+    @unittest.skipIf(os.name == 'nt', 'uses flock')
+    def test_a_held_lock_skips_recording_without_blocking_and_a_free_one_records(self):
+        import fcntl
+        self.db.parent.mkdir(parents=True)
+        plain = self.run_line(self.payload())
+        fd = os.open(self.db.parent / statusline.QUOTA_LOCK, os.O_RDWR | os.O_CREAT, 0o600)  # another process is pruning/appending
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            started = time.monotonic()
+            self.assertEqual(self.run_line(self.payload(), '--record-quota'), plain)
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertEqual(self.lines(), [])
+            self.assertFalse((self.db.parent / statusline.QUOTA_LAST).exists())  # the skipped reading is not marked as recorded
+        finally:
+            os.close(fd)
+        self.run_line(self.payload(), '--record-quota')
+        self.assertEqual(len(self.lines()), 1)
+
+    def test_prune_cannot_lose_an_append_that_is_in_flight(self):
+        """The prune runs inside the lock, so an append that starts during it waits for the next reading instead of being lost to the rewrite."""
+        path = self.db.parent / statusline.QUOTA_NAME
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({'ts': '2026-09-20T00:00:00+00:00', 'session': 'a', 'five_hour': None, 'seven_day': {'used_percent': 2, 'resets_at': None}}) + '\n')
+        os.chmod(path, 0o600)
+        seen = []
+        real = statusline._prune_quota
+
+        def prune_while_another_reading_arrives(p, now):
+            seen.append(self.run_line(self.payload(five=77), '--record-quota'))  # a concurrent statusline: the lock is busy, so it skips
+            real(p, now)
+        with mock.patch.object(statusline, 'QUOTA_MAX_BYTES', 10), mock.patch.object(statusline, '_prune_quota', prune_while_another_reading_arrives):
+            self.run_line(self.payload(), '--record-quota')
+        self.assertEqual([x['five_hour']['used_percent'] if x['five_hour'] else None for x in self.lines()], [None, 29])
+        self.assertEqual(json.loads((self.db.parent / statusline.QUOTA_LAST).read_text())['five_hour']['used_percent'], 29)  # .last matches the last line
+        self.run_line(self.payload(five=77), '--record-quota')  # the skipped reading is recorded next time
+        self.assertEqual(self.lines()[-1]['five_hour']['used_percent'], 77)
+
+    def test_settings_detection(self):
+        cfg = self.root / 'cfg'
+        cfg.mkdir()
+        with mock.patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(cfg)}):
+            self.assertIsNone(statusline.recording_configured())
+            (cfg / 'settings.json').write_text(json.dumps({'statusLine': {'command': 'tokenatlas statusline'}}))
+            self.assertIs(statusline.recording_configured(), False)
+            (cfg / 'settings.local.json').write_text(json.dumps({'statusLine': {'command': 'tokenatlas statusline --record-quota'}}))
+            self.assertIs(statusline.recording_configured(), True)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX modes and symlinks')
+    def test_a_permissive_or_symlinked_snapshot_file_is_not_written_and_doctor_says_so(self):
+        path = self.db.parent / statusline.QUOTA_NAME
+        path.parent.mkdir(parents=True)
+        path.write_text('')
+        os.chmod(path, 0o644)
+        plain = self.run_line(self.payload())
+        self.assertEqual(self.run_line(self.payload(), '--record-quota'), plain)
+        self.assertEqual(path.read_text(), '')
+        self.assertEqual(statusline.quota_file_problem(path), 'permissions must be 0600')
+        os.chmod(path, 0o600)
+        self.assertIsNone(statusline.quota_file_problem(path))
+        path.unlink()
+        target = self.root / 'elsewhere.jsonl'
+        target.write_text('')
+        os.symlink(target, path)
+        (path.parent / statusline.QUOTA_LAST).unlink(missing_ok=True)
+        self.assertEqual(self.run_line(self.payload(), '--record-quota'), plain)
+        self.assertEqual(target.read_text(), '')
+        self.assertEqual(statusline.quota_file_problem(path), 'must not be a symlink')
+
+    def test_the_default_directory_is_not_created_while_only_the_legacy_one_exists(self):
+        state = self.root / 'xdg'
+        legacy = state / 'agentmon'
+        legacy.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {'XDG_STATE_HOME': str(state)}):
+            self.assertEqual(statusline.default_db(), legacy / 'history.sqlite3')
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                statusline.run(['--record-quota'], None, io.StringIO(json.dumps(self.payload())), NOW)
+            self.assertFalse((state / 'tokenatlas').exists())
+            self.assertEqual(len((legacy / statusline.QUOTA_NAME).read_text().splitlines()), 1)
+            (state / 'tokenatlas').mkdir()
+            self.assertEqual(statusline.default_db(), state / 'tokenatlas' / 'history.sqlite3')  # both exist: the new one, as default_db() does
+        with mock.patch.dict(os.environ, {'XDG_STATE_HOME': str(self.root / 'fresh')}):
+            self.assertEqual(statusline.default_db(), self.root / 'fresh' / 'tokenatlas' / 'history.sqlite3')
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'POSIX FIFOs')
+    def test_a_fifo_in_place_of_the_snapshot_file_never_blocks_the_statusline(self):
+        import threading
+        self.db.parent.mkdir(parents=True)
+        plain = self.run_line(self.payload())
+        for name in (statusline.QUOTA_NAME, statusline.QUOTA_LAST):
+            fifo = self.db.parent / name
+            os.mkfifo(fifo)
+            result = []
+            thread = threading.Thread(target=lambda: result.append(self.run_line(self.payload(), '--record-quota')), daemon=True)
+            thread.start()
+            thread.join(10)
+            self.assertFalse(thread.is_alive(), f'{name} as a FIFO blocked the statusline')
+            self.assertEqual(result, [plain])
+            if name == statusline.QUOTA_NAME:
+                self.assertTrue(stat.S_ISFIFO(os.stat(fifo).st_mode))  # nothing replaced or written into it
+            fifo.unlink(missing_ok=True)
+
+    @unittest.skipUnless(os.path.isdir('/dev/fd'), 'counts open descriptors through /dev/fd')
+    def test_no_descriptor_stays_open_after_any_record_path(self):
+        """An open handle blocks replacing or deleting the file on Windows, so every path must close what it opens."""
+        def open_fds():
+            return len(os.listdir('/dev/fd'))
+        path = self.db.parent / statusline.QUOTA_NAME
+        before = open_fds()
+        self.run_line(self.payload(), '--record-quota')                 # create
+        self.run_line(self.payload(), '--record-quota')                 # unchanged: skipped
+        self.run_line(self.payload(five=31), '--record-quota')          # existing file: validated and appended
+        with mock.patch.object(statusline, 'QUOTA_MAX_BYTES', 10):
+            self.run_line(self.payload(five=32), '--record-quota')      # prune and atomic replace
+        with mock.patch('os.set_blocking', side_effect=OSError('boom')):
+            self.run_line(self.payload(five=33), '--record-quota')      # a failure after the open
+        with mock.patch('os.write', side_effect=OSError('disk full')):
+            self.run_line(self.payload(five=34), '--record-quota')      # a failed write
+        os.chmod(path, 0o644)
+        self.run_line(self.payload(five=35), '--record-quota')          # rejected as not private
+        self.assertEqual(open_fds(), before)
+
+    def test_setup_with_the_flag_prints_it(self):
+        text = statusline.setup_text(None, '/opt/bin/tokenatlas', record_quota=True)
+        self.assertIn('/opt/bin/tokenatlas statusline --record-quota', text)
+        self.assertNotIn('--record-quota', statusline.setup_text(None, '/opt/bin/tokenatlas'))
 
 
 class SetupTests(unittest.TestCase):

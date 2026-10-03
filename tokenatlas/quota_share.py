@@ -8,6 +8,8 @@ a fixed dollars-per-percent rate. Usage tokenatlas does not see (other machines,
 The counter is whole-percent: a share is shown without decimals, and '< 1%' when it did not move."""
 import functools
 import gc
+import json
+import os
 from collections import OrderedDict
 from bisect import bisect_left, bisect_right
 from datetime import timedelta
@@ -69,14 +71,103 @@ def _when(value):
         return None
 
 
+ATTACH = timedelta(minutes=5)  # a Claude reading is placed at its session's latest request only when that was this recent; an idle one is not
+CLAUDE_WINDOWS = (('five_hour', FIVE_HOURS), ('seven_day', WEEK))
+
+
+def read_claude(path):
+    """(rows, malformed) from a claude-quota.jsonl (written by `tokenatlas statusline --record-quota`): rows = [(t, ts, session, [(minutes,
+    used_percent, resets_at ISO)])] (a missing session becomes a unique string per line) in file order, only lines with a valid time and at least one valid window; `malformed` counts the lines
+    that are not (a torn or foreign line is skipped, never an error). A missing or unreadable file is ([], 0)."""
+    rows, bad = [], 0
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            for n, text in enumerate(f):
+                if not text.strip():
+                    continue
+                try:
+                    row = json.loads(text)
+                    t, session = _when(row['ts']), row.get('session')
+                    wins = []
+                    for key, minutes in CLAUDE_WINDOWS:
+                        w = row.get(key)
+                        if not isinstance(w, dict):
+                            continue
+                        used, due = w.get('used_percent'), limits._reset(w.get('resets_at'))
+                        if isinstance(used, bool) or not isinstance(used, (int, float)) or used != used or used in (float('inf'), float('-inf')) or due is None:
+                            continue
+                        wins.append((minutes, used, due))
+                    if t is None or t.tzinfo is None or not wins or not (session is None or isinstance(session, str)):
+                        raise ValueError('not a snapshot')
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    bad += 1
+                    continue
+                rows.append((t, row['ts'], session or f'\x00{n}', wins))  # a reading without a session is its own participant: never matched, never compared with a real id
+    except OSError:
+        return [], 0
+    return rows, bad
+
+
+def claude_token(path):
+    """A cheap change token of the snapshot file (size, mtime), None when there is none: the report cache keys on it."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return [info.st_size, info.st_mtime_ns]
+
+
+def claude_snapshots(path, records, assigned, rows=None):
+    """The Claude statusline snapshots as the snapshot dicts snapshots_from_records makes for Codex: harness and account 'claude', no plan,
+    windows 300 (five_hour) and 10080 (seven_day). A reading is the counter after its session's latest Claude request at or before it: it keeps
+    its own time (`t`, which is what the allocation intervals use) and takes the turn and record index of that request, whose time is `at`; with
+    no such request within ATTACH, or when that request is outside the window instance the reading reports (half-open: resets_at minus the window length, up to but not including resets_at), it belongs to
+    no turn for that window: turn None, an unattributed participant (harness, session, None). `assigned` is parallel to `records` or a dict by index, as
+    snapshots_from_records takes it. A line that is no snapshot is skipped (see read_claude). Returns the list."""
+    rows = read_claude(path)[0] if rows is None else rows
+    if not rows:
+        return []
+    by = {}  # session -> its Claude requests (time, index), subagents included
+    for i, r in enumerate(records):
+        if r['harness'] == 'claude':
+            t = _when(r['ts'])
+            if t is not None:
+                by.setdefault(r.get('parent_session') or r['session'], []).append((t, i))  # a subagent's requests belong to its parent's session
+    index = {}
+    for session, found in by.items():
+        found.sort(key=lambda x: x[0])
+        index[session] = ([t for t, _ in found], [i for _, i in found])
+    out = []
+    for t, ts, session, wins in rows:
+        i = None
+        if session in index:
+            times, idx = index[session]
+            n = bisect_right(times, t)
+            if n and t - times[n - 1] <= ATTACH:
+                i = idx[n - 1]
+        at = None if i is None else _when(records[i]['ts'])
+        root = ('claude', session if i is None else records[i].get('parent_session') or records[i]['session'])
+        for minutes, used, due in wins:
+            j = i
+            if j is not None and not prompts._t(due) - timedelta(minutes=minutes) <= at < prompts._t(due):
+                j = None  # the request is outside this window instance (before it began, or after it ended: a stale reading): it cannot have moved it
+            a = (assigned[j] if isinstance(assigned, list) else assigned.get(j)) if j is not None else None
+            who = tuple(a[:3]) if a else ('claude', session if j is None else records[j]['session'], None)
+            out.append(dict(ts=ts, t=t, at=None if j is None else at, harness='claude', account='claude', plan_type=None, window=(minutes, due), used_percent=used, reached=None,
+                            turn=who if who[2] is not None else None, who=who, i=j, resets=due, root=root, hit=False, due=prompts._t(due),
+                            key=('claude', 'claude', minutes, None, None, 0, 0)))
+    return out
+
+
 @_nogc
-def snapshots_from_records(records, assigned=None, events=()):
+def snapshots_from_records(records, assigned=None, events=(), claude=None):
     """One snapshot per window per observation that carries a quota: {ts, t, harness, account (limit_id or harness), plan_type, window:
     (minutes, resets_at), used_percent, reached, turn: (harness, session, turn_id) or None, who (turn, or (harness, session, None) for usage
     that no turn owns), hit, i (index in `records`), key}. Rejected limit events and windows that fail validation are skipped. `assigned`
     is parallel to `records`, as prompts.assign_prompts gives it (computed here when not given). `events` are quota-only observations (zero-token
     records with quota status 'event', see History.limit_events): they are placed in their window instances and returned as `.events`, for a
-    window's peak, hit and reading count only; they are never requests, costs or allocation. The result carries `requests` and `bearing`."""
+    window's peak, hit and reading count only; they are never requests, costs or allocation. `claude` is the path of a claude-quota.jsonl
+    (claude_snapshots): its readings are added, and every Claude request becomes a participant. The result carries `requests` and `bearing`."""
     carriers, harnesses, reading = [], set(), {}  # reading: record index -> its valid windows with their parsed reset times
     for i, r in enumerate(records):
         quota = r.get('quota')
@@ -86,6 +177,9 @@ def snapshots_from_records(records, assigned=None, events=()):
                 carriers.append(i)
                 harnesses.add(r['harness'])
                 reading[i] = valid
+    rows = read_claude(claude)[0] if claude else []
+    if rows:
+        harnesses.add('claude')
     out = Snapshots()
     quiet = []  # quota-only events as snapshots
     for e in events:
@@ -101,7 +195,7 @@ def snapshots_from_records(records, assigned=None, events=()):
                               used_percent=w['used_percent'], reached=quota.get('reached'), turn=None, who=None, i=None, resets=w['resets_at'], due=_when(w['resets_at']), event=True,
                               root=(e['harness'], e.get('parent_session') or e.get('session')), hit=_window_hit(quota.get('reached'), full, w),
                               key=(e['harness'], account, w['minutes'], None, quota.get('plan_type'), 0, 0)))
-    if not carriers:
+    if not carriers and not rows:
         if quiet:
             quiet.sort(key=_by_time)
             _segment(quiet)
@@ -132,6 +226,11 @@ def snapshots_from_records(records, assigned=None, events=()):
                                 turn=who if who[2] is not None else None, who=who, i=i, resets=w['resets_at'], due=due, root=(r['harness'], r.get('parent_session') or r['session']),
                                 hit=_window_hit(quota.get('reached'), full, w),
                                 key=(r['harness'], account, w['minutes'], None, quota.get('plan_type'), 0, 0)))
+    if rows:
+        for s in claude_snapshots(claude, records, assigned, rows):
+            out.append(s)
+            if s['who'] not in requests:
+                requests[s['who']] = [s['t'], s['t'], []]  # an unattributed reading with no request of its own
     out.sort(key=_by_time)
     everything = sorted([*out, *quiet], key=_by_time)
     _segment(everything)
@@ -346,7 +445,8 @@ def windows(snapshots, last=None, records=None, cost_of=None, hits=None):
             kin.setdefault((*s['key'][:2], s['key'][4]), set()).add(s['root'])
             sr = _series(s['key'])
             if sr in kept_series:
-                claimed.add((sr, s['i']))
+                if s['i'] is not None:
+                    claimed.add((sr, s['i']))
                 times, keys = nearest.setdefault((sr, s['root']), ([], []))
                 times.append(s['t'])
                 keys.append(s['key'])
@@ -359,7 +459,12 @@ def windows(snapshots, last=None, records=None, cost_of=None, hits=None):
                 spans_of.setdefault(_series(key), []).append((rows[0]['t'], rows[-1]['t'], key))
         for lst in spans_of.values():
             lst.sort()
-        members = {id(w): [s['i'] for s in rows_of[id(w)]] for w in out}  # the requests that reported this window instance
+        members = {id(w): list(dict.fromkeys(s['i'] for s in rows_of[id(w)] if s['i'] is not None)) for w in out}  # the requests that reported this window instance (several readings can follow one request)
+        placed = {}  # series -> requests already in an instance: a request belongs to one instance per window length
+        for w in out:
+            taken = placed.setdefault(_series(keys_of[id(w)]), set())
+            members[id(w)] = [i for i in members[id(w)] if i not in taken]
+            taken.update(members[id(w)])
         uncertain = {id(w): 0 for w in out}
         by_key = {keys_of[id(w)]: w for w in out}
 
@@ -518,6 +623,8 @@ def turn_shares(records, snapshots, table=None, cost_of=None, only=None):
         for s in rows:
             mine.setdefault(s['who'], []).append(s)
         spans = {w: (requests[w][0].timestamp(), requests[w][1].timestamp()) for w in mine}
+        for w, rs in mine.items():  # a reading follows its request: the participant is active until its last reading (request times stay as they are)
+            spans[w] = (spans[w][0], max(spans[w][1], rs[-1]['t'].timestamp()))
         first, last = rows[0]['t'].timestamp(), rows[-1]['t'].timestamp()
         # competitors that do not report this window but may draw on its counter: turns that only report a sibling window of the same account
         # and plan (a 5-hour-only turn in the weekly window), and requests that report no window at all
@@ -533,7 +640,7 @@ def turn_shares(records, snapshots, table=None, cost_of=None, only=None):
                 spans[w] = (lo, hi)
         # An unpriced request weighs its tokens at the instance's average list price per token of its priced requests (none priced: no rate).
         priced_cost = priced_tokens = 0.0
-        for i in {s['i'] for s in rows}:
+        for i in {s['i'] for s in rows if s['i'] is not None}:
             if not records[i].get('id_synthetic') and cost(i) is not None:
                 priced_cost += cost(i)
                 priced_tokens += _weight(records[i])
@@ -583,8 +690,9 @@ def turn_shares(records, snapshots, table=None, cost_of=None, only=None):
             share = dict(window_key=key, observed=None, estimate=None, label='unknown')
             if gi > 0 and turn not in unpriced:
                 v = alloc.get(turn, 0.0)
-                share['observed'] = dict(before=pcts[gi - 1], after=pcts[bisect_right(times, hi) - 1], delta=v, shared_with=shared)
-                ends_ok = rs[0]['t'] == lo and rs[-1]['t'] == hi  # both the first and the last request carry a snapshot of the window
+                share['observed'] = dict(before=pcts[gi - 1], after=pcts[bisect_right(times, max(hi, rs[-1]['t'])) - 1], delta=v, shared_with=shared)
+                # both the first and the last request carry a snapshot of the window (a Claude reading follows its request: `at` is that request's time)
+                ends_ok = rs[0].get('at', rs[0]['t']) == lo and rs[-1].get('at', rs[-1]['t']) == hi
                 if turn in estimated or not ends_ok:
                     share.update(estimate=v, label='estimate')
                 else:
@@ -666,9 +774,9 @@ def as_json(share):
                 label=share['label'], before=obs and obs['before'], after=obs and obs['after'], shared_with=obs and obs['shared_with'])
 
 
-def compute(records, table, cost_of=None, only=None):
-    """(snapshots, {turn: largest-window share}) over all records; ([], {}) when no record carries a quota."""
-    snapshots = snapshots_from_records(records)
+def compute(records, table, cost_of=None, only=None, claude=None):
+    """(snapshots, {turn: largest-window share}) over all records; ([], {}) when no record carries a quota (`claude`: see snapshots_from_records)."""
+    snapshots = snapshots_from_records(records, claude=claude)
     return (snapshots, largest(turn_shares(records, snapshots, table, cost_of, only))) if snapshots else ([], {})
 
 

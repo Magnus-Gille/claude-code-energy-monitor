@@ -486,6 +486,41 @@ def add_codex_quota(w, peak=88):
         write_jsonl(Path(path), rows)
 
 
+def add_claude_quota(projects, path, week_peak=62, five_peak=85):
+    """Write the demo's claude-quota.jsonl, as `tokenatlas statusline --record-quota` would: one reading after each request of a main Claude session
+    whose whole-percent 5-hour or weekly value moved. The counters are account-wide running token totals per window (5-hour windows and weeks
+    both anchored at 1 September 00:00 UTC), scaled so the busiest week ends at `week_peak` percent and the busiest 5-hour window at `five_peak`.
+    A post-pass in time order over the finished transcripts: deterministic, no rng, so the rest of the demo history is unchanged."""
+    anchor = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    spans = (('five_hour', timedelta(hours=5)), ('seven_day', timedelta(days=7)))
+    events = []
+    for file in sorted(Path(projects).glob('*/*.jsonl')):  # main sessions only: a subagent's transcript is one level deeper
+        for line in file.read_text().splitlines():
+            r = json.loads(line)
+            u = (r.get('message') or {}).get('usage')
+            if r.get('type') == 'assistant' and u and not r.get('error'):
+                events.append((r['timestamp'], r['sessionId'], u['input_tokens'] + u['output_tokens'] + u['cache_creation_input_tokens']))
+    events.sort()
+    index = lambda ts, span: (datetime.fromisoformat(ts.replace('Z', '+00:00')) - anchor) // span
+    totals = {k: {} for k, _ in spans}
+    for ts, _, tokens in events:
+        for k, span in spans:
+            totals[k][index(ts, span)] = totals[k].get(index(ts, span), 0) + tokens
+    scale = {k: max(totals[k].values()) / peak for (k, _), peak in zip(spans, (five_peak, week_peak))}
+    running, last, lines = {k: {} for k, _ in spans}, None, []
+    for ts, sid, tokens in events:
+        now = {}
+        for k, span in spans:
+            n = index(ts, span)
+            running[k][n] = running[k].get(n, 0) + tokens
+            now[k] = dict(used_percent=int(running[k][n] / scale[k]), resets_at=iso(anchor + (n + 1) * span))
+        values = {k: (v['used_percent'], v['resets_at']) for k, v in now.items()}
+        if values != last:
+            last = values
+            lines.append(json.dumps(dict(ts=iso(datetime.fromisoformat(ts.replace('Z', '+00:00')) + timedelta(seconds=1)), session=sid, **now), sort_keys=True))
+    Path(path).write_text('\n'.join(lines) + '\n')
+
+
 def build_home(home, seed):
     rng = random.Random(seed)
     w = {'claude': home / '.claude/projects', 'codex': home / '.codex/sessions', 'pi': home / '.pi/agent/sessions',
@@ -635,6 +670,8 @@ def main(argv=None):
         ids = build_home(home, args.seed)
         db, outc = state / 'tokenatlas' / 'history.sqlite3', state / 'tokenatlas' / 'outcomes.jsonl'
         outcomes(outc, ids)
+        quota_file = state / 'tokenatlas' / 'claude-quota.jsonl'
+        add_claude_quota(home / '.claude/projects', quota_file)  # the demo user opted in to `statusline --record-quota`
         # USERPROFILE is what Path.home() reads on Windows; SYSTEMROOT is needed there by Python itself.
         env = {'PATH': os.environ.get('PATH', ''), 'HOME': str(home), 'USERPROFILE': str(home),
                'XDG_STATE_HOME': str(state), 'TZ': 'Europe/Stockholm', 'PYTHONDONTWRITEBYTECODE': '1',
@@ -661,7 +698,7 @@ def main(argv=None):
             # The same ranking `tokenatlas top` and the report's Costliest turns card use.
             top = prompts.top_prompts(records, pricing.load_prices(), 10)['prompts']
             hits = limits.limit_hits(records, history.limit_events(), pricing.load_prices())
-            snapshots, shares = quota_share.compute(records, pricing.load_prices())  # the largest window per turn
+            snapshots, shares = quota_share.compute(records, pricing.load_prices(), claude=quota_file)  # the largest window per turn
             for item in records:
                 slot = counts.setdefault(item['harness'], {'observations': 0, 'sessions': set(), 'first': item['ts'], 'last': item['ts']})
                 slot['observations'] += 1
@@ -686,6 +723,7 @@ def main(argv=None):
                    'quota_windows': [{'harness': q['harness'], 'minutes': q['minutes'], 'peak_percent': q['peak_percent'], 'hit': q['hit']}
                                      for q in quota_share.windows(snapshots)],
                    'quota_share_labels': {k: sum(1 for x in shares.values() if x['label'] == k) for k in ('observed', 'estimate', 'unknown')},
+                   'claude_quota_snapshots': len(quota_file.read_text().splitlines()),
                    'report': str(report)}
         (outdir / 'demo-summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
         if not args.no_screens:

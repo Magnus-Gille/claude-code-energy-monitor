@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sqlite3
 import tempfile
@@ -46,6 +47,21 @@ class DataDirMigrationTests(unittest.TestCase):
             self.assertTrue((self.new / name).exists(), name)
         with closing(sqlite3.connect(self.new / 'history.sqlite3')) as conn:  # `with conn` alone does not close it
             conn.execute('select count(*) from sqlite_master').fetchone()
+
+    def test_a_recorded_quota_sidecar_moves_with_the_legacy_directory(self):
+        from tokenatlas import statusline
+        self.make_old()
+        payload = {'session_id': 's', 'rate_limits': {'seven_day': {'used_percentage': 3, 'resets_at': 1790500000}}}
+        with redirect_stdout(io.StringIO()):
+            statusline.run(['--record-quota'], None, io.StringIO(json.dumps(payload)))
+        self.assertFalse(self.new.exists())  # recording must not create the new directory: that would stop the migration
+        self.assertTrue((self.old / 'claude-quota.jsonl').is_file())
+        code, out, err = run('doctor')
+        self.assertEqual(code, 0)
+        self.assertIn('moved history', err)
+        self.assertFalse(self.old.exists())
+        self.assertTrue((self.new / 'claude-quota.jsonl').is_file())
+        self.assertEqual(json.loads(out)['claude_quota']['snapshots'], 1)
 
     def test_existing_new_directory_wins_with_warning(self):
         self.make_old()

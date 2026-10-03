@@ -88,19 +88,19 @@ def coverage_key(source_status):
     return key
 
 
-def report_state(revision, machine, spec, coverage, token=None, texts_hash=None, day=None):
+def report_state(revision, machine, spec, coverage, token=None, texts_hash=None, day=None, quota=None):
     """(identity, data) 32-hex pair. Identity: version, options, database, template and, for private reports, the embedded prompt previews; data: revision token, counter, coverage and, when given, the UTC day the rolling 30-day cost facts were computed for."""
     dump = lambda body: json.dumps(body, sort_keys=True, separators=(',', ':'))
     template = hashlib.sha256(Path(__file__).with_name('report_template.html').read_bytes()
                               + Path(__file__).with_name('report_i18n.json').read_bytes()).hexdigest()
     identity = dump({'format': 2, 'version': __version__, 'spec': spec, 'machine': machine,
                      **({'prompt_texts': texts_hash} if texts_hash else {})})
-    data = dump({'token': token, 'revision': int(revision), 'coverage': coverage, **({'insights_day': day} if day else {})})
+    data = dump({'token': token, 'revision': int(revision), 'coverage': coverage, **({'insights_day': day} if day else {}), **({'quota': quota} if quota else {})})
     return tuple(hashlib.sha256(text.encode()).hexdigest()[:32] for text in (identity + template, data))
 
 
 def build_report(records, source_status, timezone_name='Europe/Stockholm', redact=True, prompt_texts=None, table=None, lang='auto',
-                 prompt_context=None, prompt_inputs=None, now=None, credit_table=None, demo=False, limit_hits=None, universe=None, quota=True, all_hits=None, quota_events=None):
+                 prompt_context=None, prompt_inputs=None, now=None, credit_table=None, demo=False, limit_hits=None, universe=None, quota=True, all_hits=None, quota_events=None, claude_quota=None):
     """prompt_texts ({(harness, session, turn_id): text or None} from prompt_store) and prompt_context ({key: turn_context dict}) are for
     prompt_inputs ({key: input count or None}) are for private reports only (any of them with redact=True raises);
     credit_table is the ChatGPT credit rate card behind `credit_classes` and the credits fact (None = packaged credits.json); table is the price table behind the `price_classes` unit prices (None = packaged prices). `insights` holds the cost facts (insights.py) for the
@@ -190,7 +190,7 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
     memo = {}
     cost_of = insights.memo_cost(table, memo)
     # one captured `now` is the exclusive end of the 30-day window: later-dated observations are not 'the last 30 days'
-    snapshots = quota_share.snapshots_from_records(whole, whole_assigned, quota_events or ()) if quota else []  # one per window per request that carries a quota
+    snapshots = quota_share.snapshots_from_records(whole, whole_assigned, quota_events or (), claude=claude_quota) if quota else []  # one per window per request that carries a quota
     shares = quota_share.turn_shares(whole, snapshots, table, cost_of) if snapshots else None
     windows = [dict(id=wid, **insights.public(insights.cost_facts(records, table, start, end, name=display, memo=memo, credit_table=credit_table, hits=limit_hits, universe=universe, quota=shares)))
                for wid, start, end in (('30d', now - timedelta(days=INSIGHT_DAYS), now), ('all', None, None))]
@@ -236,7 +236,7 @@ def _quota_payload(shares, windows, shown, metadata, account):
     for turn, share in quota_share.largest(shares).items():
         if tuple(turn) in shown:
             obs = share['observed']
-            found[shown[tuple(turn)]] = dict(minutes=share['window_key'][2], label=share['label'], percent=quota_share.value(share),
+            found[shown[tuple(turn)]] = dict(harness=metadata('harness', share['window_key'][0], {'harness': share['window_key'][0]}), minutes=share['window_key'][2], label=share['label'], percent=quota_share.value(share),
                                              shared_with=obs and obs['shared_with'])
     out = {}
     if found:

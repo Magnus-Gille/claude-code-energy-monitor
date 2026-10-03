@@ -143,7 +143,7 @@ def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=Non
     `universe` (the whole history's records, for a filtered report) is the basis of the turn assignment, so turn facts agree with the report's cards:
     only the selected observations are summed, but a request keeps the turn the whole history gives it.
     `hits` (limits.limit_hits) adds the limit_hits fact: how many hits fall in the window, by limit; omitted when there are none.
-    `quota` (quota_share.turn_shares: {turn: {window minutes: share}}) adds the quota_share fact: the weekly-limit share of each of the three costliest Codex turns in the window; omitted when none is known."""
+    `quota` (quota_share.turn_shares: {turn: {window minutes: share}}) adds the quota_share fact: the weekly-limit share of each of the three costliest turns in the window; omitted when none is known."""
     memo = {} if memo is None else memo
     name = name or (lambda provider, model: model)
     start, end = _when(start), _when(end)
@@ -523,7 +523,7 @@ def _lines(f):
     if i == 'quota_share':
         each = [_quota_pct(x['percent'], x['label']) for x in v['turns']]
         listed = ', '.join(each[:-1]) + (' and ' if len(each) > 1 else '') + each[-1]
-        return [f"your {len(v['turns'])} costliest Codex turns used {listed} of their weekly limit windows (each of its own window)",
+        return [f"your {len(v['turns'])} costliest turns used {listed} of their weekly limit windows (each of its own window)",
                 f"turns with a known weekly share: {len(v['turns'])} of {v['considered']} costliest"]
     if i == 'limit_hits':
         return [f"limit hits: {v['count']:,}"] + [f"{x['harness']} {_LIMIT_NAMES.get(x['limit'], x['limit'])}: {x['count']:,}" for x in v['limits']]
