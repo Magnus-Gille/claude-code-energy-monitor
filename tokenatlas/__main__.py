@@ -205,8 +205,7 @@ def _visible(history,db,records=None):
 def _hits(history,records):
     """Limit hits over the whole history's records (a report's filters never shrink the window a hit is explained from)."""
     from tokenatlas import limits, pricing
-    events=history.limit_events()
-    return limits.limit_hits(records,events,pricing.load_prices()) if events or any((r.get('quota') or {}).get('reached') for r in records) else []
+    return limits.limit_hits(records,history.limit_events(),pricing.load_prices())  # no shortcut: a full window with no reached type is a hit too
 
 
 def _counts(contexts):

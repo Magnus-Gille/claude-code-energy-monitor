@@ -872,6 +872,60 @@ class WindowFull(unittest.TestCase):
         self.assertEqual(payload['limit_hits'][0]['reached'], 'window_full')
 
 
+class RoundTwelve(RoundEleven):
+    test_unchanged_counters_with_a_reached_snapshot_are_one_hit = None  # inherited helpers only
+    test_quota_only_event_with_no_info_is_one_hit = None
+    test_recovery_with_unchanged_counters_between_two_exhaustions_is_two_hits = None
+    test_no_transition_adds_no_records = None
+    test_statusline_cache_ignores_codex_quota_events = None
+    test_resetless_claude_retry_after_the_known_reset_is_a_new_hit = None
+
+    @staticmethod
+    def two(five, week, reset=None):
+        from test_why_codex import _limits, _window
+        reset = reset or int((T0 + timedelta(hours=3)).timestamp())
+        return _limits(primary=_window(five, 300, reset), secondary=_window(week, 10080, reset + 86400))
+
+    def test_one_window_changing_while_another_stays_full_is_a_transition(self):
+        h = self.history(self.calls((1, self.two(50.0, 100.0)), (2, self.two(99.0, 100.0)), (3, self.two(100.0, 100.0)), (4, self.two(40.0, 100.0))))
+        # first row is usage; rows 2-4 are quota-only: 99 keeps the same full set (no event), 100 adds the 5-hour window, 40 removes it
+        self.assertEqual(len(h.limit_events()), 2)
+        hits = self.hits(h)
+        self.assertEqual(sorted((x['window_minutes'], x['reached']) for x in hits), [(300, 'window_full'), (10080, 'window_full')])
+
+    def test_full_window_with_no_reached_type_reaches_the_report_and_insights(self):
+        import contextlib
+        import io
+        from tokenatlas.__main__ import main
+        from test_why_codex import _meta, _quota_call, _write_rollout
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_rollout(root / 'codex' / 'rollout-c.jsonl', [_meta('c1'), _quota_call(stamp(1), 1, self.two(100.0, 20.0))])
+            db = str(root / 'h.sqlite3')
+            def run(*args):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                    code = main(['--db', db, *args])
+                return code, out.getvalue()
+            self.assertEqual(run('refresh', '--harness', 'codex', '--root', str(root / 'codex'))[0], 0)
+            html = root / 'r.html'
+            run('report', '--html', str(html), '--private')
+            found = re.search(r'id="report-data"[^>]*>([^<]+)<', html.read_text(encoding='utf-8')).group(1)
+            payload = json.loads(gzip.decompress(base64.b64decode(found)).decode())
+            self.assertEqual([(x['reached'], x['window_minutes']) for x in payload['limit_hits']], [('window_full', 300)])
+            facts = json.loads(run('insights', '--json')[1])['facts']
+            self.assertEqual(next(f for f in facts if f['id'] == 'limit_hits')['values']['count'], 1)
+
+    def test_an_expired_named_episode_does_not_suppress_a_later_full_window_hit(self):
+        def cx(id, minute, reached, resets):
+            quota = {'limit_id': 'codex', 'plan_type': 'plus', 'reached': reached,
+                     'windows': [{'slot': 'primary', 'minutes': 300, 'used_percent': 100.0, 'resets_at': iso(resets)}]}
+            return obs(id, iso(minute), 1000, harness='codex', provider='openai', session='c1', turn='ct', quota=quota)
+        recs = [cx('1', 1, 'rate_limit_reached', 400), cx('2', 302, None, 700)]
+        hits = limits.limit_hits(recs, [], TABLE)
+        self.assertEqual([(h['at'], h['reached']) for h in hits], [(iso(1), 'rate_limit_reached'), (iso(302), 'window_full')])
+
+
 class Template(unittest.TestCase):
     def test_turn_row_variables_are_declared(self):
         # The script is strict: assigning to an undeclared name throws on the first attributed turn and the report never initializes.

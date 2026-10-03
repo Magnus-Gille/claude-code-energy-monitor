@@ -454,8 +454,9 @@ def _quota_window(slot: str, value: object) -> dict | None:
 
 
 def _quota_state(quota: dict) -> tuple:
-    """What a quota-only transition compares: the reached type and whether any window is at 100 % or more."""
-    return (quota.get("reached"), any((w.get("used_percent") or 0) >= 100 for w in quota.get("windows") or ()))
+    """What a quota-only transition compares: the reached type and which windows (by length) are at 100 % or more. An empty snapshot and a snapshot
+    with no full window are the same state; a change in any one window's full flag is a transition."""
+    return (quota.get("reached"), frozenset(w.get("minutes") for w in quota.get("windows") or () if (w.get("used_percent") or 0) >= 100))
 
 
 def _codex_quota(value: object) -> dict | None:
@@ -828,7 +829,7 @@ def collect_codex(
         counter_segment = 0
         tariff: dict | None = None  # latest thread_settings.service_tier in this file, until it changes
         last_call: tuple[str, str] | None = None  # latest record of the current turn, flagged by a turn_aborted event
-        last_quota: tuple = (None, False)  # (reached type, a window at 100 %) of the latest quota seen in this file, for quota-only transitions
+        last_quota: tuple = (None, frozenset())  # (reached type, windows at 100 %) of the latest quota seen in this file, for quota-only transitions
         harness_version = _first_text(meta_payload, "cli_version", "version")
         originator = _meta_text(meta_payload.get("originator"), source, thread_source, default=originator)
 

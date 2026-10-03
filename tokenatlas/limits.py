@@ -126,6 +126,11 @@ def limit_hits(records, events, table):
         window = None if reached and 'credits' in reached else _hit_window(quota)
         account = (record['harness'], quota.get('limit_id'))  # consecutive per harness and limit, never across them
         at, minutes = prompts._t(record['ts']), window and window.get('minutes')
+        episode = open_.get(account)
+        # Named episodes expire first, so an expired one never suppresses a later full-window hit (see the expiry note below).
+        span = episode and (episode['minutes'] or (max(episode['cands']) if episode['cands'] else None))
+        if episode and span and at - episode['last'] > timedelta(minutes=span):
+            episode = open_[account] = None
         # A time window that crosses from below 100 % to 100 % or more is a hit of its own: Codex does not name a reached type when a window fills.
         # It lasts while the window stays full; a lower reading proves recovery only from a session that reported it full (a stale one from
         # another session is no evidence), or the episode ends after a gap longer than the window. Simultaneous with a reached-type episode
