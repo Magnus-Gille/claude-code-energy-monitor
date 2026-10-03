@@ -455,6 +455,37 @@ def reject_for_limit(w, sid, key, resets_after=timedelta(hours=2), retries=3):
     write_jsonl(path, rows)
 
 
+def add_codex_quota(w, peak=88):
+    """Give every demo Codex token_count event a synthetic weekly `rate_limits` snapshot (plan 'pro', whole percent) so the report shows the
+    share-of-limit line and the limit windows table. The windows are contiguous weeks (they reset every seven days from 1 September 00:00 UTC);
+    the percentage rises with each request's tokens, scaled so the busiest week ends at `peak` percent. A post-pass in time order over the
+    finished rollouts: deterministic, and drawn without the rng, so the rest of the demo history is unchanged."""
+    week = timedelta(days=7)
+    anchor = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    events, files = [], {}
+    for path in sorted(w['codex'].rglob('*.jsonl')):
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        for i, r in enumerate(rows):
+            if r.get('type') == 'event_msg' and r['payload'].get('type') == 'token_count':
+                events.append((r['timestamp'], str(path), i, r['payload']['info']['last_token_usage']['total_tokens']))
+        files[str(path)] = rows
+    events.sort()
+    index = lambda ts: (datetime.fromisoformat(ts.replace('Z', '+00:00')) - anchor) // week
+    spent = {}
+    for ts, _, _, tokens in events:
+        spent[index(ts)] = spent.get(index(ts), 0) + tokens
+    scale = max(spent.values()) / peak
+    running = {}
+    for ts, path, i, tokens in events:
+        n = index(ts)
+        running[n] = running.get(n, 0) + tokens
+        files[path][i]['payload']['rate_limits'] = {
+            'limit_id': 'codex', 'plan_type': 'pro', 'rate_limit_reached_type': None,
+            'secondary': {'used_percent': int(running[n] / scale), 'window_minutes': 10080, 'resets_at': int((anchor + (n + 1) * week).timestamp())}}
+    for path, rows in files.items():
+        write_jsonl(Path(path), rows)
+
+
 def build_home(home, seed):
     rng = random.Random(seed)
     w = {'claude': home / '.claude/projects', 'codex': home / '.codex/sessions', 'pi': home / '.pi/agent/sessions',
@@ -509,6 +540,7 @@ def build_home(home, seed):
     pi_session(w, rng, 'pi-acme-long', 'acme', utc(27, 8, 0), 52, 'openai-codex', sol, turn_len=52)
     pi_session(w, rng, 'pi-shop-02', 'shop', utc(26, 10, 0), 28, 'openai-codex', luna)
     opencode_db(home / '.local/share/opencode/opencode.db', rng, w['script'])
+    add_codex_quota(w)
     return ids
 
 
@@ -620,7 +652,7 @@ def main(argv=None):
         (outdir / 'session.txt').write_text(session_text + '\n')
         (outdir / 'overhead.txt').write_text(overhead_text + '\n')
         sys.path.insert(0, str(ROOT))
-        from tokenatlas import limits, pricing, prompts
+        from tokenatlas import limits, pricing, prompts, quota_share
         from tokenatlas.history import History
         counts = {}
         with History(db) as history:
@@ -629,6 +661,7 @@ def main(argv=None):
             # The same ranking `tokenatlas top` and the report's Costliest turns card use.
             top = prompts.top_prompts(records, pricing.load_prices(), 10)['prompts']
             hits = limits.limit_hits(records, history.limit_events(), pricing.load_prices())
+            snapshots, shares = quota_share.compute(records, pricing.load_prices())  # the largest window per turn
             for item in records:
                 slot = counts.setdefault(item['harness'], {'observations': 0, 'sessions': set(), 'first': item['ts'], 'last': item['ts']})
                 slot['observations'] += 1
@@ -650,6 +683,9 @@ def main(argv=None):
                                   'requests': p['requests'], 'subagents': p['subagents'], 'interrupted': p['interrupted']} for i, p in enumerate(top, 1)],
                    'limit_hits': [{'harness': h['harness'], 'reached': h['reached'], 'window_minutes': h['window_minutes'], 'retries': h['retries'],
                                    'window_cost': h['window'] and h['window']['cost']} for h in hits],
+                   'quota_windows': [{'harness': q['harness'], 'minutes': q['minutes'], 'peak_percent': q['peak_percent'], 'hit': q['hit']}
+                                     for q in quota_share.windows(snapshots)],
+                   'quota_share_labels': {k: sum(1 for x in shares.values() if x['label'] == k) for k in ('observed', 'estimate', 'unknown')},
                    'report': str(report)}
         (outdir / 'demo-summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
         if not args.no_screens:

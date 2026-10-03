@@ -58,8 +58,11 @@ def _window(quota):
 
 
 def _scope(row):
-    """The hit's origin row metadata, for scoped reports only (never exported): project, session, turn, model, effort, agent and provider."""
-    return dict(scope={k: row.get(k) for k in ('project_id', 'project_label', 'session', 'turn_id', 'model', 'effort', 'agent', 'provider')})
+    """The hit's origin row metadata, for scoped reports only (never exported): project, session, turn, model, effort, agent and provider; and `origin`,
+    the series the hit belongs to (limit id, plan type, root session), which quota_share matches a hit to its window instance by."""
+    quota = row.get('quota') or {}
+    return dict(scope={k: row.get(k) for k in ('project_id', 'project_label', 'session', 'turn_id', 'model', 'effort', 'agent', 'provider')},
+                origin=dict(limit_id=quota.get('limit_id'), plan_type=quota.get('plan_type'), session=row.get('parent_session') or row.get('session')))
 
 
 def _hit_window(quota):

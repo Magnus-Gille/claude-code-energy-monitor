@@ -34,6 +34,9 @@ class DemoTests(unittest.TestCase):
             self.assertTrue(all(t['cost'] is not None for t in top))
             self.assertEqual(summary['seed'], 7)
             self.assertGreaterEqual(sum(t['interrupted'] for t in top), 1)  # the demo shows the Interrupted badge
+            self.assertGreaterEqual(len(summary['quota_windows']), 2)
+            self.assertTrue(all(w['harness'] == 'codex' and w['minutes'] == 10080 for w in summary['quota_windows']))
+            self.assertGreater(summary['quota_share_labels']['observed'], 0)
             self.assertEqual({t['harness'] for t in top}, {'claude', 'codex', 'pi', 'opencode'})
 
     def test_demo_report_embeds_realistic_prompt_text_for_top_turns(self):

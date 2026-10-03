@@ -13,7 +13,7 @@ import statistics
 from datetime import datetime
 from pathlib import Path
 
-from tokenatlas import credits as credit_rates, energy, limits, pricing, prompts
+from tokenatlas import credits as credit_rates, energy, limits, pricing, prompts, quota_share
 
 I18N = Path(__file__).with_name('report_i18n.json')
 BIG_TURN = 50.0
@@ -84,6 +84,43 @@ def _limit_hits(hits, start, end):
     return [_fact('limit_hits', dict(count=sum(counts.values()), limits=by), 'ins_limit_hits_c', ('ins_a_limit_logs',), 'measured')]
 
 
+def _quota_share(records, inside, memo, shares):
+    """The three costliest turns with a quota snapshot in the window (turn cost as in _turns) and their combined observed or estimated share of
+    their weekly limit window. A turn without a known weekly share is left out; none known, no fact. 'estimate' when any share is an estimate."""
+    if not shares:
+        return []
+    if 'assigned' not in memo:
+        memo['assigned'] = {id(r): a for r, a in zip(records, prompts.assign_prompts(records))}
+    costs = {}
+    for r in inside:
+        found = memo['assigned'].get(id(r))
+        cost = memo[id(r)][2]
+        if found and cost is not None and tuple(found[:3]) in shares:
+            costs[tuple(found[:3])] = costs.get(tuple(found[:3]), 0.0) + cost
+    top = sorted(((c, k) for k, c in costs.items() if c > 0), key=lambda x: (-x[0], x[1]))[:3]
+    known = [(c, shares[k][quota_share.WEEK]) for c, k in top if quota_share.WEEK in shares[k] and shares[k][quota_share.WEEK]['label'] in ('observed', 'estimate')]
+    if not known:
+        return []
+    estimated = sum(1 for _, x in known if x['label'] == 'estimate')
+    values = dict(window_minutes=quota_share.WEEK, considered=len(top), turns=[dict(cost=c, percent=quota_share.value(x), label=x['label']) for c, x in known],
+                  observed_turns=len(known) - estimated, estimated_turns=estimated)
+    return [_fact('quota_share', values, 'ins_quota_share_c', ('ins_a_quota_account', 'ins_a_quota_whole'), 'estimate' if estimated else 'computed')]
+
+
+def memo_row(r, table, memo):
+    """The memoized (record, result, cost or None, tier) of a request, priced once per memo; r is kept so that its id stays unique."""
+    if id(r) not in memo:
+        tier = {}
+        res = pricing.price_observation(r, table, tier=tier)
+        memo[id(r)] = (r, res, _usd(res), tier)
+    return memo[id(r)]
+
+
+def memo_cost(table, memo):
+    """record -> list-price USD or None through `memo`, so that a caller that also builds cost facts prices every request only once."""
+    return lambda r: memo_row(r, table, memo)[2]
+
+
 def _usd(res):
     """Cost in USD or None: a non-USD price is never mixed into a USD sum (as in prompts._cost)."""
     c = res['cost']
@@ -98,14 +135,15 @@ def _share(part, whole):
     return part / whole if whole else None
 
 
-def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=None, memo=None, credit_table=None, hits=None, universe=None):
+def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=None, memo=None, credit_table=None, hits=None, universe=None, quota=None):
     """{'window', 'requests', 'priced_requests', 'unpriced_requests', 'facts': [...]} over observations with start <= ts < end.
     `name(provider, model)` maps a model to its displayed name (the shared report passes its redaction; default: the model itself).
     `memo`, a dict reused across calls with the same records and table, only saves repeated price lookups; it never changes a result.
     `credit_table` (default: the packaged credits.json) is the rate card behind the ChatGPT credit-equivalent fact.
     `universe` (the whole history's records, for a filtered report) is the basis of the turn assignment, so turn facts agree with the report's cards:
     only the selected observations are summed, but a request keeps the turn the whole history gives it.
-    `hits` (limits.limit_hits) adds the limit_hits fact: how many hits fall in the window, by limit; omitted when there are none."""
+    `hits` (limits.limit_hits) adds the limit_hits fact: how many hits fall in the window, by limit; omitted when there are none.
+    `quota` (quota_share.turn_shares: {turn: {window minutes: share}}) adds the quota_share fact: the weekly-limit share of each of the three costliest Codex turns in the window; omitted when none is known."""
     memo = {} if memo is None else memo
     name = name or (lambda provider, model: model)
     start, end = _when(start), _when(end)
@@ -121,13 +159,7 @@ def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=Non
     inside = [r for r in window if not r.get('id_synthetic')]
     ctx = dict(ambiguous=len(window) - len(inside), incomplete=sum(1 for r in inside if not r.get('complete', True)),
                retrieved=table.get('retrieved_on'))
-    rows = []  # one per request: (record, result, cost or None, tier)
-    for r in inside:
-        if id(r) not in memo:
-            tier = {}
-            res = pricing.price_observation(r, table, tier=tier)
-            memo[id(r)] = (r, res, _usd(res), tier)  # r is kept so that its id stays unique
-        rows.append(memo[id(r)])
+    rows = [memo_row(r, table, memo) for r in inside]  # one per request: (record, result, cost or None, tier)
     priced = [x for x in rows if x[2] is not None]
     total = sum(x[2] for x in priced)
     n, k = len(rows), len(priced)
@@ -162,7 +194,8 @@ def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=Non
     facts += _credits(inside, credit_table or credit_rates.packaged(), name)
     facts += _energy(inside)
     facts += _limit_hits(hits, start, end)
-    order = ('model_share', 'price_comparison', 'cost_parts', 'context_size', 'long_context_premium', 'big_turns', 'interrupted_turns', 'subagent_share', 'premium_tiers', 'credits', 'energy', 'limit_hits')
+    facts += _quota_share(clean, inside, memo, quota)
+    order = ('model_share', 'price_comparison', 'cost_parts', 'context_size', 'long_context_premium', 'big_turns', 'interrupted_turns', 'subagent_share', 'premium_tiers', 'credits', 'energy', 'limit_hits', 'quota_share')
     facts = [_finish(f, ctx) for f in sorted(facts, key=lambda f: order.index(f['id']))]
     return {'window': {'start': start and start.isoformat(), 'end': end and end.isoformat()}, **{k_: scope[k_] for k_ in ('requests', 'priced_requests', 'unpriced_requests')},
             'ambiguous_requests': ctx['ambiguous'], 'incomplete_requests': ctx['incomplete'], 'price_table': {'retrieved_on': ctx['retrieved']}, 'big_turn': big_turn, 'facts': facts}
@@ -444,6 +477,11 @@ def _rq(n):
     return f"{n:,} request" + ('' if n == 1 else 's')
 
 
+def _quota_pct(percent, label):
+    whole = int(percent + 0.5)
+    return '< 1%' if whole < 1 else f"{'≈' if label == 'estimate' else '~'}{whole}%"
+
+
 _LIMIT_NAMES = {'five_hour': '5-hour limit', 'weekly': 'weekly limit'}
 
 
@@ -482,6 +520,11 @@ def _lines(f):
         if v['partly_priced_turns']:
             out.append(f"with some unpriced requests (cost is a lower bound): {v['partly_priced_turns']:,}")
         return out
+    if i == 'quota_share':
+        each = [_quota_pct(x['percent'], x['label']) for x in v['turns']]
+        listed = ', '.join(each[:-1]) + (' and ' if len(each) > 1 else '') + each[-1]
+        return [f"your {len(v['turns'])} costliest Codex turns used {listed} of their weekly limit windows (each of its own window)",
+                f"turns with a known weekly share: {len(v['turns'])} of {v['considered']} costliest"]
     if i == 'limit_hits':
         return [f"limit hits: {v['count']:,}"] + [f"{x['harness']} {_LIMIT_NAMES.get(x['limit'], x['limit'])}: {x['count']:,}" for x in v['limits']]
     if i == 'subagent_share':
