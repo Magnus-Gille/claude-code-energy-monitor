@@ -29,6 +29,17 @@ function withLang(html, lang) {
     return a + zlib.gzipSync(Buffer.from(JSON.stringify(data), 'utf8')).toString('base64') + c;
   });
 }
+// Re-encode a report with one limit hit (a card turn, a turn without a card, lower bound), for the Limit hits section and the card badge.
+function withLimitHit(html) {
+  return html.replace(/(<script id="report-data" type="application\/octet-stream\+base64">)([A-Za-z0-9+\/=]+)(<\/script>)/, (_, a, b64, c) => {
+    const data = JSON.parse(zlib.gunzipSync(Buffer.from(b64, 'base64')).toString('utf8'));
+    const label = {at: '2026-09-03T10:15:00+00:00', harness: 'claude', text: null};
+    data.limit_hits = [{harness: 'claude', at: '2026-09-03T10:15:00+00:00', reached: 'five_hour', window_minutes: 300, resets_at: '2026-09-03T14:00:00+00:00', retries: 2, prompt: 0, label,
+      window: {start: '2026-09-03T09:00:00+00:00', end: '2026-09-03T10:15:00+00:00', requests: 3, unpriced_requests: 0, cost: 12.5, lower_bound: true,
+               top: [{prompt: 0, label, requests: 2, cost: 9, share: 0.72}, {prompt: null, label, requests: 1, cost: 3.5, share: 0.28}]}}];
+    return a + zlib.gzipSync(Buffer.from(JSON.stringify(data), 'utf8')).toString('base64') + c;
+  });
+}
 // Re-encode a report with `demo: true` (what scripts/demo.py does to the demo report).
 function withDemo(html) {
   return html.replace(/(<script id="report-data" type="application\/octet-stream\+base64">)([A-Za-z0-9+\/=]+)(<\/script>)/, (_, a, b64, c) => {
@@ -217,6 +228,16 @@ async function ready(page, errors, what = 'report') {
         assert.equal((await d1.page.locator('#top-prompts .rs code').first().innerText()),'cd /w/app && claude --resume s1','demo still shows the commands');
         {let hidden=false;for(let i=0;i<160&&!hidden;i++){hidden=await d1.page.evaluate(()=>!document.getElementById('toast').classList.contains('show'));if(!hidden)await d1.page.waitForTimeout(50)}assert.ok(hidden,'toast hides after about 4 s')}
         assert.deepEqual(d1.errors,[]);await d1.context.close();
+        {// every turn row is an anchor target, and a populated report with a limit hit reaches its ready state without page errors
+          const lh=await newPage({locale:T.locale},withLimitHit(fixture));
+          assert.equal(await lh.page.evaluate(()=>[...document.querySelectorAll('#top-prompts tr.prompt-row')].every(r=>/^turn-\d+$/.test(r.id))),true);
+          assert.equal(await lh.page.locator('#limit-hits').isVisible(),true);assert.equal(await lh.page.locator('#limit-list .lh-hit').count(),1);
+          assert.equal(await lh.page.locator('#top-prompts .lh-badge').count(),1);assert.ok((await lh.page.locator('#limit-hits').innerText()).includes('≥$12'+(T.lang==='sv'?',':'.')+'50'));
+          assert.equal(await lh.page.locator('#limit-list a[href^="#turn-"]').count(),2,'the two links to a shown card (hit turn and top turn 1)');
+          assert.ok((await lh.page.locator('#limit-hits').innerText()).includes(T.lang==='sv'?'2 nekade försök':'2 rejected attempts'));
+          assert.deepEqual(lh.errors,[]);await lh.context.close();
+          const none=await newPage({locale:T.locale},fixture);assert.equal(await none.page.locator('#limit-hits').isVisible(),false);assert.deepEqual(none.errors,[]);await none.context.close();
+        }
         // The toast is pure DOM: it works inside a sandboxed iframe (no top navigation, no popups).
         const outer=await browser.newContext({viewport:{width:1440,height:1080},offline:true,locale:T.locale});const op=await outer.newPage();
         await op.setContent('<iframe id="f" style="width:1400px;height:1000px" sandbox="allow-scripts allow-downloads allow-modals" srcdoc="'+withDemo(fixture).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'"></iframe>');

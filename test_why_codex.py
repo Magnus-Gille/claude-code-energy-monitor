@@ -429,10 +429,12 @@ class CodexQuotaTests(unittest.TestCase):
         self.assertIsNone(self._quota("__missing__"))
         self.assertIsNone(self._quota(None))
         self.assertIsNone(self._quota("junk"))
-        self.assertIsNone(self._quota(_limits()))
+        # a present snapshot with no window and no reached type is kept as an empty-window quota: it is the evidence of a recovery
+        self.assertEqual(self._quota(_limits()), {"limit_id": "codex", "plan_type": "pro", "reached": None, "windows": []})
+        self.assertIsNone(self._quota({"limit_name": "x", "primary": None}))
 
     def test_oversized_integers_never_abort_the_read(self):
-        self.assertIsNone(self._quota(_limits(primary=_window(10 ** 400))))  # no float can hold it: the window is dropped
+        self.assertEqual(self._quota(_limits(primary=_window(10 ** 400)))["windows"], [])  # no float can hold it: the window is dropped
         quota = self._quota(_limits(primary=_window(4, 10080, 10 ** 400)))
         self.assertEqual((quota["windows"][0]["used_percent"], quota["windows"][0]["resets_at"]), (4.0, None))
 
@@ -442,7 +444,7 @@ class CodexQuotaTests(unittest.TestCase):
                _window(4, 60.5), _window(4, "300"), "x", 5]
         for window in bad:
             with self.subTest(window=window):
-                self.assertIsNone(self._quota(_limits(primary=window)))
+                self.assertEqual(self._quota(_limits(primary=window))["windows"], [])
         quota = self._quota(_limits(primary=_window("4"), secondary=_window(7, 10080)))
         self.assertEqual([w["slot"] for w in quota["windows"]], ["secondary"])
 

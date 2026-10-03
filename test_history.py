@@ -46,7 +46,7 @@ class HistoryTests(unittest.TestCase):
 
     def test_claude_revision_changes_fingerprint_and_forces_one_reread(self):
         import tokenatlas.history as history
-        self.assertEqual(history.HARNESS_REVISION.get('claude'), 2)
+        self.assertEqual(history.HARNESS_REVISION.get('claude'), 3)
         source=self.root/'logs/a.jsonl';write_claude(source)
         with patch.dict(history.HARNESS_REVISION,clear=False):
             history.HARNESS_REVISION.pop('claude')
@@ -66,7 +66,7 @@ class HistoryTests(unittest.TestCase):
     def test_codex_revision_changes_fingerprint_and_forces_one_reread(self):
         import tokenatlas.history as history
         from test_why_codex import _write_rollout,_meta,_context,_tokens,_tier
-        self.assertEqual(history.HARNESS_REVISION.get('codex'), 4)
+        self.assertEqual(history.HARNESS_REVISION.get('codex'), 7)
         source=self.root/'logs/rollout-one.jsonl'
         counts={'input_tokens':10,'cached_input_tokens':0,'cache_write_input_tokens':0,'output_tokens':2}
         _write_rollout(source,[_meta(),_context('2026-09-03T10:00:00Z','model','high','/work/project'),

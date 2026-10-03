@@ -16,7 +16,7 @@ import re
 import sqlite3
 import stat
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -436,10 +436,13 @@ def _number(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
+MAX_WINDOW_MINUTES = 527040  # one leap year: a longer quota window is not a real one and would only overflow date arithmetic
+
+
 def _quota_window(slot: str, value: object) -> dict | None:
     window = _mapping(value)
     used, minutes = _number(window.get("used_percent")), window.get("window_minutes")
-    if used is None or used < 0 or isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
+    if used is None or used < 0 or isinstance(minutes, bool) or not isinstance(minutes, int) or not 0 < minutes <= MAX_WINDOW_MINUTES:
         return None
     resets, resets_at = _number(window.get("resets_at")), None
     if resets is not None and resets > 0:
@@ -450,16 +453,68 @@ def _quota_window(slot: str, value: object) -> dict | None:
     return {"slot": slot, "minutes": minutes, "used_percent": used, "resets_at": resets_at}
 
 
+def _note_full(last_full: dict, scope: tuple, quota: dict, timestamp: datetime) -> None:
+    """Remember, per full window, the time and the reset of the latest retained full evidence."""
+    for w in quota.get("windows") or ():
+        if (w.get("used_percent") or 0) >= 100:
+            last_full[scope + (w["minutes"],)] = (timestamp, parse_iso_timestamp(w.get("resets_at")))
+
+
+def _full_evidence_due(last_full: dict, scope: tuple, quota: dict, timestamp: datetime) -> bool:
+    """A still-full window needs a retained reading when the last retained full evidence is older than half the window, or when its reset moved on
+    by more than half the window past the old reset and the time is past that old reset (a new window instance, which the detector must see)."""
+    for w in quota.get("windows") or ():
+        if (w.get("used_percent") or 0) < 100:
+            continue
+        kept = last_full.get(scope + (w["minutes"],))
+        if kept is None:
+            continue
+        half = timedelta(minutes=w["minutes"] / 2)
+        reset = parse_iso_timestamp(w.get("resets_at"))
+        if timestamp - kept[0] > half or (reset and kept[1] and timestamp >= kept[1] and reset - kept[1] > half):
+            return True
+    return False
+
+
+def _quota_state(quota: dict) -> tuple:
+    """What a quota-only transition compares: the reached type and which windows (by length) are at 100 % or more. An empty snapshot and a snapshot
+    with no full window are the same state; a change in any one window's full flag is a transition."""
+    return (quota.get("reached"), frozenset(w.get("minutes") for w in quota.get("windows") or () if (w.get("used_percent") or 0) >= 100))
+
+
 def _codex_quota(value: object) -> dict | None:
     """Compact quota snapshot from a token_count rate_limits object: limit windows and plan only. The credit balance, limit name
-    and other account state are never kept. None when there is neither a valid window nor a reached-limit type."""
+    and other account state are never kept. None when there is neither a valid window, a reached-limit type, a limit id nor a plan."""
     limits = _mapping(value)
     windows = [w for slot in ("primary", "secondary") if (w := _quota_window(slot, limits.get(slot))) is not None]
     reached = _meta_text(limits.get("rate_limit_reached_type"), limit=64)
-    if not windows and reached is None:
+    limit_id, plan_type = _meta_text(limits.get("limit_id"), limit=64), _meta_text(limits.get("plan_type"), limit=64)
+    if not windows and reached is None and limit_id is None and plan_type is None:
         return None
-    return {"limit_id": _meta_text(limits.get("limit_id"), limit=64), "plan_type": _meta_text(limits.get("plan_type"), limit=64),
-            "reached": reached, "windows": windows}
+    # A present snapshot with no window and no reached type is kept (empty windows): it is the evidence that a limit has recovered.
+    return {"limit_id": limit_id, "plan_type": plan_type, "reached": reached, "windows": windows}
+
+
+_CLAUDE_LIMIT_MINUTES = {"five_hour": 300, "seven_day": 10080}
+
+
+def _claude_quota(value: object) -> dict | None:
+    """Quota object for a rejected request (quotaLimits.status == "rejected"); None for anything else."""
+    limits = _mapping(value)
+    if limits.get("status") != "rejected":
+        return None
+    kind = _meta_text(limits.get("rateLimitType"), limit=64)
+    resets = _number(limits.get("resetsAt"))
+    resets_at = None
+    if resets is not None and resets > 0:
+        try:
+            resets_at = datetime.fromtimestamp(resets, timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            resets_at = None
+    windows = []
+    if kind in _CLAUDE_LIMIT_MINUTES:
+        windows.append({"slot": kind, "minutes": _CLAUDE_LIMIT_MINUTES[kind], "used_percent": 100.0, "resets_at": resets_at})
+    return {"limit_id": None, "plan_type": None, "reached": kind, "status": "rejected", "resets_at": resets_at, "windows": windows}
 
 
 def _explicit_turn_id(row: dict, message: dict) -> str | None:
@@ -592,6 +647,9 @@ def collect_claude(
                 })
                 # The effective turn of the requests that follow (derived from this row unless they name one), for matching markers.
                 turn_requests, requests_turn = [], marker_turn or last_user_turn
+            quota = _claude_quota(row.get("quotaLimits"))
+            if quota is not None and not isinstance(usage, dict):
+                usage = {}
             if not isinstance(usage, dict) or timestamp is None:
                 continue
             request_id = _first_text(row, "requestId")
@@ -664,8 +722,9 @@ def collect_claude(
             turn = explicit_turn or derived_turn
             latest = timestamp >= existing["timestamp"]
             for name, value in {
-                "model": _meta_text(message.get("model")),
+                "model": None if quota is not None else _meta_text(message.get("model")),
                 "effort": _meta_text(row.get("effort")),
+                "quota": quota,
                 "project": _project_name(cwd_value) if cwd_value else None,
                 "project_id": cwd_value,
                 "cwd": cwd_value,
@@ -691,7 +750,9 @@ def collect_claude(
             ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')))
     # The stopped request is chosen among usage-eligible requests before the time window, so the window never changes which one carries the flag.
     usable = {call_id for call_id, values in calls.items() if eligible(values)}
-    retained = {call_id for call_id in usable if start <= calls[call_id]["timestamp"] < end}
+    # A rejected request (quota limit event) has no tokens but is kept; it is never the stopped request.
+    retained = {call_id for call_id, values in calls.items() if (call_id in usable or values.get("quota") is not None)
+                and start <= values["timestamp"] < end}
     interrupted = {next(k for k in reversed(keys) if k in usable) for keys in stops if any(k in usable for k in keys)}
     records = []
     for call_id, values in calls.items():
@@ -704,7 +765,7 @@ def collect_claude(
         for name, default in (
             ("model", "unknown"), ("effort", "unknown"), ("entrypoint", "unknown"),
             ("agent", "main"), ("thread_kind", "main"), ("cwd", None), ("turn_id", None),
-            ("turn_confidence", "absent"), ("harness_version", None), ("tariff", None),
+            ("turn_confidence", "absent"), ("harness_version", None), ("tariff", None), ("quota", None),
             ("project", fallback_project), ("project_id", fallback_id),
         ):
             values.setdefault(name, default)
@@ -791,6 +852,9 @@ def collect_codex(
         counter_segment = 0
         tariff: dict | None = None  # latest thread_settings.service_tier in this file, until it changes
         last_call: tuple[str, str] | None = None  # latest record of the current turn, flagged by a turn_aborted event
+        last_quota: dict = {}  # (limit id, plan) -> (reached type, windows at 100 %) of the latest quota seen in this file, for quota-only transitions
+        pending_full: dict = {}  # (limit id, plan, window minutes) -> the latest full quota-only reading seen but not retained
+        last_full: dict = {}  # (limit id, plan, window minutes) -> (time, reset) of the latest retained full evidence in this file, for checkpoint events
         harness_version = _first_text(meta_payload, "cli_version", "version")
         originator = _meta_text(meta_payload.get("originator"), source, thread_source, default=originator)
 
@@ -849,7 +913,58 @@ def collect_codex(
             info = _mapping(payload.get("info"))
             usage = info.get("last_token_usage")
             timestamp = parse_iso_timestamp(row.get("timestamp"))
+
+            def quota_event() -> None:
+                """A token_count that produces no usage record (quota-only, repeated counters, zero tokens) still reports the account's limits: keep a
+                zero-token quota event when they changed since the last quota in this file (reached type, or a window crossing 100 %), so the moment a
+                limit is reached (the requests then fail and carry no usage) and its recovery are not lost.
+
+                A still-full window also needs retained evidence at least every window length while readings continue, so the detector sees an
+                expiry only across a real gap. The last full reading seen but not retained is remembered; when a new full reading arrives more than
+                half a window after the last retained evidence, the remembered one (the reading just before the gap) is retained first."""
+                quota = _codex_quota(payload.get("rate_limits"))
+                if quota is None or timestamp is None:
+                    return
+                scope = (quota.get("limit_id"), quota.get("plan_type"))
+                state = _quota_state(quota)
+                thread_kind, agent, parent_session_id = _codex_thread(source, thread_source)
+                ordinal = row.get("ordinal")
+                identity = ordinal if ordinal is not None else _stable_hash({"timestamp": row.get("timestamp"), "quota": quota})
+                if has_session_meta:
+                    call_id, synthetic = f"{session_id}:{identity}:quota", ordinal is None
+                else:
+                    call_id, synthetic = "synthetic:" + _stable_hash({"timestamp": row.get("timestamp"), "ordinal": ordinal, "quota": quota}), True
+                this = ((provider, call_id), {
+                    "timestamp": timestamp, "session_id": session_id, "call_id": call_id, "model": "unknown", "effort": "unknown",
+                    "project": _project_name(cwd), "project_id": str(cwd) if isinstance(cwd, str) and cwd else "unknown",
+                    "cwd": cwd if isinstance(cwd, str) else None, "turn_id": current_turn_id, "turn_confidence": turn_confidence,
+                    "parent_session_id": parent_session_id, "harness_version": harness_version, "entrypoint": originator,
+                    "thread_kind": thread_kind, "agent": agent, "fresh_input": 0, "cache_read": 0, "cache_write": 0, "output": 0, "reasoning": 0,
+                    "raw_usage": {"input_tokens": 0, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 0,
+                                  "reasoning_output_tokens": 0},
+                    "id_synthetic": synthetic, "tariff": None, "quota": {**quota, "status": "event"}}, quota)
+                fulls = [scope + (w["minutes"],) for w in quota.get("windows") or () if (w.get("used_percent") or 0) >= 100]
+
+                def retain(item) -> None:
+                    calls.setdefault(item[0], item[1])
+                    _note_full(last_full, scope, item[2], item[1]["timestamp"])
+                    for k in fulls:
+                        pending_full.pop(k, None)
+
+                for k in fulls:  # the reading just before a gap is retained before the new one is judged
+                    kept, seen = last_full.get(k), pending_full.get(k)
+                    if kept and seen and timestamp - kept[0] > timedelta(minutes=k[2] / 2) and seen[1]["timestamp"] > kept[0]:
+                        calls.setdefault(seen[0], seen[1])
+                        _note_full(last_full, scope, seen[2], seen[1]["timestamp"])
+                if state != last_quota.get(scope, (None, frozenset())) or _full_evidence_due(last_full, scope, quota, timestamp):
+                    last_quota[scope] = state
+                    retain(this)
+                else:
+                    for k in fulls:
+                        pending_full[k] = this
+
             if not isinstance(usage, dict) or timestamp is None:
+                quota_event()
                 continue
             cumulative = _mapping(info.get("total_token_usage"))
             if cumulative:
@@ -860,6 +975,7 @@ def collect_codex(
                     )
                 )
                 if signature == last_total_signature:
+                    quota_event()
                     continue
                 if last_total_signature is not None and any(
                     new < old for new, old in zip(signature, last_total_signature)
@@ -877,6 +993,7 @@ def collect_codex(
                 and not _raw_usage_requires_record(raw_usage,
                     ('input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens'))
             ):
+                quota_event()
                 continue
             thread_kind, agent, parent_session_id = _codex_thread(source, thread_source)
             ordinal = row.get("ordinal")
@@ -924,6 +1041,12 @@ def collect_codex(
                 "tariff": tariff,
                 "quota": _codex_quota(payload.get("rate_limits")),
             }
+            if candidate["quota"] is not None:
+                scope = (candidate["quota"].get("limit_id"), candidate["quota"].get("plan_type"))
+                last_quota[scope] = _quota_state(candidate["quota"])
+                _note_full(last_full, scope, candidate["quota"], timestamp)
+                for w in candidate["quota"].get("windows") or ():
+                    pending_full.pop(scope + (w["minutes"],), None)
             existing = calls.get(key)
             if existing is None:
                 calls[key] = candidate

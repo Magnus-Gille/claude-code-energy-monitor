@@ -53,6 +53,19 @@ additive `quota` column (schema stays 2), merges as a whole object (the newer ob
 travels in snapshots, and the Codex harness revision 3 re-reads existing Codex files once. Other harnesses
 have no quota. No report or total uses it yet.
 
+## Limit events (issue #91)
+
+A rejected Claude request (transcript row with `quotaLimits.status == "rejected"`, zero tokens, model `<synthetic>`) is kept as an observation
+with an unknown model and a `quota` of `{reached: <rateLimitType>, status: "rejected", windows: [{slot: five_hour|seven_day, minutes: 300|10080,
+used_percent: 100, resets_at}]}` (no window for an unknown type). `History.records()` leaves such limit events out by default
+(`include_limit_events=True` returns them; snapshot import uses that), so they are never a request, cost, energy, turn or session count;
+`History.limit_events()` returns them. `limits.limit_hits` turns them (deduplicated per harness, limit type and reset time) and Codex
+observations with a reached-limit type into hits, and ranks the turns in the window by list-price cost for the same harness and provider.
+The window differs by harness. Claude's 5-hour limit is a session block and its weekly limit resets at a fixed time, so a Claude hit's window
+is reset-anchored: `[resets_at - window, hit]`. Codex windows are rolling and their reset time only slides, so a Codex hit's window is the
+trailing one: `[hit - window, hit]`. A hit with no known window length or no reset time (Claude) has no ranking. Reset times are re-parsed into
+canonical UTC text at use; anything unparseable is dropped. The shares are of what tokenatlas saw in the window, never of the limit: usage elsewhere counts toward the limit but is not in the logs.
+
 ## Storage decision
 
 For the single-machine seminar MVP, SQLite from the Python standard library

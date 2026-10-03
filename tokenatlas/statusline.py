@@ -47,12 +47,13 @@ def build_cache(history, now=None):
     if began:c.execute('BEGIN')
     try:
         revision = history.revision
-        rows = c.execute('SELECT o.ts_us,p.value,m.value,o.fresh_input,o.cache_read,o.cache_write,o.output,o.complete FROM observations o'
-                         ' LEFT JOIN strings p ON p.id=o.provider LEFT JOIN strings m ON m.id=o.model'
+        rows = c.execute('SELECT o.ts_us,p.value,m.value,o.fresh_input,o.cache_read,o.cache_write,o.output,o.complete,o.reasoning,q.value FROM observations o'
+                         ' LEFT JOIN strings p ON p.id=o.provider LEFT JOIN strings m ON m.id=o.model LEFT JOIN strings q ON q.id=o.quota'
                          ' WHERE o.ts_us>=? AND COALESCE(o.id_synthetic,0)=0', (int(since.timestamp()) * 1_000_000,)).fetchall()
     finally:
         if began:c.rollback()
-    for ts_us, provider, model, *tokens, complete in rows:
+    for ts_us, provider, model, *tokens, complete, reasoning, quota in rows:
+        if quota and not any(tokens) and not reasoning and (json.loads(quota) or {}).get('status') in ('rejected', 'event'):continue  # a limit event (history.is_limit_event) is no request
         day = datetime.fromtimestamp(ts_us // 1_000_000).date()  # the machine's local zone
         if not first <= day <= today:continue
         bucket = days.setdefault(day.isoformat(), dict.fromkeys(COUNTERS, 0))
