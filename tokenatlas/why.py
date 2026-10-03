@@ -436,10 +436,13 @@ def _number(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
+MAX_WINDOW_MINUTES = 527040  # one leap year: a longer quota window is not a real one and would only overflow date arithmetic
+
+
 def _quota_window(slot: str, value: object) -> dict | None:
     window = _mapping(value)
     used, minutes = _number(window.get("used_percent")), window.get("window_minutes")
-    if used is None or used < 0 or isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
+    if used is None or used < 0 or isinstance(minutes, bool) or not isinstance(minutes, int) or not 0 < minutes <= MAX_WINDOW_MINUTES:
         return None
     resets, resets_at = _number(window.get("resets_at")), None
     if resets is not None and resets > 0:

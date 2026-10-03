@@ -88,25 +88,35 @@ def limit_hits(records, events, table):
         # A hit starts when `reached` goes from null (or another type) to a value; the reset time is context only, it may drift between observations.
         at, resets = prompts._t(record['ts']), _iso(window.get('resets_at')) if window else None
         before = last.get(account)
-        # An episode also ends when no observation was captured for a whole window, or when the reset time moved on by more than the drift tolerance.
+        # An episode ends on recovery (the series reports no reached type), on a gap longer than its window, or when a different window is named.
+        # A reset time only slides, so its movement alone never starts a new hit.
+        minutes = window and window.get('minutes')
         same = (before is not None and before[0] == reached and at - before[1] <= timedelta(minutes=before[3] or 300)
-                and not (resets and before[2] and resets - before[2] > RETRY_GAP))
+                and (not minutes or not before[3] or minutes == before[3]))
         if reached and not same:
             found.append(dict(harness=record['harness'], at=record['ts'], reached=reached, window_minutes=window and window.get('minutes'),
                               resets_at=window.get('resets_at') if window else None, retries=1, rolling=True, _row=record, **_scope(record)))
-        last[account] = (reached, at, resets or (before and before[2]), (window and window.get('minutes')) or (before and before[3]))
+        last[account] = (reached, at, resets, minutes or (before and before[0] == reached and before[3]) or None)
     if not found:
         return []  # the usual case: skip the turn assignment over the whole history
     found.sort(key=lambda h: h['at'])
     # One assignment, over usage only (as top_prompts and the report do); a rejection carries its own turn and never feeds the assignment.
     assigned = {id(r): a for r, a in zip(records, prompts.assign_prompts(records))}
+    threads = {}  # subagent thread -> [(time, assigned turn)] of its usage, for a rejection in a subagent file (it carries no usable turn of its own)
+    for r in records:
+        if r['thread_kind'] == 'subagent' and assigned[id(r)]:
+            threads.setdefault(prompts._thread(r), []).append((prompts._t(r['ts']), tuple(assigned[id(r)][:3])))
+    for found_turns in threads.values():
+        found_turns.sort(key=lambda x: x[0])
     for hit in found:
         row = hit.pop('_row')
         turn = assigned.get(id(row))
-        if turn:
-            hit['turn'] = tuple(turn[:3])
-        else:
-            hit['turn'] = (row['harness'], row['session'], row['turn_id']) if row.get('turn_id') else None
+        hit['turn'] = tuple(turn[:3]) if turn else (row['harness'], row['session'], row['turn_id']) if row.get('turn_id') else None
+        bound = threads.get(prompts._thread(row)) if not turn and row.get('thread_kind') == 'subagent' else None
+        if bound:  # the latest usage in the thread at or before the rejection, else the earliest after it
+            at = prompts._t(row['ts'])
+            before = [x for x in bound if x[0] <= at]
+            hit['turn'] = (before[-1] if before else bound[0])[1]
         hit['window'] = _fill(hit, records, assigned, table)
     return found
 
@@ -120,10 +130,12 @@ def _fill(hit, records, assigned, table):
     if (resets is None and not rolling) or not minutes or at is None:
         return None
     start = at - timedelta(minutes=minutes) if rolling else resets - timedelta(minutes=minutes)
-    provider = PROVIDER.get(hit['harness'])
+    aliases = table.get('provider_aliases') or {}
+    canon = lambda p: aliases.get(p, p)
+    provider = canon(PROVIDER.get(hit['harness']))
     turns, requests, priced, total, lower = {}, 0, 0, 0.0, False
     for record in records:
-        if record.get('provider') != provider or record.get('id_synthetic') or not start <= prompts._t(record['ts']) <= at:
+        if canon(record.get('provider')) != provider or record.get('id_synthetic') or not start <= prompts._t(record['ts']) <= at:
             continue  # an ambiguous identity is in no total, as in the cost facts
         requests += 1
         lower = lower or not record.get('complete', True)
@@ -178,9 +190,14 @@ def scope_hits(hits, records, harness=None, start=None, end=None, project=None, 
     (a rejection has no usage record) matches every given filter. The hits themselves are computed over the whole history first."""
     given = {'project_id': project, 'turn_id': turn, 'model': model, 'effort': effort, 'provider': provider, 'agent': agent}
     given = {k: v for k, v in given.items() if v is not None}
+    prefix = None
     if isinstance(session, str):
-        prefix, separator, rest = session.partition(':')
-        session = rest if separator and prefix in ('claude', 'codex', 'pi', 'opencode') else session
+        head, separator, rest = session.partition(':')
+        if separator and head in ('claude', 'codex', 'pi', 'opencode'):
+            prefix, session = head, rest
+    if prefix is not None and harness is not None and prefix != harness:
+        return []  # as History.records: a session prefix that contradicts the harness filter selects nothing
+    harness = harness or prefix
     if session is not None:
         given['session'] = session
     turns = {(r['harness'], r['session'], r.get('turn_id')) for r in records} if given else None

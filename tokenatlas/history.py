@@ -92,7 +92,7 @@ def _clean_quota(value):
         if not isinstance(w, dict) or w.get('slot') not in ('primary', 'secondary', 'five_hour', 'seven_day'):
             continue
         used, minutes, resets = why._number(w.get('used_percent')), w.get('minutes'), w.get('resets_at')
-        if used is None or used < 0 or isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
+        if used is None or used < 0 or isinstance(minutes, bool) or not isinstance(minutes, int) or not 0 < minutes <= why.MAX_WINDOW_MINUTES:
             continue
         try:
             resets = datetime.fromisoformat(resets).astimezone(timezone.utc).isoformat() if isinstance(resets, str) else None

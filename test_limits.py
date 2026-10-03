@@ -281,6 +281,62 @@ class LimitHits(unittest.TestCase):
                    for i in range(1, 4)]
         self.assertEqual(len(limits.limit_hits(seconds, [], TABLE)), 1)
 
+    def test_codex_reset_movement_alone_does_not_start_a_hit(self):
+        recs = [self.cx('1', 1, 'rate_limit_reached', [self.win(100.0, 100)]), self.cx('2', 2, 'rate_limit_reached', [self.win(100.0, 130)])]
+        self.assertEqual(len(limits.limit_hits(recs, [], TABLE)), 1)
+
+    def test_codex_episode_ends_when_the_named_window_changes(self):
+        weekly = self.win(100.0, 100, 'secondary', 10080)
+        recs = [self.cx('1', 1, 'rate_limit_reached', [self.win(100.0, 100), self.win(20.0, 100, 'secondary', 10080)]),
+                self.cx('2', 2, 'rate_limit_reached', [self.win(50.0, 100), weekly])]
+        hits = limits.limit_hits(recs, [], TABLE)
+        self.assertEqual([h['window_minutes'] for h in hits], [300, 10080])
+
+    def test_provider_aliases_count_in_the_window(self):
+        def codex(id, minute, provider, turn):
+            r = obs(id, iso(minute), 5000, harness='codex', provider=provider, session='c1', turn=turn)
+            r['model'] = 'gpt-5.6-luna'
+            return r
+        hit = self.cx('hit', 100, 'rate_limit_reached', [self.win(100.0, 400)])
+        alias_only = limits.limit_hits([codex('a', 10, 'openai-codex', 'ta'), hit], [], TABLE)[0]['window']
+        self.assertEqual(alias_only['requests'], 1 + 1)  # the alias record and the hit's own observation (provider openai)
+        mixed = limits.limit_hits([codex('a', 10, 'openai-codex', 'ta'), codex('b', 11, 'openai', 'tb'), hit], [], TABLE)[0]['window']
+        self.assertEqual(mixed['requests'], 3)
+        self.assertEqual({t['turn'][2] for t in mixed['top']} >= {'ta', 'tb'}, True)
+
+    def test_subagent_rejection_takes_the_turn_of_its_thread(self):
+        main = obs('m', iso(1), 1000, turn='t1')
+        sub = dict(obs('s', iso(5), 90000, turn=None), thread_kind='subagent', parent_session='s1', agent='a1')
+        event = dict(obs('r', iso(6), turn=None, quota=five_hour(120)), thread_kind='subagent', agent='a1')
+        hits = limits.limit_hits([main, sub], [event], TABLE)
+        self.assertEqual(hits[0]['turn'], ('claude', 's1', 't1'))
+        item = {'harness': 'claude', 'session': 's1', 'turn_id': 't1'}
+        limits.mark_turns([item], hits)
+        self.assertIn('limit_hit', item)
+        early = dict(event, ts=iso(0))  # before any usage of the thread: the earliest after it
+        self.assertEqual(limits.limit_hits([main, sub], [early], TABLE)[0]['turn'], ('claude', 's1', 't1'))
+
+    def test_session_prefix_enforces_the_harness(self):
+        recs = [obs('a', iso(1), 1000, turn='t1'), self.cx('c', 5, 'rate_limit_reached', [self.win(100.0, 100)])]
+        hits = limits.limit_hits(recs, [obs('r', iso(30), turn='t1', quota=five_hour(120))], TABLE)
+        self.assertEqual(sorted(h['harness'] for h in hits), ['claude', 'codex'])
+        self.assertEqual([h['harness'] for h in limits.scope_hits(hits, recs, session='claude:s1')], ['claude'])
+        self.assertEqual([h['harness'] for h in limits.scope_hits(hits, recs, session='codex:c1')], ['codex'])
+        self.assertEqual(limits.scope_hits(hits, recs, harness='codex', session='claude:s1'), [])
+
+    def test_malformed_window_durations_are_dropped_without_crashing(self):
+        huge = {'used_percent': 100, 'window_minutes': 10 ** 400, 'resets_at': 1790000000}
+        quota = why._codex_quota({'limit_id': 'codex', 'primary': huge, 'secondary': dict(huge, window_minutes=527041),
+                                  'rate_limit_reached_type': 'rate_limit_reached'})
+        self.assertEqual(quota['windows'], [])
+        edge = why._codex_quota({'primary': dict(huge, window_minutes=527040)})
+        self.assertEqual(edge['windows'][0]['minutes'], 527040)
+        cleaned = _clean_quota({'reached': 'x', 'windows': [{'slot': 'primary', 'minutes': 10 ** 400, 'used_percent': 100.0, 'resets_at': None},
+                                                              {'slot': 'primary', 'minutes': 0, 'used_percent': 100.0, 'resets_at': None}]})
+        self.assertEqual(cleaned['windows'], [])
+        hits = limits.limit_hits([obs('a', iso(1), 1000, harness='codex', provider='openai', quota=quota)], [], TABLE)
+        self.assertEqual((len(hits), hits[0]['window']), (1, None))
+
     def test_codex_window_is_rolling_from_the_hit(self):
         # resets at +400 min: a reset-anchored window would start at +100 and miss the call at +20; the rolling window [hit-300, hit] has it
         recs = [obs('early', iso(20), 5000, harness='codex', provider='openai', session='c1', turn='early'),
