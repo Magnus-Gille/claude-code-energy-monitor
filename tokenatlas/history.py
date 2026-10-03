@@ -23,7 +23,7 @@ from tokenatlas import why
 OBSERVATION_VERSION = 1  # the 'v' field inside observation dicts
 SCHEMA_VERSION = 2  # PRAGMA user_version of the SQLite layout
 COLLECTOR_VERSION = 5
-HARNESS_REVISION = {'pi': 1, 'codex': 3, 'claude': 1}  # bump to force a re-read of one harness's files only (appended to its fingerprint)
+HARNESS_REVISION = {'pi': 2, 'codex': 4, 'claude': 2, 'opencode': 2}  # bump to force a re-read of one harness's files only (appended to its fingerprint)
 FIELDS = ('fresh_input', 'cache_read', 'cache_write', 'output')
 ALL_FIELDS = FIELDS + ('reasoning',)
 
@@ -177,6 +177,7 @@ def normalize(record, machine):
     tariff = getattr(record, 'tariff', None)
     tariff = {k: v for k in ('speed', 'service_tier', 'inference_geo')
               if (v := text((tariff or {}).get(k), limit=64)) is not None} or None
+    flags = sorted({f for f in (text(x, limit=32) for x in (getattr(record, 'flags', None) or ())) if f is not None}) or None
     confidence = {k: 'absent' if v is None else 'observed' for k, v in tokens.items()}
     if 'output_not_final' in warnings:
         for k in ('output', 'reasoning'):
@@ -200,7 +201,7 @@ def normalize(record, machine):
         'project_id': project_id, 'project_label': record.project,
         'cwd': text(getattr(record, 'cwd', None), limit=4096),
         'turn_id': text(getattr(record, 'turn_id', None)),
-        'turn_confidence': getattr(record, 'turn_confidence', 'absent'), 'tariff': tariff,
+        'turn_confidence': getattr(record, 'turn_confidence', 'absent'), 'tariff': tariff, 'flags': flags,
         'quota': _clean_quota(getattr(record, 'quota', None)),
         'tokens': tokens, 'raw_usage': raw, 'duration_ms': None,
         'accounting_basis': 'request_top_level', 'billing_verified': False,
@@ -243,6 +244,9 @@ def merge_observations(a, b, authoritative_turns=False):
     # Whole object, never a field merge. A quota comes from the token_count event that defines the observation, so copies of one observation
     # carry the same snapshot or none (written before Codex revision 3); keeping any present one is enough.
     result['quota'] = winner.get('quota') or other.get('quota')
+    # Union, also on a re-read: copies of a transcript must not erase a recorded stop. (The flagged request cannot change on a re-read, since
+    # a stopped request gets no further usage rows after the marker.)
+    result['flags'] = sorted(set(a.get('flags') or ()) | set(b.get('flags') or ())) or None
     flags = [x.get('output_final') for x in (a, b)]
     output_final = True if True in flags else False if False in flags else None
     raw = merge_usage(a['raw_usage'], b['raw_usage'])
@@ -254,7 +258,7 @@ def merge_observations(a, b, authoritative_turns=False):
         project=result['project_label'], project_id=result['project_id'], cwd=result['cwd'],
         entrypoint=result['origin'], thread_kind=result['thread_kind'], agent=result['agent'],
         parent_session_id=result['parent_session'], turn_id=result['turn_id'],
-        turn_confidence=result['turn_confidence'], tariff=result.get('tariff'), quota=result.get('quota'), harness_version=result['harness_version'],
+        turn_confidence=result['turn_confidence'], tariff=result.get('tariff'), quota=result.get('quota'), flags=result.get('flags'), harness_version=result['harness_version'],
         session_started_at=(datetime.fromisoformat(result['session_started_at'])
                             if result.get('session_started_at') else None),
         raw_usage=raw, id_synthetic=result['id_synthetic'], output_final=output_final)
@@ -268,8 +272,8 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MICRO = timedelta(microseconds=1)
 _REFS = ('id', 'machine', 'harness', 'provider', 'harness_version', 'collector', 'source_type', 'session',
          'parent_session', 'session_started_at', 'thread_kind', 'agent', 'origin', 'model', 'effort',
-         'project_id', 'project_label', 'cwd', 'turn_id', 'turn_confidence', 'tariff', 'warnings', 'confidence', 'quota')
-_JSON_REFS = ('tariff', 'warnings', 'confidence', 'quota')
+         'project_id', 'project_label', 'cwd', 'turn_id', 'turn_confidence', 'tariff', 'warnings', 'confidence', 'quota', 'flags')
+_JSON_REFS = ('tariff', 'warnings', 'confidence', 'quota', 'flags')
 _FLAGS = ('id_synthetic', 'complete', 'output_final')
 _TOKENS = ALL_FIELDS
 _CONSTANTS = (('v', OBSERVATION_VERSION), ('kind', 'usage_observation'), ('duration_ms', None),
@@ -366,7 +370,7 @@ def _encode(item, key=None):
     for name in _REFS:
         value = item.get(name)
         if name in _JSON_REFS:
-            value = None if name in ('tariff', 'quota') and value is None else _compact(value)
+            value = None if name in ('tariff', 'quota', 'flags') and value is None else _compact(value)
         elif value is not None and type(value) is not str:
             raise ValueError(f'observation field {name} must be text or null')
         refs.append(value)
@@ -394,10 +398,11 @@ def _decode(row):
     packed, extra = rest[n + len(_TOKENS):]
     item = {'v': OBSERVATION_VERSION, 'kind': 'usage_observation', 'id': refs['id'],
             'id_synthetic': bool(flags['id_synthetic']), 'ts': _ts_text(ts_us)}
-    for name in _REFS[1:-4]:
+    for name in _REFS[1:-5]:
         item[name] = refs[name]
     item['tariff'] = None if refs['tariff'] is None else json.loads(refs['tariff'])
     item['quota'] = None if refs['quota'] is None else json.loads(refs['quota'])
+    item['flags'] = None if refs['flags'] is None else json.loads(refs['flags'])
     item.update(tokens=tokens, raw_usage=_unpack_raw(packed, extra), duration_ms=None,
                 accounting_basis='request_top_level', billing_verified=False,
                 warnings=json.loads(refs['warnings']), complete=bool(flags['complete']),
@@ -449,7 +454,7 @@ class History:
             ):
                 c.execute(sql)
             have = {r['name'] for r in c.execute('PRAGMA table_info(observations)')}
-            for column in ('tariff', 'quota'):
+            for column in ('tariff', 'quota', 'flags'):
                 if column not in have:
                     c.execute(f'ALTER TABLE observations ADD COLUMN {column} INTEGER')  # additive within schema 2
             if migrate:
@@ -734,7 +739,7 @@ class History:
                 raise ValueError(f'unsupported snapshot schema version {version}')
             if not found:
                 raise ValueError('snapshot has no machine id')
-            with History(copy) as source:  # migrates v1 and adds the tariff and quota columns on the copy only
+            with History(copy) as source:  # migrates v1 and adds the tariff, quota and flags columns on the copy only
                 machine, items = source.machine, source.records()
         result = dict(harness='import', root=label, source_machine=machine, observations_seen=len(items),
                       new=0, merged=0, status='ok', last_attempt=utcnow())

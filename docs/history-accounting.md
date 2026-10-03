@@ -84,6 +84,15 @@ treat reasoning as a subset of normalized output and never add it again.
 Unavailable fields remain null. Raw counters survive normalization;
 nontrivial iterations and inconsistent token relationships are warnings.
 
+`flags` is a sorted list of short labels the harness itself logged about a request, or null. The only flag is `interrupted`
+(#96): the user stopped the request or its turn. Claude Code writes a `[Request interrupted by user` user row (the latest request in the same
+file's current turn is flagged: in a subagent file that is the subagent's latest request, and the flag rolls up to the parent turn; main-thread
+markers are rare in current transcripts), Codex a `turn_aborted` event (the last record of that turn),
+Pi an assistant message with `stopReason: "aborted"` (that request, or the turn's last one if it carries no usage), OpenCode a message
+error named `MessageAbortedError` (usually with no tokens, so the last retained request of the same turn is flagged). Nothing is inferred; a stop the harness did not log is not flagged. Merging two copies of an
+observation keeps the union of their flags. The column is added within schema 2 and stored as a JSON string reference; the
+harness revisions were bumped so existing histories are re-read once to fill it.
+
 Only changed source files are reparsed (whole file, to retain session context).
 OpenCode is read through a query-only SQLite connection; its database, WAL, and SHM
 metadata form the checkpoint fingerprint. Other file fingerprints include inode,

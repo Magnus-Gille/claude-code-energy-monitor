@@ -31,6 +31,8 @@ WORDS = ('lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod 
          'magna aliqua enim ad minim veniam quis nostrud exercitation ullamco laboris nisi aliquip ex ea commodo '
          'consequat duis aute irure in reprehenderit voluptate velit esse cillum fugiat nulla pariatur').split()
 ORCH = 'demo-orchestrated'
+# Sessions where the fictional user stopped a turn: the logs then hold Claude Code's interrupt marker / Codex's turn_aborted event.
+INTERRUPTED = {'demo-shop-02', 'cx-shop-long'}
 # Fictional developer prompts per demo project; chosen deterministically from the seed (see Script).
 PROMPTS = {  # project -> (short title, prompt, git branch derived from the title)
     'acme': [('Orders pagination', 'Add pagination to GET /orders and update the OpenAPI spec', 'feature/orders-pagination'),
@@ -224,6 +226,9 @@ def claude_thread(rng, t0, n, model, effort, sid, cwd, *, floor, gap, out_range=
                      'message': {'id': 'msg_' + hexid(rng, 14), 'role': 'assistant', 'model': model,
                                  'stop_reason': 'tool_use' if i < n - 1 and rng.random() > .25 else 'end_turn',
                                  'usage': usage, 'content': content}})
+        if script and not agent and sid in INTERRUPTED and i == 9:
+            rows.append({'type': 'user', 'timestamp': iso(t + timedelta(seconds=1)), 'uuid': hexid(random.Random(f'{sid}-stop'), 12), 'sessionId': sid, 'cwd': cwd,
+                         'message': {'role': 'user', 'content': [{'type': 'text', 'text': '[Request interrupted by user for tool use]'}]}, **common})
         if pending and i == 3:
             tool_id = content[-1]['id']
             rows.append({'type': 'user', 'isMeta': True, 'sourceToolUseID': tool_id, 'timestamp': iso(t + timedelta(seconds=1)),
@@ -346,7 +351,7 @@ def codex_rollout(w, rng, name, key, t0, n, models, *, kind='tui', parent=None, 
         if i % turn_len == turn_len - 1 or i == n - 1:
             rows.append(row(t, 'response_item', {'type': 'message', 'role': 'assistant', 'content': [
                 {'type': 'output_text', 'text': script.final()}]}))
-            rows.append(row(t, 'event_msg', {'type': 'task_complete', 'turn_id': turn}))
+            rows.append(row(t, 'event_msg', {'type': 'turn_aborted' if sid in INTERRUPTED and i == n - 1 else 'task_complete', 'turn_id': turn}))
     write_jsonl(path, rows)
     with (w['codex'].parent / 'session_index.jsonl').open('a') as index:
         index.write(json.dumps({'id': uid, 'thread_name': script.title(key, sid), 'updated_at': iso(t)}) + '\n')
@@ -621,7 +626,7 @@ def main(argv=None):
                                'inferred_children': sum(n['link'] == 'inferred' for n in nodes),
                                'total_tokens': session_json['total']['total'], 'cost': session_json['total']['cost']},
                    'top_turns': [{'rank': i, 'harness': p['harness'], 'project': p['project_label'], 'cost': p['cost'],
-                                  'requests': p['requests'], 'subagents': p['subagents']} for i, p in enumerate(top, 1)],
+                                  'requests': p['requests'], 'subagents': p['subagents'], 'interrupted': p['interrupted']} for i, p in enumerate(top, 1)],
                    'report': str(report)}
         (outdir / 'demo-summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
         if not args.no_screens:

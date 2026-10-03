@@ -100,6 +100,7 @@ def top_prompts(records, table, k=5, by='cost', keep=None, credit_table=None):
         owed = [credit_rates.credit_observation(r, credit_table)['credits'] for r in rows]
         first, last = min((r['ts'] for r in rows), key=_t), max((r['ts'] for r in rows), key=_t)
         head = min(own or rows, key=lambda r: _t(r['ts']))
+        stopped = [r['ts'] for r in rows if 'interrupted' in (r.get('flags') or ())]  # the user stopped the turn (logged, not inferred)
         prompts.append({
             'harness': harness, 'session': session, 'turn_id': turn, 'thread_kind': head['thread_kind'], 'machine': head.get('machine'),
             'project_id': head.get('project_id'), 'project_label': head.get('project_label'),
@@ -108,6 +109,7 @@ def top_prompts(records, table, k=5, by='cost', keep=None, credit_table=None):
             'subagent_requests': len(subs), 'subagents': len({(r['session'], r.get('agent')) for r in subs}),
             'tokens': tokens, 'total_tokens': sum(tokens[c] for c in CLASSES if c != 'reasoning'),
             'cost': sum(priced) if priced else None, 'cost_complete': len(priced) == len(costs),
+            'interrupted': bool(stopped), 'stopped_request_at': min(stopped, key=_t) if stopped else None,
             'credits': sum(owed) if None not in owed else None, 'credits_lower_bound': any(not r.get('complete', True) for r in rows),
             'resume': resume_command(harness, session, head.get('cwd'))})  # validated and quoted; Claude needs the directory
     if by == 'cost':

@@ -152,7 +152,7 @@ def render_top(result,texts=None,contexts=None):
     lines=['  '.join(c.ljust(w) for c,w in zip(r,widths)).rstrip() for r in rows]
     shown=[]
     for line,p in zip(lines[1:],result['prompts']):
-        key=(p['harness'],p['session'],p['turn_id']);shown.append(line)
+        key=(p['harness'],p['session'],p['turn_id']);shown.append(line+(' · interrupted' if p.get('interrupted') else ''))
         text=(texts or {}).get(key)
         if (contexts or {}).get(key):shown+=context_lines(contexts[key],text)
         elif text:shown.append('    '+text)
