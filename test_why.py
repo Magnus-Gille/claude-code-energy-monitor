@@ -367,6 +367,28 @@ class ClaudeInterruptTests(unittest.TestCase):
             return {r.call_id: r for r in why.collect_claude(
                 root, datetime(2026, 9, 3, tzinfo=timezone.utc), datetime(2026, 9, 4, tzinfo=timezone.utc))}
 
+    def test_the_time_window_never_moves_the_flag(self):
+        rows = {"p/s.jsonl": [
+            _user_row("2026-09-03T10:00:00Z", "u1", "do it"),
+            _claude_row("2026-09-03T10:01:00Z", "r1", self.USAGE),
+            _claude_row("2026-09-03T10:11:00Z", "r2", self.USAGE),
+            _user_row("2026-09-03T10:12:00Z", "u2", "[Request interrupted by user]")]}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, items in rows.items():
+                _write_jsonl(root / name, items)
+            early = why.collect_claude(root, datetime(2026, 9, 3, tzinfo=timezone.utc), datetime(2026, 9, 3, 10, 5, tzinfo=timezone.utc))
+        self.assertEqual([(r.call_id, r.flags) for r in early], [("r1", None)])  # r2, outside the window, was the stopped one
+        self.assertEqual({k: r.flags for k, r in self.collect(rows).items()}, {"r1": None, "r2": ["interrupted"]})
+
+    def test_marker_text_next_to_an_image_is_a_real_message(self):
+        got = self.collect({"p/s.jsonl": [
+            _user_row("2026-09-03T10:00:00Z", "u1", "first"),
+            _claude_row("2026-09-03T10:00:01Z", "r1", self.USAGE),
+            _user_row("2026-09-03T10:00:02Z", "u2", [{"type": "text", "text": "[Request interrupted by user]"},
+                                                     {"type": "image", "source": {"type": "base64", "data": ""}}])]})
+        self.assertEqual({k: r.flags for k, r in got.items()}, {"r1": None})
+
     def test_both_marker_variants_flag_the_running_request(self):
         for marker in ("[Request interrupted by user]", "[Request interrupted by user for tool use]"):
             with self.subTest(marker=marker):

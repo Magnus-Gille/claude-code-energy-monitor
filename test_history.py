@@ -858,6 +858,9 @@ class HistoryStorageTests(unittest.TestCase):
             merged=merge_observations(*pair)
             self.assertEqual(merged['flags'],sorted(set(pair[0]['flags'] or ())|set(pair[1]['flags'] or ())) or None)
         self.assertEqual(merge_observations(plain,plain)['flags'],None)
+        # A re-read of the owning copy restates the flag: an old one does not linger (the stopped request can change on append).
+        self.assertIsNone(merge_observations(stopped,plain,authoritative_turns=True)['flags'])
+        self.assertEqual(merge_observations(plain,stopped,authoritative_turns=True)['flags'],['b','interrupted'])
 
     def test_refresh_stores_the_interrupt_flag_and_an_unchanged_refresh_adds_nothing(self):
         source=self._interrupted_log()

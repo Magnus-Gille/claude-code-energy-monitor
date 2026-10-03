@@ -502,7 +502,9 @@ def _claude_interrupt_marker(row: dict) -> bool:
     if isinstance(content, str):
         texts = [content]
     elif isinstance(content, list):
-        texts = [i.get("text", "") for i in content if isinstance(i, dict) and i.get("type") == "text"]
+        if any(not isinstance(i, dict) or i.get("type") != "text" for i in content):
+            return False  # an image, tool result or other block next to the text: a real message, not the marker
+        texts = [i.get("text", "") for i in content]
     else:
         return False
     found = [t.strip() for t in texts if isinstance(t, str) and t.strip()]
@@ -675,14 +677,16 @@ def collect_claude(
             if latest or "id_synthetic" not in existing:
                 existing["id_synthetic"] = id_synthetic
 
-    def kept(values):
-        return start <= values["timestamp"] < end and not (sum(
+    def eligible(values):
+        return not (sum(
             values[field]
             for field in ("fresh_input", "cache_read", "cache_write", "output")
         ) <= 0 and not _raw_usage_requires_record(values.get("raw_usage", {}),
             ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')))
-    retained = {call_id for call_id, values in calls.items() if kept(values)}
-    interrupted = {next(k for k in reversed(keys) if k in retained) for keys in stops if any(k in retained for k in keys)}
+    # The stopped request is chosen among usage-eligible requests before the time window, so the window never changes which one carries the flag.
+    usable = {call_id for call_id, values in calls.items() if eligible(values)}
+    retained = {call_id for call_id in usable if start <= calls[call_id]["timestamp"] < end}
+    interrupted = {next(k for k in reversed(keys) if k in usable) for keys in stops if any(k in usable for k in keys)}
     records = []
     for call_id, values in calls.items():
         if call_id not in retained:
