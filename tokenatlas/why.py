@@ -425,9 +425,14 @@ def _codex_tariff(settings: object) -> dict | None:
 
 
 def _number(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+    """A finite float, or None (bools, non-numbers, NaN, infinity and integers too large for a float are dropped)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _quota_window(slot: str, value: object) -> dict | None:

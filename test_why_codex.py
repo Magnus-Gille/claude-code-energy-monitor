@@ -431,6 +431,11 @@ class CodexQuotaTests(unittest.TestCase):
         self.assertIsNone(self._quota("junk"))
         self.assertIsNone(self._quota(_limits()))
 
+    def test_oversized_integers_never_abort_the_read(self):
+        self.assertIsNone(self._quota(_limits(primary=_window(10 ** 400))))  # no float can hold it: the window is dropped
+        quota = self._quota(_limits(primary=_window(4, 10080, 10 ** 400)))
+        self.assertEqual((quota["windows"][0]["used_percent"], quota["windows"][0]["resets_at"]), (4.0, None))
+
     def test_malformed_windows_are_dropped(self):
         bad = [_window("4"), _window(-1), _window(float("nan")), _window(float("inf")), _window(True),
                {"used_percent": 4, "resets_at": 1791580407}, _window(4, 0), _window(4, -5), _window(4, True),

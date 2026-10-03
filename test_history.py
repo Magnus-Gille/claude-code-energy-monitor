@@ -796,7 +796,8 @@ class HistoryStorageTests(unittest.TestCase):
         self.assertIsNone(normalize(record(),'m')['quota'])
         hostile=dict(quota,credits={'balance':'1'},windows=quota['windows']+[{'slot':'x','minutes':1,'used_percent':1,'resets_at':None},
             {'slot':'secondary','minutes':True,'used_percent':1,'resets_at':None},
-            {'slot':'secondary','minutes':60,'used_percent':float('nan'),'resets_at':None}])
+            {'slot':'secondary','minutes':60,'used_percent':float('nan'),'resets_at':None},
+            {'slot':'secondary','minutes':60,'used_percent':10**400,'resets_at':None}])
         self.assertEqual(normalize(record(quota=hostile),'m')['quota'],quota)
         self.assertIsNone(normalize(record(quota='junk'),'m')['quota'])
         self.assertIsNone(normalize(record(quota={'windows':[],'reached':None}),'m')['quota'])

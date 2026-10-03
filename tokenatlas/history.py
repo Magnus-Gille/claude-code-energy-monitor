@@ -7,7 +7,6 @@ cannot delete history. Only token counters and attribution metadata are retained
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import shutil
@@ -92,15 +91,14 @@ def _clean_quota(value):
     for w in value.get('windows') if isinstance(value.get('windows'), list) else []:
         if not isinstance(w, dict) or w.get('slot') not in ('primary', 'secondary'):
             continue
-        used, minutes, resets = w.get('used_percent'), w.get('minutes'), w.get('resets_at')
-        if (isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used) or used < 0
-                or isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0):
+        used, minutes, resets = why._number(w.get('used_percent')), w.get('minutes'), w.get('resets_at')
+        if used is None or used < 0 or isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
             continue
         try:
             resets = datetime.fromisoformat(resets).astimezone(timezone.utc).isoformat() if isinstance(resets, str) else None
         except ValueError:
             resets = None
-        windows.append({'slot': w['slot'], 'minutes': minutes, 'used_percent': float(used), 'resets_at': resets})
+        windows.append({'slot': w['slot'], 'minutes': minutes, 'used_percent': used, 'resets_at': resets})
     text = why._meta_text
     reached = text(value.get('reached'), limit=64)
     if not windows and reached is None:
