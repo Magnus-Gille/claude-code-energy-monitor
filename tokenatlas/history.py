@@ -23,7 +23,7 @@ from tokenatlas import why
 OBSERVATION_VERSION = 1  # the 'v' field inside observation dicts
 SCHEMA_VERSION = 2  # PRAGMA user_version of the SQLite layout
 COLLECTOR_VERSION = 5
-HARNESS_REVISION = {'pi': 2, 'codex': 6, 'claude': 3, 'opencode': 2}  # bump to force a re-read of one harness's files only (appended to its fingerprint)
+HARNESS_REVISION = {'pi': 2, 'codex': 7, 'claude': 3, 'opencode': 2}  # bump to force a re-read of one harness's files only (appended to its fingerprint)
 FIELDS = ('fresh_input', 'cache_read', 'cache_write', 'output')
 ALL_FIELDS = FIELDS + ('reasoning',)
 

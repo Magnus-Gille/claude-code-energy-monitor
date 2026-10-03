@@ -271,8 +271,10 @@ class LimitHits(unittest.TestCase):
         drift = [self.cx(str(i), i, 'rate_limit_reached', [self.win(100.0, 100 + i)]) for i in range(1, 5)]
         self.assertEqual([h['at'] for h in limits.limit_hits(drift, [], TABLE)], [iso(1)])
         again = [self.cx('1', 1, 'rate_limit_reached', [self.win(100.0, 100)]), self.cx('2', 2, None, [self.win(10.0, 100)]),
-                 self.cx('3', 3, 'rate_limit_reached', [self.win(100.0, 100)])]
+                 self.cx('3', 3, 'rate_limit_reached', [self.win(100.0, 700)])]  # a new window instance: its reset moved
         self.assertEqual([h['at'] for h in limits.limit_hits(again, [], TABLE)], [iso(1), iso(3)])
+        same_instance = [again[0], again[1], self.cx('3', 3, 'rate_limit_reached', [self.win(100.0, 100)])]
+        self.assertEqual(len(limits.limit_hits(same_instance, [], TABLE)), 1)  # flapping around 100 % within one reset time is one hit
 
     def test_codex_episode_expires_after_a_window_without_recovery(self):
         day = [self.cx('1', 1, 'rate_limit_reached', [self.win(100.0, 100)]), self.cx('2', 1 + 24 * 60, 'rate_limit_reached', [self.win(100.0, 100 + 24 * 60)])]
@@ -348,21 +350,21 @@ class LimitHits(unittest.TestCase):
         hits = limits.limit_hits([obs('a', iso(1), 1000, harness='codex', provider='openai', quota=quota)], [], TABLE)
         self.assertEqual((len(hits), hits[0]['window']), (1, None))
 
-    def cxs(self, id, minute, session, reached):
-        r = self.cx(id, minute, reached, [self.win(100.0 if reached else 10.0, 100)])
+    def cxs(self, id, minute, session, reached, resets=100):
+        r = self.cx(id, minute, reached, [self.win(100.0 if reached else 10.0, resets)])
         r['session'] = session
         return r
 
     def test_recovery_only_counts_from_a_session_that_reported_the_episode(self):
         stale = [self.cxs('1', 1, 'A', 'rate_limit_reached'), self.cxs('2', 2, 'B', None), self.cxs('3', 3, 'A', 'rate_limit_reached')]
         self.assertEqual(len(limits.limit_hits(stale, [], TABLE)), 1)
-        own = [self.cxs('1', 1, 'A', 'rate_limit_reached'), self.cxs('2', 2, 'A', None), self.cxs('3', 3, 'A', 'rate_limit_reached')]
+        own = [self.cxs('1', 1, 'A', 'rate_limit_reached'), self.cxs('2', 2, 'A', None), self.cxs('3', 3, 'A', 'rate_limit_reached', 700)]
         self.assertEqual(len(limits.limit_hits(own, [], TABLE)), 2)
         overlap = [self.cxs('1', 1, 'A', 'rate_limit_reached'), self.cxs('2', 2, 'B', 'rate_limit_reached'), self.cxs('3', 3, 'B', None),
-                   self.cxs('4', 4, 'A', 'rate_limit_reached')]
+                   self.cxs('4', 4, 'A', 'rate_limit_reached', 700)]
         hits = limits.limit_hits(overlap, [], TABLE)
         self.assertEqual([h['at'] for h in hits], [iso(1), iso(4)])  # B's recovery ends the episode B joined, A's later report starts the next
-        late = [self.cxs('1', 1, 'A', 'rate_limit_reached'), self.cxs('2', 1 + 400, 'B', None), self.cxs('3', 2 + 400, 'A', 'rate_limit_reached')]
+        late = [self.cxs('1', 1, 'A', 'rate_limit_reached'), self.cxs('2', 1 + 400, 'B', None), self.cxs('3', 2 + 400, 'A', 'rate_limit_reached', 900)]
         self.assertEqual(len(limits.limit_hits(late, [], TABLE)), 2)  # a gap longer than the window ends it
 
     def test_window_counts_only_the_hits_own_harness(self):
@@ -395,8 +397,8 @@ class LimitHits(unittest.TestCase):
     def test_codex_window_selection(self):
         unknown = limits.limit_hits([self.cx('1', 1, 'something_new', [self.win(40.0, 100), self.win(20.0, 900, 'secondary', 10080)])], [], TABLE)[0]
         self.assertEqual((unknown['window_minutes'], unknown['window']), (None, None))
-        both = limits.limit_hits([self.cx('1', 1, 'rate_limit_reached', [self.win(100.0, 100), self.win(100.0, 900, 'secondary', 10080)])], [], TABLE)[0]
-        self.assertIsNone(both['window_minutes'])
+        both = limits.limit_hits([self.cx('1', 1, 'rate_limit_reached', [self.win(100.0, 100), self.win(100.0, 900, 'secondary', 10080)])], [], TABLE)
+        self.assertEqual([(h['window_minutes'], h['reached']) for h in both], [(300, 'rate_limit_reached'), (10080, 'rate_limit_reached')])  # one hit per full window
         one = limits.limit_hits([self.cx('1', 1, 'rate_limit_reached', [self.win(100.0, 100), self.win(20.0, 900, 'secondary', 10080)])], [], TABLE)[0]
         self.assertEqual(one['window_minutes'], 300)
 
@@ -636,13 +638,13 @@ class RoundEight(unittest.TestCase):
             self.assertEqual(run('insights', '--json'), 0)
 
     def test_omitted_type_is_neutral_unless_the_window_is_below_full(self):
-        def cx(id, minute, reached, percent):
+        def cx(id, minute, reached, percent, resets=100):
             quota = {'limit_id': 'codex', 'plan_type': 'plus', 'reached': reached,
-                     'windows': [{'slot': 'primary', 'minutes': 300, 'used_percent': percent, 'resets_at': iso(100)}]}
+                     'windows': [{'slot': 'primary', 'minutes': 300, 'used_percent': percent, 'resets_at': iso(resets)}]}
             return obs(id, iso(minute), 1000, harness='codex', provider='openai', session='c1', turn='ct', quota=quota)
         still_full = [cx('1', 1, 'rate_limit_reached', 100.0), cx('2', 2, None, 100.0), cx('3', 3, 'rate_limit_reached', 100.0)]
         self.assertEqual(len(limits.limit_hits(still_full, [], TABLE)), 1)
-        recovered = [cx('1', 1, 'rate_limit_reached', 100.0), cx('2', 2, None, 40.0), cx('3', 3, 'rate_limit_reached', 100.0)]
+        recovered = [cx('1', 1, 'rate_limit_reached', 100.0), cx('2', 2, None, 40.0), cx('3', 3, 'rate_limit_reached', 100.0, 700)]
         self.assertEqual(len(limits.limit_hits(recovered, [], TABLE)), 2)
 
     def test_synthetic_parent_still_anchors_the_assignment_of_a_subagent(self):
@@ -689,12 +691,15 @@ class RoundNine(unittest.TestCase):
         recs = [self.cx('1', 1, 'rate_limit_reached', both(100.0, 100.0)), self.cx('2', 2, None, both(100.0, 100.0)),
                 self.cx('3', 3, 'rate_limit_reached', both(100.0, 100.0))]
         hits = limits.limit_hits(recs, [], TABLE)
-        self.assertEqual(len(hits), 1)
-        self.assertEqual(insights.cost_facts(recs, TABLE, hits=hits)['facts'][-1]['values']['count'], 1)
+        self.assertEqual([(h['window_minutes'], h['reached']) for h in hits], [(300, 'rate_limit_reached'), (10080, 'rate_limit_reached')])  # one per window
+        self.assertEqual(insights.cost_facts(recs, TABLE, hits=hits)['facts'][-1]['values']['count'], 2)
+        # the weekly window recovers, the 5-hour stays full; re-reaching the same weekly instance (same reset) is the same hit
         half = [recs[0], self.cx('2', 2, None, both(100.0, 10.0)), recs[2]]
-        self.assertEqual(len(limits.limit_hits(half, [], TABLE)), 1)  # one candidate window is still full: no evidence of recovery
-        recovered = [recs[0], self.cx('2', 2, None, both(10.0, 10.0)), recs[2]]
-        self.assertEqual(len(limits.limit_hits(recovered, [], TABLE)), 2)
+        self.assertEqual(len(limits.limit_hits(half, [], TABLE)), 2)
+        # both recover and both fill again in a new window instance: two more hits
+        again = [dict(self.win(100.0, 300, 'primary'), resets_at=iso(700)), dict(self.win(100.0, 10080, 'secondary'), resets_at=iso(20000))]
+        recovered = [recs[0], self.cx('2', 2, None, both(10.0, 10.0)), self.cx('3', 3, 'rate_limit_reached', again)]
+        self.assertEqual(len(limits.limit_hits(recovered, [], TABLE)), 4)
 
     def test_credit_exhaustion_has_no_duration_expiry(self):
         recs = [self.cx('1', 1, 'workspace_owner_credits_depleted', []), self.cx('2', 1 + 301, 'workspace_owner_credits_depleted', [])]
@@ -759,9 +764,9 @@ class RoundEleven(unittest.TestCase):
         return h
 
     @staticmethod
-    def snap(percent, reached=None):
+    def snap(percent, reached=None, hours=3):
         from test_why_codex import _limits, _window
-        return _limits(primary=_window(percent, 300, int((T0 + timedelta(hours=3)).timestamp())), **({'rate_limit_reached_type': reached} if reached else {}))
+        return _limits(primary=_window(percent, 300, int((T0 + timedelta(hours=hours)).timestamp())), **({'rate_limit_reached_type': reached} if reached else {}))
 
     @staticmethod
     def calls(*specs):
@@ -798,7 +803,7 @@ class RoundEleven(unittest.TestCase):
     def test_recovery_with_unchanged_counters_between_two_exhaustions_is_two_hits(self):
         from test_why_codex import _quota_call
         h = self.history(self.calls((1, self.snap(60.0)), (2, self.snap(100.0, 'rate_limit_reached')), (3, self.snap(10.0)),
-                                    (4, self.snap(100.0, 'rate_limit_reached'))))
+                                    (4, self.snap(100.0, 'rate_limit_reached', hours=9))))
         self.assertEqual(len(h.limit_events()), 3)
         self.assertEqual(len(self.hits(h)), 2)
 
@@ -924,6 +929,47 @@ class RoundTwelve(RoundEleven):
         recs = [cx('1', 1, 'rate_limit_reached', 400), cx('2', 302, None, 700)]
         hits = limits.limit_hits(recs, [], TABLE)
         self.assertEqual([(h['at'], h['reached']) for h in hits], [(iso(1), 'rate_limit_reached'), (iso(302), 'window_full')])
+
+
+class OneStatePerSeries(RoundEleven):
+    test_unchanged_counters_with_a_reached_snapshot_are_one_hit = None  # inherited helpers only
+    test_quota_only_event_with_no_info_is_one_hit = None
+    test_recovery_with_unchanged_counters_between_two_exhaustions_is_two_hits = None
+    test_no_transition_adds_no_records = None
+    test_statusline_cache_ignores_codex_quota_events = None
+    test_resetless_claude_retry_after_the_known_reset_is_a_new_hit = None
+
+    @staticmethod
+    def cx(id, minute, reached, windows, limit_id='codex', session='c1'):
+        quota = {'limit_id': limit_id, 'plan_type': 'plus', 'reached': reached, 'windows': windows}
+        return obs(id, iso(minute), 1000, harness='codex', provider='openai', session=session, turn='ct', quota=quota)
+
+    @staticmethod
+    def w(percent, minutes=300, resets=500):
+        return {'slot': 'primary' if minutes == 300 else 'secondary', 'minutes': minutes, 'used_percent': percent, 'resets_at': iso(resets)}
+
+    def test_collector_keeps_a_stale_full_window_alive_so_a_second_instance_is_a_second_hit(self):
+        h = self.history(self.calls((1, self.snap(100.0, hours=3)), (302, self.snap(100.0, hours=9))))
+        self.assertEqual(len(h.limit_events()), 1)  # unchanged state, but the last full evidence is older than the window: kept alive
+        self.assertEqual(len(self.hits(h)), 2)
+        h2 = self.history(self.calls((1, self.snap(100.0)), (100, self.snap(100.0))))
+        self.assertEqual(len(h2.limit_events()), 0)  # still inside the window: nothing to add
+
+    def test_a_recovery_by_one_session_while_another_reported_reached(self):
+        recs = [self.cx('1', 1, None, [self.w(100.0)], session='A'), self.cx('2', 2, 'rate_limit_reached', [self.w(100.0)], session='B'),
+                self.cx('3', 3, None, [self.w(40.0, resets=500)], session='A'), self.cx('4', 4, 'rate_limit_reached', [self.w(100.0, resets=900)], session='A')]
+        hits = limits.limit_hits(recs, [], TABLE)
+        self.assertEqual([(h['at'], h['reached']) for h in hits], [(iso(1), 'rate_limit_reached'), (iso(4), 'rate_limit_reached')])
+
+    def test_a_named_five_hour_window_never_suppresses_a_weekly_crossing(self):
+        recs = [self.cx('1', 1, 'rate_limit_reached', [self.w(100.0), self.w(50.0, 10080, 900)]),
+                self.cx('2', 2, 'rate_limit_reached', [self.w(100.0), self.w(100.0, 10080, 900)])]
+        hits = limits.limit_hits(recs, [], TABLE)
+        self.assertEqual([(h['window_minutes'], h['reached']) for h in hits], [(300, 'rate_limit_reached'), (10080, 'window_full')])
+
+    def test_two_limit_ids_with_identical_full_states_both_hit(self):
+        recs = [self.cx('1', 1, None, [self.w(100.0)], limit_id='codex'), self.cx('2', 1, None, [self.w(100.0)], limit_id='codex_bengalfox')]
+        self.assertEqual(len(limits.limit_hits(recs, [], TABLE)), 2)
 
 
 class Template(unittest.TestCase):

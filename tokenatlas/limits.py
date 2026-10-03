@@ -113,93 +113,71 @@ def limit_hits(records, events, table):
             claude[key] = hit
         recent[key[:2]] = (hit, at)
         found.append(hit)
-    wdone = {}  # window series -> reset times of the window instances already reported (a reset time names one window instance)
-    wopen = {}  # (harness, limit id, plan, window minutes) -> the open window-full episode: last time at 100 %, sessions that reported it, its hit
-    open_ = {}  # (harness, limit id) -> the open episode: reached type, window minutes, last reached time, sessions that reported it
+    # Codex: one open episode per series, updated independently by every observation that carries evidence for it. A series is a time window
+    # (harness, limit id, plan, window minutes) or a named type that names no window (e.g. credit exhaustion: harness, limit id, plan, type).
+    # An episode is one hit, at its earliest observation. A named reached type that identifies full windows only upgrades the label of those
+    # windows' episodes; it never suppresses or hides another series.
+    ser = {}   # series key -> open episode {hit, sessions that reported it, last full/on time, latest reset time}
+    done = {}  # window series -> reset times of the window instances already reported (a reset time names one window instance)
     series = sorted([*records, *(e for e in events if (e.get('quota') or {}).get('status') == 'event')], key=lambda r: r['ts'])  # usage quotas and quota events, in time order
     for record in series:
         quota = record.get('quota') or {}
-        reached = quota.get('reached')
         if quota.get('status') == 'rejected' or not quota:
-            continue  # a record without quota says nothing about a limit and leaves the consecutive state alone
-        # Depleted credits are not a full time window: no window, no ranking (the raw type names it).
-        window = None if reached and 'credits' in reached else _hit_window(quota)
-        account = (record['harness'], quota.get('limit_id'))  # consecutive per harness and limit, never across them
-        at, minutes = prompts._t(record['ts']), window and window.get('minutes')
-        episode = open_.get(account)
-        # Named episodes expire first, so an expired one never suppresses a later full-window hit (see the expiry note below).
-        span = episode and (episode['minutes'] or (max(episode['cands']) if episode['cands'] else None))
-        if episode and span and at - episode['last'] > timedelta(minutes=span):
-            episode = open_[account] = None
-        # A time window that crosses from below 100 % to 100 % or more is a hit of its own: Codex does not name a reached type when a window fills.
-        # It lasts while the window stays full; a lower reading proves recovery only from a session that reported it full (a stale one from
-        # another session is no evidence), or the episode ends after a gap longer than the window. Simultaneous with a reached-type episode
-        # for the same window it is one hit.
-        for w in _windows(quota):
-            m, wkey = w['minutes'], (record['harness'], quota.get('limit_id'), quota.get('plan_type'), w['minutes'])
-            we = wopen.get(wkey)
-            if we and at - we['last'] > timedelta(minutes=m):
-                we = wopen[wkey] = None
+            continue  # a record without quota says nothing about a limit and leaves every series alone
+        reached, session, at = quota.get('reached'), record['session'], prompts._t(record['ts'])
+        scope = (record['harness'], quota.get('limit_id'), quota.get('plan_type'))  # never across harnesses, limits or plans
+        full = []  # window series that are full in this observation
+        windows = _windows(quota)
+        opened = set()  # window series whose episode this observation opened
+        named = scope + ('named', reached) if reached else None
+        named_ep = ser.get(named) if named else None  # a named episode already open for this type: its windows join it, no second hit
+        for w in windows:
+            m, key, reset = w['minutes'], scope + ('window', w['minutes']), _iso(w['resets_at'])
+            ep = ser.get(key)
+            # Closes on a gap longer than the window, or on a new reset instance (the reset moved past the old one by more than half the window).
+            if ep and (at - ep['last'] > timedelta(minutes=m)
+                       or (reset and ep['reset'] and at >= ep['reset'] and reset - ep['reset'] > timedelta(minutes=m / 2))):
+                ep = ser[key] = None
             if w['used_percent'] >= 100:
-                if we:
-                    we['sessions'].add(record['session'])
-                    we['last'] = at
+                full.append(key)
+                if ep:
+                    ep['sessions'].add(session)
+                    ep['last'], ep['reset'] = at, reset or ep['reset']
                     continue
-                ep = open_.get(account)
-                matched = bool(reached) or (ep and not ep['credits'] and (ep['minutes'] == m or m in ep['cands']))  # a named type owns the hit
                 hit = None
-                reset = _iso(w['resets_at'])
                 # Readings of one window instance can flap around 100 % (several sessions, accounts or rolling estimates): the same reset time is the same hit.
-                seen_reset = reset is not None and any(abs(reset - r) <= RETRY_GAP for r in wdone.get(wkey, ()))
-                if not matched and not seen_reset:
+                if not named_ep and not (reset is not None and any(abs(reset - r) <= RETRY_GAP for r in done.get(key, ()))):
                     hit = dict(harness=record['harness'], at=record['ts'], reached='window_full', window_minutes=m, resets_at=w['resets_at'],
                                retries=1, rolling=True, _row=record, **_scope(record))
                     found.append(hit)
                     if reset is not None:
-                        wdone.setdefault(wkey, []).append(reset)
-                wopen[wkey] = dict(last=at, sessions={record['session']}, hit=hit)
-            elif we and record['session'] in we['sessions']:
-                wopen[wkey] = None
-        episode = open_.get(account)
-        # An episode is one hit. It ends on recovery reported by a session that itself reported the reached state in it (a stale null from another
-        # session proves nothing), on a gap longer than its window, or when a different window is named. A reset time only slides, so its
-        # movement alone never starts a new hit; overlapping per-session episodes are one hit, at the earliest observation.
-        # Expiry by duration only applies when a duration is known (a window, or the candidate windows of an ambiguous episode); credit exhaustion
-        # has none and ends only on recovery evidence.
-        span = episode and (episode['minutes'] or (max(episode['cands']) if episode['cands'] else None))
-        if episode and span and at - episode['last'] > timedelta(minutes=span):
-            episode = open_[account] = None
-        if not reached:
-            # Recovery needs positive evidence from a session that reported the episode: the episode's own window (same duration) is now below 100 %.
-            # An omitted type with the window still full is neutral. An episode with no window (credits) has nothing to contradict, so the omission counts.
-            # With both windows full the episode is ambiguous: every candidate window must now be below 100 %.
-            seen = {w['minutes']: w['used_percent'] for w in _windows(quota)}
-            # A time-window episode needs candidates to contradict; credit exhaustion has none, so the omission itself is the evidence.
-            below = bool(episode) and (episode['credits'] or bool(episode['cands'])) and all(m in seen and seen[m] < 100 for m in episode['cands'])
-            if episode and record['session'] in episode['sessions'] and below:
-                open_[account] = None
-            continue
-        if episode and episode['reached'] == reached and (not minutes or not episode['minutes'] or minutes == episode['minutes']):
-            episode['sessions'].add(record['session'])
-            episode['last'] = at
-            episode['minutes'] = episode['minutes'] or minutes
-            if not episode['credits']:  # a later observation may supply the window the episode started without
-                episode['cands'] |= {w['minutes'] for w in _windows(quota) if w['used_percent'] >= 100}
-            continue
-        credits = 'credits' in reached
-        cands = set() if credits else {w['minutes'] for w in _windows(quota) if w['used_percent'] >= 100}
-        upgraded = None  # a window-full hit already open for this window becomes this reached-type hit: one hit, not two
-        for m in ({minutes} if minutes else set()) | cands:
-            we = wopen.get((record['harness'], quota.get('limit_id'), quota.get('plan_type'), m))
-            if we and we['hit'] is not None and we['hit']['reached'] == 'window_full':
-                upgraded = we['hit']
-                break
-        if upgraded is not None:
-            upgraded['reached'] = reached
-        else:
-            found.append(dict(harness=record['harness'], at=record['ts'], reached=reached, window_minutes=minutes or None,
-                              resets_at=window.get('resets_at') if window else None, retries=1, rolling=True, _row=record, **_scope(record)))
-        open_[account] = dict(reached=reached, minutes=minutes or None, cands=cands, credits=credits, last=at, sessions={record['session']})
+                        done.setdefault(key, []).append(reset)
+                ser[key] = dict(hit=hit, sessions={session}, last=at, reset=reset)
+                opened.add(key)
+            elif ep and session in ep['sessions']:
+                ser[key] = None  # recovery: a reading below 100 % from a session that reported the window full
+        # A named type that names no full window (credit exhaustion, an unknown type with no full window) is a series of its own; one that does
+        # attaches to the full windows' episodes. Another type, or none, from a session that reported it is recovery.
+        for key, ep in list(ser.items()):
+            # (a non-credit type is judged by its windows: recovery needs a reading with windows where none is full)
+            if ep and key[:3] == scope and key[3] == 'named' and key[4] != reached and session in ep['sessions'] and ('credits' in key[4] or (windows and not full)):
+                ser[key] = None
+        if named_ep:
+            named_ep['sessions'].add(session)
+            named_ep['last'] = at
+        if reached and not named_ep and (not full or 'credits' in reached):
+            hit = dict(harness=record['harness'], at=record['ts'], reached=reached, window_minutes=None, resets_at=None, retries=1, rolling=True,
+                       _row=record, **_scope(record))
+            found.append(hit)
+            ser[named] = dict(hit=hit, sessions={session}, last=at, reset=None)
+        elif reached:
+            # The type labels the windows it was reported with. A window that fills later, while the type already labels another window's open
+            # episode, is its own crossing and keeps the neutral label.
+            labelled = any(ser[k] and ser[k]['hit'] and ser[k]['hit']['reached'] == reached and k not in opened for k in ser if k[:3] == scope and k[3] == 'window')
+            for key in full:
+                hit = ser[key]['hit']
+                if hit is not None and hit['reached'] == 'window_full' and not (labelled and key in opened):
+                    hit['reached'] = reached
     if not found:
         return []  # the usual case: skip the turn assignment over the whole history
     found.sort(key=lambda h: h['at'])
