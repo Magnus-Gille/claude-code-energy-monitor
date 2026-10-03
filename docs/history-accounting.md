@@ -42,6 +42,17 @@ Before issue #12 prices such records, it must implement versioned iteration
 normalization and model/rate attribution, with independent billing evidence
 where an exact charge is claimed.
 
+## Codex quota (issue #89)
+
+Codex `token_count` events carry the account's `rate_limits`. A Codex observation keeps a compact `quota`
+object from the event that produced it (null when absent or unusable): `limit_id`, `plan_type`, `reached`
+(the reached-limit type) and `windows`, a list of `{slot: primary|secondary, minutes, used_percent, resets_at}`
+(`resets_at` is UTC ISO-8601 or null). `used_percent` may exceed 100. The credit balance, limit name and other
+account state are deliberately not stored. The object is stored as JSON through the strings dictionary in an
+additive `quota` column (schema stays 2), merges as a whole object (the newer observation wins, else the other),
+travels in snapshots, and the Codex harness revision 3 re-reads existing Codex files once. Other harnesses
+have no quota. No report or total uses it yet.
+
 ## Storage decision
 
 For the single-machine seminar MVP, SQLite from the Python standard library

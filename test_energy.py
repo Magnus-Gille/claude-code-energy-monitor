@@ -2,6 +2,7 @@
 import json
 import re
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from tokenatlas import energy, insights
@@ -173,7 +174,8 @@ class Fact(unittest.TestCase):
 class ReportPage(unittest.TestCase):
     def report(self, redact=False):
         rows = dataset() + [ob('x', model='internal-secret-model', provider='openrouter', fresh=1000)]
-        return build_report(rows, {}, redact=redact, table=TABLE)
+        # A fixed 'now' keeps the fixture (2026-09-03) inside the 30-day insight window whatever today's date is.
+        return build_report(rows, {}, redact=redact, table=TABLE, now=datetime(2026, 9, 10, tzinfo=timezone.utc))
 
     def test_payload_carries_constants_and_a_multiplier_per_claude_model(self):
         e = self.report()['energy']
