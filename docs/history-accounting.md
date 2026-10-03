@@ -60,8 +60,11 @@ with an unknown model and a `quota` of `{reached: <rateLimitType>, status: "reje
 used_percent: 100, resets_at}]}` (no window for an unknown type). `History.records()` leaves such limit events out by default
 (`include_limit_events=True` returns them; snapshot import uses that), so they are never a request, cost, energy, turn or session count;
 `History.limit_events()` returns them. `limits.limit_hits` turns them (deduplicated per harness, limit type and reset time) and Codex
-observations with a reached-limit type into hits, and ranks the turns in the window `[resets_at - window, hit]` by list-price cost for the same
-provider. The shares are of what tokenatlas saw in the window, never of the limit: usage elsewhere counts toward the limit but is not in the logs.
+observations with a reached-limit type into hits, and ranks the turns in the window by list-price cost for the same harness and provider.
+The window differs by harness. Claude's 5-hour limit is a session block and its weekly limit resets at a fixed time, so a Claude hit's window
+is reset-anchored: `[resets_at - window, hit]`. Codex windows are rolling and their reset time only slides, so a Codex hit's window is the
+trailing one: `[hit - window, hit]`. A hit with no known window length or no reset time (Claude) has no ranking. Reset times are re-parsed into
+canonical UTC text at use; anything unparseable is dropped. The shares are of what tokenatlas saw in the window, never of the limit: usage elsewhere counts toward the limit but is not in the logs.
 
 ## Storage decision
 

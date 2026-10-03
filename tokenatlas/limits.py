@@ -3,7 +3,7 @@
 A hit is a fact the logs state (a rejected Claude request, or a Codex observation whose rate_limits name a reached limit). What filled the
 window is only what these logs contain: usage on claude.ai, ChatGPT or other machines counts toward the same limit but is not seen. Costs are
 list prices in USD; a request without a complete USD price is counted as unpriced, never guessed."""
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from tokenatlas import prompts, why
 
@@ -26,6 +26,15 @@ def _iso(value):
         return None
 
 
+def _reset(value):
+    """A reset time as canonical UTC ISO text, or None: stored or imported text is never exported as it is."""
+    at = _iso(value)
+    try:
+        return at.astimezone(timezone.utc).isoformat() if at is not None and at.tzinfo is not None else None
+    except (ValueError, OverflowError):
+        return None
+
+
 def _windows(quota):
     """The quota's windows, re-validated at the point of use (stored or imported data may predate the validators): a dict with an integer duration of
     1..527040 minutes and a finite used_percent; anything else is skipped."""
@@ -38,7 +47,7 @@ def _windows(quota):
             continue
         if isinstance(used, bool) or not isinstance(used, (int, float)) or used != used or used in (float('inf'), float('-inf')):
             continue
-        out.append(w)
+        out.append(dict(w, resets_at=_reset(w.get('resets_at'))))
     return out
 
 
@@ -75,7 +84,7 @@ def limit_hits(records, events, table):
     for event in events:
         quota = event.get('quota') or {}
         window = _window(quota)
-        resets = (window.get('resets_at') if window else None) or quota.get('resets_at')
+        resets = (window.get('resets_at') if window else None) or _reset(quota.get('resets_at'))
         at = prompts._t(event['ts'])
         key = (event['harness'], quota.get('reached'), resets)
         if resets is None:
@@ -106,12 +115,17 @@ def limit_hits(records, events, table):
         # An episode is one hit. It ends on recovery reported by a session that itself reported the reached state in it (a stale null from another
         # session proves nothing), on a gap longer than its window, or when a different window is named. A reset time only slides, so its
         # movement alone never starts a new hit; overlapping per-session episodes are one hit, at the earliest observation.
-        if episode and at - episode['last'] > timedelta(minutes=episode['minutes'] or 300):
+        # Expiry by duration only applies when a duration is known (a window, or the candidate windows of an ambiguous episode); credit exhaustion
+        # has none and ends only on recovery evidence.
+        span = episode and (episode['minutes'] or (max(episode['cands']) if episode['cands'] else None))
+        if episode and span and at - episode['last'] > timedelta(minutes=span):
             episode = open_[account] = None
         if not reached:
             # Recovery needs positive evidence from a session that reported the episode: the episode's own window (same duration) is now below 100 %.
             # An omitted type with the window still full is neutral. An episode with no window (credits) has nothing to contradict, so the omission counts.
-            below = any(w['minutes'] == episode['minutes'] and w['used_percent'] < 100 for w in _windows(quota)) if episode and episode['minutes'] else True
+            # With both windows full the episode is ambiguous: every candidate window must now be below 100 %.
+            seen = {w['minutes']: w['used_percent'] for w in _windows(quota)}
+            below = all(m in seen and seen[m] < 100 for m in episode['cands']) if episode else False
             if episode and record['session'] in episode['sessions'] and below:
                 open_[account] = None
             continue
@@ -122,7 +136,8 @@ def limit_hits(records, events, table):
             continue
         found.append(dict(harness=record['harness'], at=record['ts'], reached=reached, window_minutes=minutes or None,
                           resets_at=window.get('resets_at') if window else None, retries=1, rolling=True, _row=record, **_scope(record)))
-        open_[account] = dict(reached=reached, minutes=minutes or None, last=at, sessions={record['session']})
+        cands = set() if window is None and reached and 'credits' in reached else {w['minutes'] for w in _windows(quota) if w['used_percent'] >= 100}
+        open_[account] = dict(reached=reached, minutes=minutes or None, cands=cands, last=at, sessions={record['session']})
     if not found:
         return []  # the usual case: skip the turn assignment over the whole history
     found.sort(key=lambda h: h['at'])

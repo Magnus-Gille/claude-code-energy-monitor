@@ -657,6 +657,52 @@ class RoundEight(unittest.TestCase):
         self.assertEqual(len(set(payload['columns']['prompt'])), 2)
 
 
+class RoundNine(unittest.TestCase):
+    @staticmethod
+    def cx(id, minute, reached, windows, limit_id='codex'):
+        quota = {'limit_id': limit_id, 'plan_type': 'plus', 'reached': reached, 'windows': windows}
+        return obs(id, iso(minute), 1000, harness='codex', provider='openai', session='c1', turn='ct', quota=quota)
+
+    @staticmethod
+    def win(percent, minutes, slot):
+        return {'slot': slot, 'minutes': minutes, 'used_percent': percent, 'resets_at': iso(100)}
+
+    def test_imported_reset_text_never_reaches_a_shared_report(self):
+        secret = 'PRIVATE-PROMPT-OR-SESSION-ID'
+        codex = self.cx('c', 5, 'rate_limit_reached', [dict(self.win(100.0, 300, 'primary'), resets_at=secret)])
+        claude_quota = dict(five_hour(120), resets_at=secret)
+        claude_quota['windows'] = [dict(claude_quota['windows'][0], resets_at=secret)]
+        event = obs('r', iso(30), quota=claude_quota)
+        top_level = obs('r2', iso(400), quota=dict(claude_quota, windows=[], reached='mystery'))
+        hits = limits.limit_hits([codex], [event, top_level], TABLE)
+        self.assertEqual(len(hits), 3)
+        self.assertTrue(all(h['resets_at'] is None for h in hits))
+        shared = report.build_report([codex], {}, redact=True, limit_hits=hits, now=datetime(2026, 9, 5, tzinfo=UTC))
+        self.assertNotIn(secret, json.dumps(shared))
+        naive = self.cx('n', 5, 'rate_limit_reached', [dict(self.win(100.0, 300, 'primary'), resets_at='2026-09-03T12:00:00')])
+        self.assertIsNone(limits.limit_hits([naive], [], TABLE)[0]['resets_at'])
+        good = self.cx('g', 5, 'rate_limit_reached', [dict(self.win(100.0, 300, 'primary'), resets_at='2026-09-03T14:00:00Z')])
+        self.assertEqual(limits.limit_hits([good], [], TABLE)[0]['resets_at'], '2026-09-03T14:00:00+00:00')
+
+    def test_both_windows_full_stay_one_episode_until_both_are_below_full(self):
+        both = lambda a, b: [self.win(a, 300, 'primary'), self.win(b, 10080, 'secondary')]
+        recs = [self.cx('1', 1, 'rate_limit_reached', both(100.0, 100.0)), self.cx('2', 2, None, both(100.0, 100.0)),
+                self.cx('3', 3, 'rate_limit_reached', both(100.0, 100.0))]
+        hits = limits.limit_hits(recs, [], TABLE)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(insights.cost_facts(recs, TABLE, hits=hits)['facts'][-1]['values']['count'], 1)
+        half = [recs[0], self.cx('2', 2, None, both(100.0, 10.0)), recs[2]]
+        self.assertEqual(len(limits.limit_hits(half, [], TABLE)), 1)  # one candidate window is still full: no evidence of recovery
+        recovered = [recs[0], self.cx('2', 2, None, both(10.0, 10.0)), recs[2]]
+        self.assertEqual(len(limits.limit_hits(recovered, [], TABLE)), 2)
+
+    def test_credit_exhaustion_has_no_duration_expiry(self):
+        recs = [self.cx('1', 1, 'workspace_owner_credits_depleted', []), self.cx('2', 1 + 301, 'workspace_owner_credits_depleted', [])]
+        self.assertEqual(len(limits.limit_hits(recs, [], TABLE)), 1)
+        recovered = [recs[0], self.cx('r', 100, None, []), recs[1]]
+        self.assertEqual(len(limits.limit_hits(recovered, [], TABLE)), 2)
+
+
 class Template(unittest.TestCase):
     def test_turn_row_variables_are_declared(self):
         # The script is strict: assigning to an undeclared name throws on the first attributed turn and the report never initializes.
