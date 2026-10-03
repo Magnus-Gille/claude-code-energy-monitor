@@ -87,19 +87,27 @@ def limit_hits(records, events, table):
         resets = (window.get('resets_at') if window else None) or _reset(quota.get('resets_at'))
         at = prompts._t(event['ts'])
         key = (event['harness'], quota.get('reached'), resets)
-        if resets is None:
+        # Retries are one hit: the same reset time, or adjacent (within RETRY_GAP of the episode's previous event) and not contradicting a known
+        # reset time, whether or not this event carries one.
+        hit = claude.get(key) if resets is not None else None
+        if hit is None:
             known = recent.get(key[:2])
-            if known and at - known[1] <= RETRY_GAP:
-                known[0]['retries'] += 1
-                recent[key[:2]] = (known[0], at)
-                continue
-        elif key in claude:
-            claude[key]['retries'] += 1
-            continue
-        claude[key] = hit = dict(harness=event['harness'], at=event['ts'], reached=quota.get('reached'), window_minutes=window and window.get('minutes'),
-                                 resets_at=resets, retries=1, _row=event, **_scope(event))
-        if resets is None:
+            if known and at - known[1] <= RETRY_GAP and (resets is None or known[0]['resets_at'] is None or known[0]['resets_at'] == resets):
+                hit = known[0]
+        if hit is not None:
+            hit['retries'] += 1
+            if hit['resets_at'] is None and resets is not None:  # keep the known reset
+                hit['resets_at'] = resets
+                claude[key] = hit
+            if hit['window_minutes'] is None and window:
+                hit['window_minutes'] = window.get('minutes')
             recent[key[:2]] = (hit, at)
+            continue
+        hit = dict(harness=event['harness'], at=event['ts'], reached=quota.get('reached'), window_minutes=window and window.get('minutes'),
+                   resets_at=resets, retries=1, _row=event, **_scope(event))
+        if resets is not None:
+            claude[key] = hit
+        recent[key[:2]] = (hit, at)
         found.append(hit)
     open_ = {}  # (harness, limit id) -> the open episode: reached type, window minutes, last reached time, sessions that reported it
     for record in records:
@@ -125,7 +133,8 @@ def limit_hits(records, events, table):
             # An omitted type with the window still full is neutral. An episode with no window (credits) has nothing to contradict, so the omission counts.
             # With both windows full the episode is ambiguous: every candidate window must now be below 100 %.
             seen = {w['minutes']: w['used_percent'] for w in _windows(quota)}
-            below = all(m in seen and seen[m] < 100 for m in episode['cands']) if episode else False
+            # A time-window episode needs candidates to contradict; credit exhaustion has none, so the omission itself is the evidence.
+            below = bool(episode) and (episode['credits'] or bool(episode['cands'])) and all(m in seen and seen[m] < 100 for m in episode['cands'])
             if episode and record['session'] in episode['sessions'] and below:
                 open_[account] = None
             continue
@@ -133,11 +142,14 @@ def limit_hits(records, events, table):
             episode['sessions'].add(record['session'])
             episode['last'] = at
             episode['minutes'] = episode['minutes'] or minutes
+            if not episode['credits']:  # a later observation may supply the window the episode started without
+                episode['cands'] |= {w['minutes'] for w in _windows(quota) if w['used_percent'] >= 100}
             continue
         found.append(dict(harness=record['harness'], at=record['ts'], reached=reached, window_minutes=minutes or None,
                           resets_at=window.get('resets_at') if window else None, retries=1, rolling=True, _row=record, **_scope(record)))
-        cands = set() if window is None and reached and 'credits' in reached else {w['minutes'] for w in _windows(quota) if w['used_percent'] >= 100}
-        open_[account] = dict(reached=reached, minutes=minutes or None, cands=cands, last=at, sessions={record['session']})
+        credits = 'credits' in reached
+        cands = set() if credits else {w['minutes'] for w in _windows(quota) if w['used_percent'] >= 100}
+        open_[account] = dict(reached=reached, minutes=minutes or None, cands=cands, credits=credits, last=at, sessions={record['session']})
     if not found:
         return []  # the usual case: skip the turn assignment over the whole history
     found.sort(key=lambda h: h['at'])

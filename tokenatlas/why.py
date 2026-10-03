@@ -455,14 +455,15 @@ def _quota_window(slot: str, value: object) -> dict | None:
 
 def _codex_quota(value: object) -> dict | None:
     """Compact quota snapshot from a token_count rate_limits object: limit windows and plan only. The credit balance, limit name
-    and other account state are never kept. None when there is neither a valid window nor a reached-limit type."""
+    and other account state are never kept. None when there is neither a valid window, a reached-limit type, a limit id nor a plan."""
     limits = _mapping(value)
     windows = [w for slot in ("primary", "secondary") if (w := _quota_window(slot, limits.get(slot))) is not None]
     reached = _meta_text(limits.get("rate_limit_reached_type"), limit=64)
-    if not windows and reached is None:
+    limit_id, plan_type = _meta_text(limits.get("limit_id"), limit=64), _meta_text(limits.get("plan_type"), limit=64)
+    if not windows and reached is None and limit_id is None and plan_type is None:
         return None
-    return {"limit_id": _meta_text(limits.get("limit_id"), limit=64), "plan_type": _meta_text(limits.get("plan_type"), limit=64),
-            "reached": reached, "windows": windows}
+    # A present snapshot with no window and no reached type is kept (empty windows): it is the evidence that a limit has recovered.
+    return {"limit_id": limit_id, "plan_type": plan_type, "reached": reached, "windows": windows}
 
 
 _CLAUDE_LIMIT_MINUTES = {"five_hour": 300, "seven_day": 10080}

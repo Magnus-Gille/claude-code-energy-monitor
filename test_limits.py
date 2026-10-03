@@ -703,6 +703,49 @@ class RoundNine(unittest.TestCase):
         self.assertEqual(len(limits.limit_hits(recovered, [], TABLE)), 2)
 
 
+class RoundTen(unittest.TestCase):
+    def test_collector_keeps_the_recovery_snapshot_so_exhaustion_recovery_exhaustion_is_two_hits(self):
+        from test_why_codex import _limits, _meta, _quota_call, _write_rollout
+        depleted = _limits(rate_limit_reached_type='workspace_owner_credits_depleted')
+        rows = [_meta('c1'), _quota_call(stamp(1), 1, depleted), _quota_call(stamp(2), 2, _limits()), _quota_call(stamp(3), 3, depleted)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_rollout(root / 'codex' / 'rollout-c.jsonl', rows)
+            with History(root / 'h.sqlite3') as h:
+                h.refresh('codex', root / 'codex')
+                records = h.records()
+                self.assertEqual([r['quota']['reached'] for r in records], ['workspace_owner_credits_depleted', None, 'workspace_owner_credits_depleted'])
+                self.assertEqual(records[1]['quota']['windows'], [])
+                self.assertEqual(len(limits.limit_hits(records, [], TABLE)), 2)
+
+    def test_clean_quota_keeps_an_empty_snapshot_with_a_plan_or_limit(self):
+        self.assertEqual(_clean_quota({'limit_id': 'codex', 'plan_type': None, 'reached': None, 'windows': []})['windows'], [])
+        self.assertIsNone(_clean_quota({'limit_id': None, 'plan_type': None, 'reached': None, 'windows': []}))
+
+    @staticmethod
+    def cx(id, minute, reached, windows):
+        quota = {'limit_id': 'codex', 'plan_type': 'plus', 'reached': reached, 'windows': windows}
+        return obs(id, iso(minute), 1000, harness='codex', provider='openai', session='c1', turn='ct', quota=quota)
+
+    def test_episode_started_without_a_window_learns_it_later(self):
+        full = [{'slot': 'primary', 'minutes': 300, 'used_percent': 100.0, 'resets_at': iso(100)}]
+        recs = [self.cx('1', 1, 'rate_limit_reached', []), self.cx('2', 2, 'rate_limit_reached', full), self.cx('3', 3, None, full),
+                self.cx('4', 4, 'rate_limit_reached', full)]
+        self.assertEqual(len(limits.limit_hits(recs, [], TABLE)), 1)
+        # with no window ever supplied, an omitted type proves nothing for a time-window episode
+        none = [self.cx('1', 1, 'rate_limit_reached', []), self.cx('2', 2, None, []), self.cx('3', 3, 'rate_limit_reached', [])]
+        self.assertEqual(len(limits.limit_hits(none, [], TABLE)), 1)
+
+    def test_claude_retries_with_and_without_a_reset_are_one_hit(self):
+        with_reset, without = five_hour(120), dict(five_hour(120), windows=[], resets_at=None)
+        for order in ((with_reset, without, with_reset), (without, with_reset, with_reset), (without, without, with_reset)):
+            events = [obs(f'r{i}', iso(30 + i), quota=q) for i, q in enumerate(order)]
+            hits = limits.limit_hits([], events, TABLE)
+            self.assertEqual((len(hits), hits[0]['retries'], hits[0]['resets_at']), (1, 3, iso(120)), order)
+        far = [obs('a', iso(30), quota=with_reset), obs('b', iso(30 + 60 * 24 * 2), quota=without)]
+        self.assertEqual(len(limits.limit_hits([], far, TABLE)), 2)
+
+
 class Template(unittest.TestCase):
     def test_turn_row_variables_are_declared(self):
         # The script is strict: assigning to an undeclared name throws on the first attributed turn and the report never initializes.

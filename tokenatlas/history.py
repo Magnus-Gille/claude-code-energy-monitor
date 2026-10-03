@@ -23,7 +23,7 @@ from tokenatlas import why
 OBSERVATION_VERSION = 1  # the 'v' field inside observation dicts
 SCHEMA_VERSION = 2  # PRAGMA user_version of the SQLite layout
 COLLECTOR_VERSION = 5
-HARNESS_REVISION = {'pi': 2, 'codex': 4, 'claude': 3, 'opencode': 2}  # bump to force a re-read of one harness's files only (appended to its fingerprint)
+HARNESS_REVISION = {'pi': 2, 'codex': 5, 'claude': 3, 'opencode': 2}  # bump to force a re-read of one harness's files only (appended to its fingerprint)
 FIELDS = ('fresh_input', 'cache_read', 'cache_write', 'output')
 ALL_FIELDS = FIELDS + ('reasoning',)
 
@@ -102,10 +102,10 @@ def _clean_quota(value):
     text = why._meta_text
     reached = text(value.get('reached'), limit=64)
     rejected = value.get('status') == 'rejected'
-    if not windows and reached is None and not rejected:
+    limit_id, plan_type = text(value.get('limit_id'), limit=64), text(value.get('plan_type'), limit=64)
+    if not windows and reached is None and not rejected and limit_id is None and plan_type is None:
         return None
-    result = {'limit_id': text(value.get('limit_id'), limit=64), 'plan_type': text(value.get('plan_type'), limit=64),
-              'reached': reached, 'windows': windows}
+    result = {'limit_id': limit_id, 'plan_type': plan_type, 'reached': reached, 'windows': windows}
     if rejected:
         result['status'] = 'rejected'
         resets = value.get('resets_at')
