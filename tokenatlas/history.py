@@ -244,10 +244,9 @@ def merge_observations(a, b, authoritative_turns=False):
     # Whole object, never a field merge. A quota comes from the token_count event that defines the observation, so copies of one observation
     # carry the same snapshot or none (written before Codex revision 3); keeping any present one is enough.
     result['quota'] = winner.get('quota') or other.get('quota')
-    if authoritative_turns and b.get('session') == result['session']:
-        result['flags'] = b.get('flags')  # a re-read of the owning copy restates which request was stopped; an old flag must not linger
-    else:
-        result['flags'] = sorted(set(a.get('flags') or ()) | set(b.get('flags') or ())) or None  # independent copies: union
+    # Union, also on a re-read: copies of a transcript must not erase a recorded stop. (The flagged request cannot change on a re-read, since
+    # a stopped request gets no further usage rows after the marker.)
+    result['flags'] = sorted(set(a.get('flags') or ()) | set(b.get('flags') or ())) or None
     flags = [x.get('output_final') for x in (a, b)]
     output_final = True if True in flags else False if False in flags else None
     raw = merge_usage(a['raw_usage'], b['raw_usage'])

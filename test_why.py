@@ -381,6 +381,14 @@ class ClaudeInterruptTests(unittest.TestCase):
         self.assertEqual([(r.call_id, r.flags) for r in early], [("r1", None)])  # r2, outside the window, was the stopped one
         self.assertEqual({k: r.flags for k, r in self.collect(rows).items()}, {"r1": None, "r2": ["interrupted"]})
 
+    def test_an_explicit_turn_change_ends_the_candidates(self):
+        zero = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+        got = self.collect({"p/s.jsonl": [
+            _claude_row("2026-09-03T10:00:01Z", "r1", self.USAGE, turnId="t1"),
+            _claude_row("2026-09-03T10:00:02Z", "r2", zero, turnId="t2"),
+            _user_row("2026-09-03T10:00:03Z", "u2", "[Request interrupted by user]", turnId="t2")]})
+        self.assertEqual({k: r.flags for k, r in got.items()}, {"r1": None})  # t2's only request had no usage: nothing to flag
+
     def test_marker_text_next_to_an_image_is_a_real_message(self):
         got = self.collect({"p/s.jsonl": [
             _user_row("2026-09-03T10:00:00Z", "u1", "first"),

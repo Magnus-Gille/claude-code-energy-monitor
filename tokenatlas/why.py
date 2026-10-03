@@ -574,16 +574,18 @@ def collect_claude(
         cowork = path.is_relative_to(COWORK_SESSIONS)
         last_user_turn: str | None = None
         turn_requests: list[str] = []  # request keys of the current turn in this file, in order
+        requests_turn: str | None = None  # the explicit turn id those requests carry, if any
         for line_number, row in _read_json_lines(path, strict=strict):
             message = _mapping(row.get("message"))
             usage = message.get("usage")
             timestamp = parse_iso_timestamp(row.get("timestamp"))
             row_uuid = _first_text(row, "uuid", "id")
             # Main-thread transcripts rarely carry the marker; a stopped subagent's file does, and its flag rolls up to the parent turn.
-            if turn_requests and _claude_interrupt_marker(row):
+            marker_turn = _meta_text(_explicit_turn_id(row, message))
+            if turn_requests and _claude_interrupt_marker(row) and (marker_turn is None or marker_turn == requests_turn):
                 stops.append(list(turn_requests))  # resolved after eligibility: the last request kept is the one running
             if _is_genuine_user_row(row):
-                turn_requests = []
+                turn_requests, requests_turn = [], None
                 last_user_turn = _meta_text(row_uuid) or _stable_hash({
                     "session": row.get("sessionId"),
                     "timestamp": row.get("timestamp"),
@@ -612,6 +614,9 @@ def collect_claude(
                 })
                 id_synthetic = True
             key = str(request_id)
+            row_turn = _meta_text(_explicit_turn_id(row, message))
+            if row_turn is not None and row_turn != requests_turn:
+                turn_requests, requests_turn = [], row_turn  # a new explicit turn: the earlier turn's requests are no candidates
             if not turn_requests or turn_requests[-1] != key:
                 turn_requests.append(key)
             values = {
