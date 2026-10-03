@@ -487,8 +487,9 @@ def main(argv=None):
                 if args.records:result['records']=records
                 if args.html:
                     filtered=any(getattr(args,key) is not None for key in ('start','end','harness','project','session','turn','model','effort','provider','agent'))
-                    texts,ctx=_visible(history,args.db,history.records() if filtered else records) if args.private else (None,None)
-                    payload=build_report(records,source_status,args.timezone,redact=not args.private,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=_counts(ctx) if args.private else None,limit_hits=limits.scope_hits(_hits(history,history.records() if filtered else records),records,args.harness,start,end,args.project,args.session,args.turn,args.model,args.effort,args.provider,args.agent))
+                    universe=history.records() if filtered else records  # the whole history: hits and their turns are computed over it
+                    texts,ctx=_visible(history,args.db,universe) if args.private else (None,None)
+                    payload=build_report(records,source_status,args.timezone,redact=not args.private,prompt_texts=texts,lang=args.lang,prompt_context=ctx,prompt_inputs=_counts(ctx) if args.private else None,limit_hits=limits.scope_hits(_hits(history,universe),records,args.harness,start,end,args.project,args.session,args.turn,args.model,args.effort,args.provider,args.agent,universe))
                     payload['initial_granularity']=args.granularity
                     if args.private:payload.update(saved_at=str(path.absolute()),reopen=_reopen(path,args.db))  # private only: a shared report never carries a local path
                     write_report(path,render_report(payload,state=state))

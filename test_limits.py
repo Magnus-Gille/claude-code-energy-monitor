@@ -337,6 +337,41 @@ class LimitHits(unittest.TestCase):
         hits = limits.limit_hits([obs('a', iso(1), 1000, harness='codex', provider='openai', quota=quota)], [], TABLE)
         self.assertEqual((len(hits), hits[0]['window']), (1, None))
 
+    def cxs(self, id, minute, session, reached):
+        r = self.cx(id, minute, reached, [self.win(100.0 if reached else 10.0, 100)])
+        r['session'] = session
+        return r
+
+    def test_recovery_only_counts_from_a_session_that_reported_the_episode(self):
+        stale = [self.cxs('1', 1, 'A', 'rate_limit_reached'), self.cxs('2', 2, 'B', None), self.cxs('3', 3, 'A', 'rate_limit_reached')]
+        self.assertEqual(len(limits.limit_hits(stale, [], TABLE)), 1)
+        own = [self.cxs('1', 1, 'A', 'rate_limit_reached'), self.cxs('2', 2, 'A', None), self.cxs('3', 3, 'A', 'rate_limit_reached')]
+        self.assertEqual(len(limits.limit_hits(own, [], TABLE)), 2)
+        overlap = [self.cxs('1', 1, 'A', 'rate_limit_reached'), self.cxs('2', 2, 'B', 'rate_limit_reached'), self.cxs('3', 3, 'B', None),
+                   self.cxs('4', 4, 'A', 'rate_limit_reached')]
+        hits = limits.limit_hits(overlap, [], TABLE)
+        self.assertEqual([h['at'] for h in hits], [iso(1), iso(4)])  # B's recovery ends the episode B joined, A's later report starts the next
+        late = [self.cxs('1', 1, 'A', 'rate_limit_reached'), self.cxs('2', 1 + 400, 'B', None), self.cxs('3', 2 + 400, 'A', 'rate_limit_reached')]
+        self.assertEqual(len(limits.limit_hits(late, [], TABLE)), 2)  # a gap longer than the window ends it
+
+    def test_window_counts_only_the_hits_own_harness(self):
+        claude = obs('c', iso(1), 5000, turn='tc')
+        opencode = obs('o', iso(2), 90000, harness='opencode', provider='anthropic', session='oc', turn='to')  # API key usage, a different pool
+        w = limits.limit_hits([claude, opencode], [obs('r', iso(30), quota=five_hour(120))], TABLE)[0]['window']
+        self.assertEqual(w['requests'], 1)
+        self.assertEqual([t['turn'][2] for t in w['top']], ['tc'])
+
+    def test_scope_maps_rolled_up_subagents_through_the_full_assignment(self):
+        main = obs('m', iso(1), 1000, turn='t1')
+        sub = dict(obs('s', iso(5), 9000, turn=None), thread_kind='subagent', parent_session='s1', agent='a1')
+        sub['model'] = 'sub-model'
+        recs = [main, sub]
+        hits = limits.limit_hits(recs, [obs('r', iso(30), turn='t1', quota=five_hour(120))], TABLE)
+        self.assertEqual(hits[0]['turn'], ('claude', 's1', 't1'))
+        self.assertEqual(len(limits.scope_hits(hits, [sub], agent='a1', universe=recs)), 1)
+        self.assertEqual(len(limits.scope_hits(hits, [sub], model='sub-model', universe=recs)), 1)
+        self.assertEqual(limits.scope_hits(hits, [], model='other', universe=recs), [])
+
     def test_codex_window_is_rolling_from_the_hit(self):
         # resets at +400 min: a reset-anchored window would start at +100 and miss the call at +20; the rolling window [hit-300, hit] has it
         recs = [obs('early', iso(20), 5000, harness='codex', provider='openai', session='c1', turn='early'),

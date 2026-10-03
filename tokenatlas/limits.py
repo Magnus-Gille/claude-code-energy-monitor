@@ -76,7 +76,7 @@ def limit_hits(records, events, table):
         if resets is None:
             recent[key[:2]] = (hit, at)
         found.append(hit)
-    last = {}  # (harness, limit id) -> (reached, time, reset time, window minutes) of its previous observation
+    open_ = {}  # (harness, limit id) -> the open episode: reached type, window minutes, last reached time, sessions that reported it
     for record in records:
         quota = record.get('quota') or {}
         reached = quota.get('reached')
@@ -85,18 +85,25 @@ def limit_hits(records, events, table):
         # Depleted credits are not a full time window: no window, no ranking (the raw type names it).
         window = None if reached and 'credits' in reached else _hit_window(quota)
         account = (record['harness'], quota.get('limit_id'))  # consecutive per harness and limit, never across them
-        # A hit starts when `reached` goes from null (or another type) to a value; the reset time is context only, it may drift between observations.
-        at, resets = prompts._t(record['ts']), _iso(window.get('resets_at')) if window else None
-        before = last.get(account)
-        # An episode ends on recovery (the series reports no reached type), on a gap longer than its window, or when a different window is named.
-        # A reset time only slides, so its movement alone never starts a new hit.
-        minutes = window and window.get('minutes')
-        same = (before is not None and before[0] == reached and at - before[1] <= timedelta(minutes=before[3] or 300)
-                and (not minutes or not before[3] or minutes == before[3]))
-        if reached and not same:
-            found.append(dict(harness=record['harness'], at=record['ts'], reached=reached, window_minutes=window and window.get('minutes'),
-                              resets_at=window.get('resets_at') if window else None, retries=1, rolling=True, _row=record, **_scope(record)))
-        last[account] = (reached, at, resets, minutes or (before and before[0] == reached and before[3]) or None)
+        at, minutes = prompts._t(record['ts']), window and window.get('minutes')
+        episode = open_.get(account)
+        # An episode is one hit. It ends on recovery reported by a session that itself reported the reached state in it (a stale null from another
+        # session proves nothing), on a gap longer than its window, or when a different window is named. A reset time only slides, so its
+        # movement alone never starts a new hit; overlapping per-session episodes are one hit, at the earliest observation.
+        if episode and at - episode['last'] > timedelta(minutes=episode['minutes'] or 300):
+            episode = open_[account] = None
+        if not reached:
+            if episode and record['session'] in episode['sessions']:
+                episode = open_[account] = None
+            continue
+        if episode and episode['reached'] == reached and (not minutes or not episode['minutes'] or minutes == episode['minutes']):
+            episode['sessions'].add(record['session'])
+            episode['last'] = at
+            episode['minutes'] = episode['minutes'] or minutes
+            continue
+        found.append(dict(harness=record['harness'], at=record['ts'], reached=reached, window_minutes=minutes or None,
+                          resets_at=window.get('resets_at') if window else None, retries=1, rolling=True, _row=record, **_scope(record)))
+        open_[account] = dict(reached=reached, minutes=minutes or None, last=at, sessions={record['session']})
     if not found:
         return []  # the usual case: skip the turn assignment over the whole history
     found.sort(key=lambda h: h['at'])
@@ -135,7 +142,7 @@ def _fill(hit, records, assigned, table):
     provider = canon(PROVIDER.get(hit['harness']))
     turns, requests, priced, total, lower = {}, 0, 0, 0.0, False
     for record in records:
-        if canon(record.get('provider')) != provider or record.get('id_synthetic') or not start <= prompts._t(record['ts']) <= at:
+        if record['harness'] != hit['harness'] or canon(record.get('provider')) != provider or record.get('id_synthetic') or not start <= prompts._t(record['ts']) <= at:
             continue  # an ambiguous identity is in no total, as in the cost facts
         requests += 1
         lower = lower or not record.get('complete', True)
@@ -184,10 +191,10 @@ def badge(hit):
     return {'five_hour': 'Hit the 5-hour limit', 'weekly': 'Hit the weekly limit'}.get(name) or f'Hit a limit ({name})' if name else 'Hit a limit'
 
 
-def scope_hits(hits, records, harness=None, start=None, end=None, project=None, session=None, turn=None, model=None, effort=None, provider=None, agent=None):
+def scope_hits(hits, records, harness=None, start=None, end=None, project=None, session=None, turn=None, model=None, effort=None, provider=None, agent=None, universe=None):
     """Hits that belong to a filtered report: the hit's harness and time must match the harness and start/end filters. With a project, session,
     turn, model, effort, provider or agent filter a hit is kept when its turn is among the filtered `records`' turns or when the hit's own row
-    (a rejection has no usage record) matches every given filter. The hits themselves are computed over the whole history first."""
+    (a rejection has no usage record) matches every given filter; `universe` is the whole history's usage, the basis of the hits' turns. The hits themselves are computed over the whole history first."""
     given = {'project_id': project, 'turn_id': turn, 'model': model, 'effort': effort, 'provider': provider, 'agent': agent}
     given = {k: v for k, v in given.items() if v is not None}
     prefix = None
@@ -200,7 +207,12 @@ def scope_hits(hits, records, harness=None, start=None, end=None, project=None, 
     harness = harness or prefix
     if session is not None:
         given['session'] = session
-    turns = {(r['harness'], r['session'], r.get('turn_id')) for r in records} if given else None
+    turns = None
+    if given:
+        # Hits carry rolled-up turn identities, so map the filtered records through the same whole-history assignment.
+        everything = universe if universe is not None else records
+        found = {prompts.ident(r): a for r, a in zip(everything, prompts.assign_prompts(everything))}
+        turns = {tuple(found[prompts.ident(r)][:3]) if found.get(prompts.ident(r)) else (r['harness'], r['session'], r.get('turn_id')) for r in records}
     out = []
     for hit in hits:
         at = prompts._t(hit['at'])
