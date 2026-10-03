@@ -46,7 +46,7 @@ class HistoryTests(unittest.TestCase):
 
     def test_claude_revision_changes_fingerprint_and_forces_one_reread(self):
         import tokenatlas.history as history
-        self.assertEqual(history.HARNESS_REVISION.get('claude'), 2)
+        self.assertEqual(history.HARNESS_REVISION.get('claude'), 3)
         source=self.root/'logs/a.jsonl';write_claude(source)
         with patch.dict(history.HARNESS_REVISION,clear=False):
             history.HARNESS_REVISION.pop('claude')

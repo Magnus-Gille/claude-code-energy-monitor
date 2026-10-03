@@ -462,6 +462,28 @@ def _codex_quota(value: object) -> dict | None:
             "reached": reached, "windows": windows}
 
 
+_CLAUDE_LIMIT_MINUTES = {"five_hour": 300, "seven_day": 10080}
+
+
+def _claude_quota(value: object) -> dict | None:
+    """Quota object for a rejected request (quotaLimits.status == "rejected"); None for anything else."""
+    limits = _mapping(value)
+    if limits.get("status") != "rejected":
+        return None
+    kind = _meta_text(limits.get("rateLimitType"), limit=64)
+    resets = _number(limits.get("resetsAt"))
+    resets_at = None
+    if resets is not None and resets > 0:
+        try:
+            resets_at = datetime.fromtimestamp(resets, timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            resets_at = None
+    windows = []
+    if kind in _CLAUDE_LIMIT_MINUTES:
+        windows.append({"slot": kind, "minutes": _CLAUDE_LIMIT_MINUTES[kind], "used_percent": 100.0, "resets_at": resets_at})
+    return {"limit_id": None, "plan_type": None, "reached": kind, "status": "rejected", "resets_at": resets_at, "windows": windows}
+
+
 def _explicit_turn_id(row: dict, message: dict) -> str | None:
     return _first_text(
         row,
@@ -592,6 +614,9 @@ def collect_claude(
                 })
                 # The effective turn of the requests that follow (derived from this row unless they name one), for matching markers.
                 turn_requests, requests_turn = [], marker_turn or last_user_turn
+            quota = _claude_quota(row.get("quotaLimits"))
+            if quota is not None and not isinstance(usage, dict):
+                usage = {}
             if not isinstance(usage, dict) or timestamp is None:
                 continue
             request_id = _first_text(row, "requestId")
@@ -664,8 +689,9 @@ def collect_claude(
             turn = explicit_turn or derived_turn
             latest = timestamp >= existing["timestamp"]
             for name, value in {
-                "model": _meta_text(message.get("model")),
+                "model": None if quota is not None else _meta_text(message.get("model")),
                 "effort": _meta_text(row.get("effort")),
+                "quota": quota,
                 "project": _project_name(cwd_value) if cwd_value else None,
                 "project_id": cwd_value,
                 "cwd": cwd_value,
@@ -691,7 +717,9 @@ def collect_claude(
             ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')))
     # The stopped request is chosen among usage-eligible requests before the time window, so the window never changes which one carries the flag.
     usable = {call_id for call_id, values in calls.items() if eligible(values)}
-    retained = {call_id for call_id in usable if start <= calls[call_id]["timestamp"] < end}
+    # A rejected request (quota limit event) has no tokens but is kept; it is never the stopped request.
+    retained = {call_id for call_id, values in calls.items() if (call_id in usable or values.get("quota") is not None)
+                and start <= values["timestamp"] < end}
     interrupted = {next(k for k in reversed(keys) if k in usable) for keys in stops if any(k in usable for k in keys)}
     records = []
     for call_id, values in calls.items():
@@ -704,7 +732,7 @@ def collect_claude(
         for name, default in (
             ("model", "unknown"), ("effort", "unknown"), ("entrypoint", "unknown"),
             ("agent", "main"), ("thread_kind", "main"), ("cwd", None), ("turn_id", None),
-            ("turn_confidence", "absent"), ("harness_version", None), ("tariff", None),
+            ("turn_confidence", "absent"), ("harness_version", None), ("tariff", None), ("quota", None),
             ("project", fallback_project), ("project_id", fallback_id),
         ):
             values.setdefault(name, default)

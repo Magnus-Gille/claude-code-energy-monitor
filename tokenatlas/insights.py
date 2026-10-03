@@ -13,7 +13,7 @@ import statistics
 from datetime import datetime
 from pathlib import Path
 
-from tokenatlas import credits as credit_rates, energy, pricing, prompts
+from tokenatlas import credits as credit_rates, energy, limits, pricing, prompts
 
 I18N = Path(__file__).with_name('report_i18n.json')
 BIG_TURN = 50.0
@@ -69,6 +69,20 @@ def _finish(f, ctx):
     return f
 
 
+def _limit_hits(hits, start, end):
+    """Count of limit hits in the window, by limit (named by its window length); a fact the logs state, so 'measured'."""
+    counts = {}
+    for h in hits or ():
+        at = prompts._t(h['at'])
+        if (start is None or at >= start) and (end is None or at < end):
+            key = (limits.label(h['window_minutes'], limits.public_reached(h['reached'])) or 'unknown', h['harness'])
+            counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return []
+    by = [dict(limit=k[0], harness=k[1], count=n) for k, n in sorted(counts.items())]
+    return [_fact('limit_hits', dict(count=sum(counts.values()), limits=by), 'ins_limit_hits_c', ('ins_a_limit_logs',), 'measured')]
+
+
 def _usd(res):
     """Cost in USD or None: a non-USD price is never mixed into a USD sum (as in prompts._cost)."""
     c = res['cost']
@@ -83,11 +97,12 @@ def _share(part, whole):
     return part / whole if whole else None
 
 
-def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=None, memo=None, credit_table=None):
+def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=None, memo=None, credit_table=None, hits=None):
     """{'window', 'requests', 'priced_requests', 'unpriced_requests', 'facts': [...]} over observations with start <= ts < end.
     `name(provider, model)` maps a model to its displayed name (the shared report passes its redaction; default: the model itself).
     `memo`, a dict reused across calls with the same records and table, only saves repeated price lookups; it never changes a result.
-    `credit_table` (default: the packaged credits.json) is the rate card behind the ChatGPT credit-equivalent fact."""
+    `credit_table` (default: the packaged credits.json) is the rate card behind the ChatGPT credit-equivalent fact.
+    `hits` (limits.limit_hits) adds the limit_hits fact: how many hits fall in the window, by limit; omitted when there are none."""
     memo = {} if memo is None else memo
     name = name or (lambda provider, model: model)
     start, end = _when(start), _when(end)
@@ -138,7 +153,8 @@ def cost_facts(records, table, start=None, end=None, big_turn=BIG_TURN, name=Non
     facts += _interrupted(clean, inside, scope, memo, total)
     facts += _credits(inside, credit_table or credit_rates.packaged(), name)
     facts += _energy(inside)
-    order = ('model_share', 'price_comparison', 'cost_parts', 'context_size', 'long_context_premium', 'big_turns', 'interrupted_turns', 'subagent_share', 'premium_tiers', 'credits', 'energy')
+    facts += _limit_hits(hits, start, end)
+    order = ('model_share', 'price_comparison', 'cost_parts', 'context_size', 'long_context_premium', 'big_turns', 'interrupted_turns', 'subagent_share', 'premium_tiers', 'credits', 'energy', 'limit_hits')
     facts = [_finish(f, ctx) for f in sorted(facts, key=lambda f: order.index(f['id']))]
     return {'window': {'start': start and start.isoformat(), 'end': end and end.isoformat()}, **{k_: scope[k_] for k_ in ('requests', 'priced_requests', 'unpriced_requests')},
             'ambiguous_requests': ctx['ambiguous'], 'incomplete_requests': ctx['incomplete'], 'price_table': {'retrieved_on': ctx['retrieved']}, 'big_turn': big_turn, 'facts': facts}
@@ -420,6 +436,9 @@ def _rq(n):
     return f"{n:,} request" + ('' if n == 1 else 's')
 
 
+_LIMIT_NAMES = {'five_hour': '5-hour limit', 'weekly': 'weekly limit'}
+
+
 def _lines(f):
     v, i = f['values'], f['id']
     lb = '≥' if v['lower_bound'] else ''
@@ -455,6 +474,8 @@ def _lines(f):
         if v['partly_priced_turns']:
             out.append(f"with some unpriced requests (cost is a lower bound): {v['partly_priced_turns']:,}")
         return out
+    if i == 'limit_hits':
+        return [f"limit hits: {v['count']:,}"] + [f"{x['harness']} {_LIMIT_NAMES.get(x['limit'], x['limit'])}: {x['count']:,}" for x in v['limits']]
     if i == 'subagent_share':
         return [f"cost from subagents: {u(v['subagent_cost'])} of {u(v['total_cost'])} ({_pct(v['share'])})", f"requests from subagents: {v['subagent_requests']:,} of {v['priced_requests']:,} priced"]
     if i == 'energy':

@@ -23,7 +23,7 @@ from tokenatlas import why
 OBSERVATION_VERSION = 1  # the 'v' field inside observation dicts
 SCHEMA_VERSION = 2  # PRAGMA user_version of the SQLite layout
 COLLECTOR_VERSION = 5
-HARNESS_REVISION = {'pi': 2, 'codex': 4, 'claude': 2, 'opencode': 2}  # bump to force a re-read of one harness's files only (appended to its fingerprint)
+HARNESS_REVISION = {'pi': 2, 'codex': 4, 'claude': 3, 'opencode': 2}  # bump to force a re-read of one harness's files only (appended to its fingerprint)
 FIELDS = ('fresh_input', 'cache_read', 'cache_write', 'output')
 ALL_FIELDS = FIELDS + ('reasoning',)
 
@@ -89,7 +89,7 @@ def _clean_quota(value):
         return None
     windows = []
     for w in value.get('windows') if isinstance(value.get('windows'), list) else []:
-        if not isinstance(w, dict) or w.get('slot') not in ('primary', 'secondary'):
+        if not isinstance(w, dict) or w.get('slot') not in ('primary', 'secondary', 'five_hour', 'seven_day'):
             continue
         used, minutes, resets = why._number(w.get('used_percent')), w.get('minutes'), w.get('resets_at')
         if used is None or used < 0 or isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
@@ -101,10 +101,26 @@ def _clean_quota(value):
         windows.append({'slot': w['slot'], 'minutes': minutes, 'used_percent': used, 'resets_at': resets})
     text = why._meta_text
     reached = text(value.get('reached'), limit=64)
-    if not windows and reached is None:
+    rejected = value.get('status') == 'rejected'
+    if not windows and reached is None and not rejected:
         return None
-    return {'limit_id': text(value.get('limit_id'), limit=64), 'plan_type': text(value.get('plan_type'), limit=64),
-            'reached': reached, 'windows': windows}
+    result = {'limit_id': text(value.get('limit_id'), limit=64), 'plan_type': text(value.get('plan_type'), limit=64),
+              'reached': reached, 'windows': windows}
+    if rejected:
+        result['status'] = 'rejected'
+        resets = value.get('resets_at')
+        try:
+            result['resets_at'] = datetime.fromisoformat(resets).astimezone(timezone.utc).isoformat() if isinstance(resets, str) else None
+        except ValueError:
+            result['resets_at'] = None
+    return result
+
+
+def is_limit_event(obs):
+    """A rejected request: it carries quota status 'rejected' and consumed no tokens, so it is not a billable request."""
+    quota = obs.get('quota')
+    return (isinstance(quota, dict) and quota.get('status') == 'rejected'
+            and all(not (obs.get('tokens') or {}).get(k) for k in ALL_FIELDS))
 
 
 def normalize(record, machine):
@@ -740,7 +756,7 @@ class History:
             if not found:
                 raise ValueError('snapshot has no machine id')
             with History(copy) as source:  # migrates v1 and adds the tariff, quota and flags columns on the copy only
-                machine, items = source.machine, source.records()
+                machine, items = source.machine, source.records(include_limit_events=True)
         result = dict(harness='import', root=label, source_machine=machine, observations_seen=len(items),
                       new=0, merged=0, status='ok', last_attempt=utcnow())
         if machine == self.machine:
@@ -776,7 +792,10 @@ class History:
             self._strings, self._values = {}, {}
             raise
 
-    def records(self, start=None, end=None, harness=None, project=None, session=None, turn=None):
+    def limit_events(self, start=None, end=None):
+        return [r for r in self.records(start, end, include_limit_events=True) if is_limit_event(r)]
+
+    def records(self, start=None, end=None, harness=None, project=None, session=None, turn=None, include_limit_events=False):
         session_harness = None
         raw_session = session
         if isinstance(session, str):
@@ -810,6 +829,8 @@ class History:
                                  for i, v in enumerate(row[1:])))
             item['sources'] = sorted(paths.get(row[0], ()))
             result.append(item)
+        if not include_limit_events:
+            result = [r for r in result if not is_limit_event(r)]
         return sorted(result,key=lambda x:(x['ts'],x['provider'],x['id']))
 
     def doctor(self):

@@ -436,6 +436,25 @@ def opencode_db(path, rng, script):
 
 # ----- Build the synthetic HOME ----------------------------------------------------------------------------
 
+def reject_for_limit(w, sid, key, resets_after=timedelta(hours=2), retries=3):
+    """Append a rejected request (the five-hour limit) with retries to the end of a session, as Claude Code logs it. Deterministic and
+    drawn without the rng, so the rest of the demo history is unchanged."""
+    path = w['claude'] / PROJECTS[key].replace('/', '-') / f'{sid}.jsonl'
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    last = max(datetime.fromisoformat(r['timestamp'].replace('Z', '+00:00')) for r in rows if r.get('type') == 'assistant')
+    resets = int((last + resets_after).timestamp())
+    zero = {'input_tokens': 0, 'output_tokens': 0, 'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 0}
+    for i in range(retries):
+        t = last + timedelta(seconds=20 + 25 * i)
+        rows.append({'type': 'assistant', 'timestamp': iso(t), 'requestId': f'req_demolimit{i:02d}', 'uuid': f'demolimit{i:04d}',
+                     'sessionId': sid, 'cwd': PROJECTS[key], 'error': 'rate_limit', 'isApiErrorMessage': True,
+                     'entrypoint': 'cli', 'version': '2.3.0', 'isSidechain': False,
+                     'message': {'id': f'msg_demolimit{i:02d}', 'role': 'assistant', 'model': '<synthetic>', 'usage': dict(zero),
+                                 'content': [{'type': 'text', 'text': 'Rate limit reached.'}]},
+                     'quotaLimits': {'status': 'rejected', 'resetsAt': resets, 'rateLimitType': 'five_hour', 'overageStatus': 'rejected'}})
+    write_jsonl(path, rows)
+
+
 def build_home(home, seed):
     rng = random.Random(seed)
     w = {'claude': home / '.claude/projects', 'codex': home / '.codex/sessions', 'pi': home / '.pi/agent/sessions',
@@ -458,6 +477,7 @@ def build_home(home, seed):
     ]
     for sid, key, t0, n, model, subs, skill in claude:
         claude_session(w, rng, key, sid, t0, n, model, subs, skill, script=w['script'])
+    reject_for_limit(w, 'demo-shop-03', 'shop')  # one five-hour limit hit (and two retries) at the end of the longest shop session
     # The showcase session: an opus conductor, three implementers, one Explore and an inferred headless Codex child.
     t0 = utc(24, 9, 5)
     subs = [(4, 'Explore', 14, None), (14, 'implementer', 26, None), (16, 'implementer', 30, None), (48, 'implementer', 34, None)]
@@ -600,7 +620,7 @@ def main(argv=None):
         (outdir / 'session.txt').write_text(session_text + '\n')
         (outdir / 'overhead.txt').write_text(overhead_text + '\n')
         sys.path.insert(0, str(ROOT))
-        from tokenatlas import pricing, prompts
+        from tokenatlas import limits, pricing, prompts
         from tokenatlas.history import History
         counts = {}
         with History(db) as history:
@@ -608,6 +628,7 @@ def main(argv=None):
             records = history.records()
             # The same ranking `tokenatlas top` and the report's Costliest turns card use.
             top = prompts.top_prompts(records, pricing.load_prices(), 10)['prompts']
+            hits = limits.limit_hits(records, history.limit_events(), pricing.load_prices())
             for item in records:
                 slot = counts.setdefault(item['harness'], {'observations': 0, 'sessions': set(), 'first': item['ts'], 'last': item['ts']})
                 slot['observations'] += 1
@@ -627,6 +648,8 @@ def main(argv=None):
                                'total_tokens': session_json['total']['total'], 'cost': session_json['total']['cost']},
                    'top_turns': [{'rank': i, 'harness': p['harness'], 'project': p['project_label'], 'cost': p['cost'],
                                   'requests': p['requests'], 'subagents': p['subagents'], 'interrupted': p['interrupted']} for i, p in enumerate(top, 1)],
+                   'limit_hits': [{'harness': h['harness'], 'reached': h['reached'], 'window_minutes': h['window_minutes'], 'retries': h['retries'],
+                                   'window_cost': h['window'] and h['window']['cost']} for h in hits],
                    'report': str(report)}
         (outdir / 'demo-summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
         if not args.no_screens:

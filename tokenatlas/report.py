@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from tokenatlas import __version__
-from tokenatlas import credits as credit_rates, energy, insights, pricing, prompts
+from tokenatlas import credits as credit_rates, energy, insights, limits, pricing, prompts
 from tokenatlas.history import ALL_FIELDS
 from tokenatlas.resume import resume_info
 
@@ -99,7 +99,7 @@ def report_state(revision, machine, spec, coverage, token=None, texts_hash=None,
 
 
 def build_report(records, source_status, timezone_name='Europe/Stockholm', redact=True, prompt_texts=None, table=None, lang='auto',
-                 prompt_context=None, prompt_inputs=None, now=None, credit_table=None, demo=False):
+                 prompt_context=None, prompt_inputs=None, now=None, credit_table=None, demo=False, limit_hits=None):
     """prompt_texts ({(harness, session, turn_id): text or None} from prompt_store) and prompt_context ({key: turn_context dict}) are for
     prompt_inputs ({key: input count or None}) are for private reports only (any of them with redact=True raises);
     credit_table is the ChatGPT credit rate card behind `credit_classes` and the credits fact (None = packaged credits.json); table is the price table behind the `price_classes` unit prices (None = packaged prices). `insights` holds the cost facts (insights.py) for the
@@ -183,7 +183,7 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
     display = lambda provider, model: metadata('model', model, {'provider': provider})
     memo = {}
     # one captured `now` is the exclusive end of the 30-day window: later-dated observations are not 'the last 30 days'
-    windows = [dict(id=wid, **insights.public(insights.cost_facts(records, table, start, end, name=display, memo=memo, credit_table=credit_table)))
+    windows = [dict(id=wid, **insights.public(insights.cost_facts(records, table, start, end, name=display, memo=memo, credit_table=credit_table, hits=limit_hits)))
                for wid, start, end in (('30d', now - timedelta(days=INSIGHT_DAYS), now), ('all', None, None))]
     # the page's energy card (filter-following) sums tokens x per-class constant x a multiplier per (provider, model); only Claude tiers have one
     # (the rest is unweighted, multiplier 1), keyed by the provider and model names as the rows carry them (after redaction)
@@ -208,11 +208,33 @@ def build_report(records, source_status, timezone_name='Europe/Stockholm', redac
                 found[shown[tuple(k)]] = info
         if found:
             report['prompt_resume'] = found
+    if limit_hits:
+        report['limit_hits'] = [_hit_payload(h, shown, metadata, prompt_texts, redact) for h in limit_hits]
     if demo:
         report['demo'] = True
     if prompt_inputs is not None:
         report['prompt_inputs'] = {shown[tuple(k)]: n for k, n in prompt_inputs.items() if isinstance(n, int) and tuple(k) in shown}
     return report
+
+
+def _hit_payload(hit, shown, metadata, texts=None, redact=True):
+    """A limit hit for the page: turns are prompt ordinals (as the rows carry them), never session ids or turn ids; ordinal None = not in this report.
+    `label` is what names a turn that has no card: its time and agent, plus (private reports only) a stored prompt preview if there is one.
+    A shared report names only the allowlisted limit types; any other type is "other"."""
+    window = hit.get('window')
+    ordinal = lambda turn: shown.get(tuple(turn)) if turn else None
+    def label(turn, at):
+        if not turn:
+            return None
+        text = None if redact else (texts or {}).get(tuple(turn))
+        return dict(at=at, harness=metadata('harness', turn[0], hit), text=text[:200] if isinstance(text, str) and text else None)
+    return dict(harness=metadata('harness', hit['harness'], hit), at=hit['at'], reached=limits.public_reached(hit['reached']) if redact else hit['reached'],
+                window_minutes=hit['window_minutes'], resets_at=hit['resets_at'], retries=hit['retries'], prompt=ordinal(hit['turn']),
+                label=label(hit['turn'], hit['at']),
+                window=window and dict(start=window['start'], end=window['end'], requests=window['requests'], unpriced_requests=window['unpriced_requests'],
+                                       cost=window['cost'], lower_bound=window['lower_bound'],
+                                       top=[dict(prompt=ordinal(t['turn']), label=label(t['turn'], t['first_ts']), requests=t['requests'], cost=t['cost'], share=t['share'])
+                                            for t in window['top']]))
 
 
 STATE_META = re.compile(rb'<meta name="tokenatlas-state" content="([0-9a-f]{32})\.([0-9a-f]{32})">')
