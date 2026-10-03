@@ -389,6 +389,13 @@ class ClaudeInterruptTests(unittest.TestCase):
             _user_row("2026-09-03T10:00:03Z", "u2", "[Request interrupted by user]", turnId="t2")]})
         self.assertEqual({k: r.flags for k, r in got.items()}, {"r1": None})  # t2's only request had no usage: nothing to flag
 
+    def test_a_marker_naming_the_derived_turn_flags_it(self):
+        got = self.collect({"p/s.jsonl": [
+            _user_row("2026-09-03T10:00:00Z", "t1", "do it"),
+            _claude_row("2026-09-03T10:00:01Z", "r1", self.USAGE),
+            _user_row("2026-09-03T10:00:02Z", "u2", "[Request interrupted by user]", turnId="t1")]})
+        self.assertEqual({k: (r.turn_id, r.flags) for k, r in got.items()}, {"r1": ("t1", ["interrupted"])})
+
     def test_marker_text_next_to_an_image_is_a_real_message(self):
         got = self.collect({"p/s.jsonl": [
             _user_row("2026-09-03T10:00:00Z", "u1", "first"),

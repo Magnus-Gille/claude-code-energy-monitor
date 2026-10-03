@@ -585,12 +585,13 @@ def collect_claude(
             if turn_requests and _claude_interrupt_marker(row) and (marker_turn is None or marker_turn == requests_turn):
                 stops.append(list(turn_requests))  # resolved after eligibility: the last request kept is the one running
             if _is_genuine_user_row(row):
-                turn_requests, requests_turn = [], None
                 last_user_turn = _meta_text(row_uuid) or _stable_hash({
                     "session": row.get("sessionId"),
                     "timestamp": row.get("timestamp"),
                     "line": line_number,
                 })
+                # The effective turn of the requests that follow (derived from this row unless they name one), for matching markers.
+                turn_requests, requests_turn = [], marker_turn or last_user_turn
             if not isinstance(usage, dict) or timestamp is None:
                 continue
             request_id = _first_text(row, "requestId")
