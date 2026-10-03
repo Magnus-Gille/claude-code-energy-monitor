@@ -240,7 +240,9 @@ def merge_observations(a, b, authoritative_turns=False):
         # Only a re-read of the owning copy speaks for the request's turn.
         result['turn_id'], result['turn_confidence'] = b.get('turn_id'), b.get('turn_confidence')
     result['tariff'] = {**(other.get('tariff') or {}), **(winner.get('tariff') or {})} or None
-    result['quota'] = winner.get('quota') or other.get('quota')  # whole object, never a field merge
+    # Whole object, never a field merge. A quota comes from the token_count event that defines the observation, so copies of one observation
+    # carry the same snapshot or none (written before Codex revision 3); keeping any present one is enough.
+    result['quota'] = winner.get('quota') or other.get('quota')
     flags = [x.get('output_final') for x in (a, b)]
     output_final = True if True in flags else False if False in flags else None
     raw = merge_usage(a['raw_usage'], b['raw_usage'])
