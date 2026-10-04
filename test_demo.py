@@ -35,7 +35,8 @@ class DemoTests(unittest.TestCase):
             self.assertEqual(summary['seed'], 7)
             self.assertGreaterEqual(sum(t['interrupted'] for t in top), 1)  # the demo shows the Interrupted badge
             self.assertGreaterEqual(len(summary['quota_windows']), 2)
-            self.assertTrue(all(w['harness'] == 'codex' and w['minutes'] == 10080 for w in summary['quota_windows']))
+            self.assertEqual({(w['harness'], w['minutes']) for w in summary['quota_windows']}, {('codex', 10080), ('claude', 300), ('claude', 10080)})
+            self.assertGreater(summary['claude_quota_snapshots'], 10)
             self.assertGreater(summary['quota_share_labels']['observed'], 0)
             self.assertEqual({t['harness'] for t in top}, {'claude', 'codex', 'pi', 'opencode'})
 

@@ -2,9 +2,14 @@
 
 Claude Code runs the command on every status update, so this module stays light (stdlib and tokenatlas.energy only; the history is never
 imported or opened). Day, week and month totals come from statusline.json next to the history database, written by refresh; context and
-quota are live from the payload on stdin. No network, no credentials, nothing is written by the statusline itself.
+quota are live from the payload on stdin. No network, no credentials, and by default nothing is written by the statusline itself.
+With the opt-in `--record-quota` it also appends the 5-hour and weekly quota readings to claude-quota.jsonl next to the history (see
+record_quota), so a turn can later be given a share of the limit; that is the only thing it ever writes, and a failure to write never
+changes the status line.
 """
 import argparse
+import contextlib
+import errno
 import json
 import math
 import os
@@ -12,6 +17,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import stat
 import sys
 import tempfile
 from datetime import date, datetime, timedelta, timezone
@@ -23,6 +29,11 @@ CACHE_NAME = 'statusline.json'
 CACHE_DAYS = 31  # per-local-day buckets kept in the cache, today included
 STALE_SECONDS = 45 * 60
 CLASSES = ('fresh_input', 'cache_read', 'cache_write', 'output')
+QUOTA_NAME = 'claude-quota.jsonl'
+QUOTA_LAST = 'claude-quota.last'
+QUOTA_LOCK = 'claude-quota.lock'
+QUOTA_MAX_BYTES = 5 * 1024 * 1024  # prune above this size ...
+QUOTA_KEEP_DAYS = 60  # ... to the last this many days
 COUNTERS = CLASSES + ('mwh', 'requests', 'unweighted', 'incomplete')
 
 
@@ -31,8 +42,22 @@ def state_dir():
     return Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state')) / 'tokenatlas'
 
 
+def default_db():
+    """The history path the statusline uses without --db: the new state directory, or, while only the pre-rename agentmon directory exists, that one
+    (the history commands move the whole directory on their next run, so a sidecar written there moves with it; never create the new directory
+    first, which would stop the move)."""
+    new = state_dir()
+    legacy = new.with_name('agentmon')
+    return (legacy if legacy.is_dir() and not new.exists() else new) / 'history.sqlite3'
+
+
 def cache_path(db):
     return Path(db).expanduser().absolute().with_name(CACHE_NAME)
+
+
+def quota_path(db):
+    """The quota snapshot file next to the history database."""
+    return Path(db).expanduser().absolute().with_name(QUOTA_NAME)
 
 
 def build_cache(history, now=None):
@@ -89,6 +114,179 @@ def refresh_cache(history):
         write_atomic(cache_path(history.path), build_cache(history))
     except Exception as exc:
         print(f'warning: could not write {CACHE_NAME}: {type(exc).__name__}: {exc}', file=sys.stderr)
+
+
+def _quota_window(value):
+    """{used_percent, resets_at ISO UTC or None} from a payload window, or None when it has no finite used_percentage."""
+    if not isinstance(value, dict):return None
+    used, reset = value.get('used_percentage'), value.get('resets_at')
+    if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):return None
+    at = None
+    if isinstance(reset, (int, float)) and not isinstance(reset, bool):
+        try:at = datetime.fromtimestamp(reset, timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):pass
+    return dict(used_percent=used, resets_at=at)
+
+
+def quota_values(payload):
+    """{'five_hour': ..., 'seven_day': ...} readings of a payload, each a window dict or None; None when the payload has neither."""
+    limits = payload.get('rate_limits') if isinstance(payload, dict) else None
+    if not isinstance(limits, dict):return None
+    values = {k: _quota_window(limits.get(k)) for k in ('five_hour', 'seven_day')}
+    return values if any(values.values()) else None
+
+
+def _read_small(path):
+    """The text of a small regular file, never blocking: a FIFO or other special file raises instead of waiting for a writer."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):raise ValueError('not a regular file')
+        with os.fdopen(os.dup(fd), encoding='utf-8') as f:return f.read(65536)
+    finally:os.close(fd)
+
+
+def file_problem(info):
+    """Why a snapshot file is not private (not a regular file, foreign owner, group/other permissions), else None; POSIX only."""
+    if os.name == 'nt':return None
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():return 'must be a regular file owned by this user'
+    if info.st_mode & 0o077:return 'permissions must be 0600'
+    return None
+
+
+def quota_file_problem(path):
+    """Why the snapshot file at `path` would not be written (symlink or not private), None when it is fine or absent."""
+    try:info = os.lstat(path)
+    except OSError:return None
+    return 'must not be a symlink' if stat.S_ISLNK(info.st_mode) else file_problem(info)
+
+
+def _open_private_append(path):
+    """An append descriptor for the snapshot file: created 0600; an existing one is opened without following a symlink and the descriptor itself
+    must be a private regular file (as for the outcomes file). Raises ValueError otherwise: no snapshot is recorded."""
+    flags = os.O_WRONLY | os.O_APPEND | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_BINARY', 0)
+    try:
+        return os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    nonblock = getattr(os, 'O_NONBLOCK', 0)
+    try:fd = os.open(path, flags | getattr(os, 'O_NOFOLLOW', 0) | nonblock)  # a FIFO would otherwise block the open
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:raise ValueError('snapshot file must not be a symlink') from None
+        raise
+    try:  # whatever happens below, the descriptor is closed unless it is returned: an open handle blocks a later replace or delete on Windows
+        problem = file_problem(os.fstat(fd))
+        if problem:raise ValueError(f'snapshot file {problem}')
+        if nonblock:os.set_blocking(fd, True)  # POSIX only: a regular file, appends are as before
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _prune_quota(path, now):
+    """Rewrite the file with the last QUOTA_KEEP_DAYS days when it is larger than QUOTA_MAX_BYTES (atomic replace, 0600); an unreadable line goes."""
+    if path.stat().st_size <= QUOTA_MAX_BYTES:return
+    cutoff = now - timedelta(days=QUOTA_KEEP_DAYS)
+    kept = []
+    with open(path, encoding='utf-8', errors='replace') as f:
+        for line in f:
+            try:
+                if datetime.fromisoformat(json.loads(line)['ts']) >= cutoff:kept.append(line if line.endswith('\n') else line + '\n')
+            except (ValueError, KeyError, TypeError):continue
+    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=path.name + '.', suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.writelines(kept)
+        os.replace(temp, path)
+    except BaseException:
+        try:os.unlink(temp)
+        except OSError:pass
+        raise
+
+
+@contextlib.contextmanager
+def _lock(path):
+    """A non-blocking cross-process lock on `path` (flock on POSIX, msvcrt.locking on Windows): yields True when held, False when another process
+    holds it or locking is unavailable. It never waits, so the statusline is never blocked."""
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NONBLOCK', 0), 0o600)
+    except OSError:
+        yield False
+        return
+    held = False
+    try:
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held = True
+        except (OSError, ImportError):
+            pass
+        yield held
+    finally:
+        if held:
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        os.close(fd)
+
+
+def record_quota(payload, db, now):
+    """Append the payload's quota readings to claude-quota.jsonl next to the history, only when they differ from the last recorded ones (kept in
+    claude-quota.last; an unreadable one counts as different). One short O_APPEND write, mode 0600, with the timestamp at full precision. The
+    append, the last-value update and the prune run under one non-blocking lock (claude-quota.lock): when another process holds it, this reading
+    is skipped. The file is pruned to the last 60 days above 5 MB. Returns True when a line was appended. Raises on any failure: the caller drops
+    it, the status line is never affected."""
+    values = quota_values(payload)
+    if values is None:return False
+    path = quota_path(db)
+    last = path.with_name(QUOTA_LAST)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with _lock(path.with_name(QUOTA_LOCK)) as held:
+        if not held:return False
+        try:
+            if json.loads(_read_small(last)) == values:return False
+        except (OSError, ValueError):pass
+        session = payload.get('session_id')
+        line = json.dumps(dict(ts=now.astimezone(timezone.utc).isoformat(), session=session if isinstance(session, str) else None, **values), sort_keys=True) + '\n'
+        fd = _open_private_append(path)
+        try:os.write(fd, line.encode('utf-8'))
+        finally:os.close(fd)
+        write_atomic(last, values)
+        _prune_quota(path, now)
+    return True
+
+
+def settings_path():
+    """Claude Code's settings file the setup snippet targets: $CLAUDE_CONFIG_DIR/settings.json, else ~/.claude/settings.json."""
+    config = os.environ.get('CLAUDE_CONFIG_DIR')
+    return (Path(config).expanduser() if config else Path.home() / '.claude') / 'settings.json'
+
+
+def recording_configured():
+    """Does the Claude Code statusline command carry --record-quota? True or False when a readable settings file (settings.json or
+    settings.local.json beside it) has a tokenatlas statusLine command; None (unknown) when none can be read or none names tokenatlas. Read only."""
+    base = settings_path()
+    found = False
+    for path in (base, base.with_name('settings.local.json')):
+        try:
+            command = (json.loads(path.read_text(encoding='utf-8')).get('statusLine') or {}).get('command')
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(command, str) and 'tokenatlas' in command and 'statusline' in command:
+            if '--record-quota' in command:return True
+            found = True
+    return False if found else None
 
 
 def tokens_text(n):
@@ -168,41 +366,50 @@ def _quote(arg, windows=None):
     return subprocess.list2cmdline([arg])
 
 
-def setup_text(db=None, command=None, windows=None):
+def setup_text(db=None, command=None, windows=None, record_quota=False):
     """The statusLine snippet for Claude Code's settings.json and where that file is; the file itself is never touched."""
-    config = os.environ.get('CLAUDE_CONFIG_DIR')
-    settings = (Path(config).expanduser() if config else Path.home() / '.claude') / 'settings.json'
+    settings = settings_path()
     command = command or executable()
     windows = os.name == 'nt' if windows is None else windows
     args = ([] if ' -m ' in command else [command]) + ([str(Path(db).expanduser().absolute())] if db is not None else [])
     unsafe = windows and any(WINDOWS_UNSAFE.search(a) for a in args)
     if ' -m ' not in command:command = _quote(command, windows)
     if db is not None:command += f' --db {_quote(str(Path(db).expanduser().absolute()), windows)}'
-    snippet = json.dumps({'statusLine': {'type': 'command', 'command': f'{command} statusline'}}, indent=2)
+    snippet = json.dumps({'statusLine': {'type': 'command', 'command': f"{command} statusline{' --record-quota' if record_quota else ''}"}}, indent=2)
     warning = ('Warning: a path in this command contains a character that cmd.exe treats specially (&, |, ^, %, ! ...) and that no quoting makes '
                'safe; install TokenAtlas (and the database) under a plain path, or check that the command works before relying on it.\n\n') if unsafe else ''
     return (f'{warning}Add this to {settings} (merge it into the existing JSON; this command never edits the file):\n\n{snippet}\n\n'
-            'Totals refresh whenever tokenatlas refresh, open or collect runs; context and quota are live.')
+            'Totals refresh whenever tokenatlas refresh, open or collect runs; context and quota are live.'
+            + (f' With --record-quota the statusline also appends the quota readings to {QUOTA_NAME} next to the history (account-wide; only while a Claude Code UI session is open).' if record_quota else ''))
 
 
 def run(argv, db=None, stdin=None, now=None):
-    """Entry point: print one line and return 0, whatever happens; it writes nothing."""
+    """Entry point: print one line and return 0, whatever happens. It writes nothing unless --record-quota is given (record_quota)."""
     parser = argparse.ArgumentParser(prog='tokenatlas statusline', description='Claude Code statusline: reads its JSON payload on stdin and the cache refresh writes; no network.')
     parser.add_argument('--setup', action='store_true', help="Print the statusLine snippet for Claude Code's settings and its location, without editing it.")
+    parser.add_argument('--record-quota', action='store_true', help=f'Opt in: also append the 5-hour and weekly quota readings to {QUOTA_NAME} next to the history, when they changed.')
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:  # --help exits 0 after printing; a bad option must not break the status bar: fallback line, exit 0
         if exc.code not in (0, None):print('TokenAtlas')
         return 0
     if args.setup:
-        print(setup_text(db))
+        print(setup_text(db, record_quota=args.record_quota))
         return 0
     model = None
     try:
         payload = json.loads((stdin or sys.stdin).read(), parse_constant=lambda name: None)  # NaN/Infinity are missing values
         model = (payload.get('model') or {}).get('display_name') if isinstance(payload, dict) else None
-        cache = read_cache(cache_path(db if db is not None else state_dir() / 'history.sqlite3'))
-        print(render(payload, cache, now or datetime.now(timezone.utc)))
+        cache = read_cache(cache_path(db if db is not None else default_db()))
+        now = now or datetime.now(timezone.utc)
+        print(render(payload, cache, now))
     except Exception:
         print(model if isinstance(model, str) and model else 'TokenAtlas')
+        return 0
+    if args.record_quota:
+        try:
+            sys.stdout.flush()
+            record_quota(payload, db if db is not None else default_db(), now)
+        except Exception:
+            pass  # no snapshot rather than a failed status line
     return 0

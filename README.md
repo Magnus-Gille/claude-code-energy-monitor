@@ -62,7 +62,7 @@ Off until you opt in:
 
 `tokenatlas` imports Claude, Codex, Pi, and OpenCode observations into a local SQLite
 history. It needs Python 3.10+ and the standard library, makes no network or LLM
-calls, and does not change your installed statusline.
+calls, and does not change your installed statusline (the statusline command only records anything if you opt in with `--record-quota`, see below).
 
 ```bash
 # Default store: ~/.local/state/tokenatlas/history.sqlite3 (or XDG_STATE_HOME)
@@ -305,13 +305,25 @@ Energy appears in two places, always as an order-of-magnitude proxy and never as
 
 ### Subscription quota
 
-On a subscription, list price is not what you pay; the vendor's usage limit is. For Codex, `tokenatlas top` (and its `--json`
+On a subscription, list price is not what you pay; the vendor's usage limit is. For Codex (from its rollouts) and, if you opt in, for Claude Code (from the statusline, see [Claude quota snapshots](#claude-quota-snapshots-opt-in)), `tokenatlas top` (and its `--json`
 as `quota_share`), the report's costliest turns and `insights` show a turn's share of the weekly or 5-hour limit: the
 account-wide percentage at the turn's last request minus the percentage before its first. When turns ran concurrently in the
 same window the movement is spread over them by list price and labeled an estimate. The report also lists the recent limit
-windows with their peak. The counter moves in whole percent (a turn that did not move it shows `< 1%`), covers the whole
+windows with their peak. Shares are shown as whole percent (Codex reports whole percent, Claude Code may report fractions; a turn that did not move the counter shows `< 1%`), covers the whole
 account (other devices and chat are not in the logs), and is not a conversion of dollars to percent. What the vendors expose,
 how well list price predicts the percentage, and the wording rules are in [docs/quota.md](docs/quota.md).
+
+#### Claude quota snapshots (opt in)
+
+Claude Code writes no quota history, so a Claude turn gets a share (`~6% of the 5-hour Claude limit`, or of the weekly limit)
+only if you let the statusline record it: add `--record-quota` to its command (`tokenatlas statusline --setup --record-quota`
+prints the settings entry). It then appends the 5-hour and weekly percentages and reset times from Claude Code's payload to
+`claude-quota.jsonl` (0600) next to the history database, only when a value changed, and prunes the file to the last 60 days
+above 5 MB. A write failure never changes the status line. `report`, `open`, `top` and `insights` read that file when it exists and
+join each reading to the turn of its session's latest request, with the same rules as for Codex. Coverage: snapshots exist
+only while a Claude Code UI session is open and its statusline refreshes (v2.1.80+, Pro/Max); `claude -p`, SDK runs and
+claude.ai chat are not recorded; the percentage is account-wide, so use on other devices moves it too. `tokenatlas doctor` (`claude_quota`) shows
+whether the statusline command is configured with `--record-quota`, whether the file exists, the number of snapshots and the age of the last one.
 
 ## Fixed context overhead
 
@@ -376,7 +388,7 @@ The line reads `Opus 4.8 | Ctx:42% | 5h:29% 7d:52% | D:2.0M ~2 kWh | W:45.3M ~20
 | `5h:29% 7d:52%` | Quota used in the 5-hour and 7-day windows (omitted when the payload has none) | Payload, live |
 | `D:` `W:` `M:` | Tokens and order-of-magnitude energy for today, the last 7 days and the last 30 days, across all harnesses | TokenAtlas history, as of the last refresh |
 
-Totals are the same numbers as the report (ambiguous observations excluded) and are only as fresh as the last `tokenatlas refresh`, `open` or `collect`, which write a small `statusline.json` (0600) next to the history database; schedule `collect` to keep them current. The statusline reads only that file, never the database, so a new day rolls the totals over without a rewrite. When the file is older than 45 minutes its time is appended, e.g. `(14:40)`; when it is missing, the totals are left out. It makes no network calls, uses no credentials and writes nothing; if anything goes wrong it prints a short fallback line. It starts without loading the history modules to stay fast on every status update.
+Totals are the same numbers as the report (ambiguous observations excluded) and are only as fresh as the last `tokenatlas refresh`, `open` or `collect`, which write a small `statusline.json` (0600) next to the history database; schedule `collect` to keep them current. The statusline reads only that file, never the database, so a new day rolls the totals over without a rewrite. When the file is older than 45 minutes its time is appended, e.g. `(14:40)`; when it is missing, the totals are left out. It makes no network calls and uses no credentials. By default it writes nothing; with the opt-in `--record-quota` it appends quota readings to `claude-quota.jsonl` (see [Claude quota snapshots](#claude-quota-snapshots-opt-in)). If anything goes wrong it prints a short fallback line. It starts without loading the history modules to stay fast on every status update.
 
 ## Retired checkout scripts
 
